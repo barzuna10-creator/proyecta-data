@@ -19,12 +19,12 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://proyecta-beta.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.include_router(proyectos.router)
 
 # Etapa 2 del motor de búsqueda (ver busqueda.py): alterna entre el buscador
