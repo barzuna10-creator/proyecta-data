@@ -1,0 +1,6602 @@
+[
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "pintura",
+    "tiempoMs": 1599,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 29,
+    "primeros8": [
+      {
+        "nombre": "Pintura Anticorrosiva Blanco Cuarto Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡5,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Negro Cuarto Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡5,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Poliuretano Gris",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡6,850",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Accesorio batidor de pintura",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡36,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "XILO REMOVEDOR P/PINTURA (LTR)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡7,241",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Aluminio Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡5,500",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Azul Marino Cuarto Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡5,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Corrostop Aluminio Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡6,250",
+        "esFamilia": true
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "pintura blanca",
+    "tiempoMs": 1550,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 24,
+    "primeros8": [
+      {
+        "nombre": "Spray línea blanca brillante blanco nieve 325 ml",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡5,695",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Supra Satinada Blanca Lanco",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡4,700",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Pintura Transito Blanca Galon Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡17,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Blanco Cuarto Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡5,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Corrostop Blanco Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡6,250",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Pintura Anticorrosiva Poliuretano Blanco Lanco",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡6,850",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Pintura Impermeabilizante Fastyl Blanco Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡4,750",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Pintura Impermeabilizante Siliconizer Blanco Lanco",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡6,500",
+        "esFamilia": true
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "pintura para exteriores",
+    "tiempoMs": 1559,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 5,
+    "totalTarjetasVisibles": 5,
+    "primeros8": [
+      {
+        "nombre": "Pintura Aerosol En Spray. Interiores Y Exteriores Alta Calidad 280Ml",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,463",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray Fluorescente 280Ml. Interiores Y Exteriores Alta Calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,732",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray Zinc Plateado 280Ml. Interiores Y Exteriores Alta Calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,557",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray Cromado Brillante 280Ml. Interiores Y Exteriores Alta Calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,544",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray Metalizado 280 Ml. Interiores Y Exteriores Alta Calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,477",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "lanco",
+    "tiempoMs": 1558,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 47,
+    "primeros8": [
+      {
+        "nombre": "LANCO SPRAY EVERWET 38604",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡9,960",
+        "esFamilia": false
+      },
+      {
+        "nombre": "LANCO SPRAY TITANIUM ALUMINIO 38822",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡5,661",
+        "esFamilia": false
+      },
+      {
+        "nombre": "LANCO SPRAY TITANIUM NEGRO 38821",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡5,661",
+        "esFamilia": false
+      },
+      {
+        "nombre": "LANCO SPRAY TITANIUM BLANCO 38820",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡5,661",
+        "esFamilia": false
+      },
+      {
+        "nombre": "LANCO SPRAY DORADO 38107 (25012)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡3,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "LANCO SPRAY FOSFORESCENTE NARANJA 38199",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡6,564",
+        "esFamilia": false
+      },
+      {
+        "nombre": "LANCO SPRAY FOSFORESCENTE ROSADO 38200",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡6,564",
+        "esFamilia": false
+      },
+      {
+        "nombre": "LANCO SPRAY MARINO TRANSPARENTE 38180",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡6,435",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "pintura 1 galon",
+    "tiempoMs": 1570,
+    "consoleErrors": [
+      "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    ],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 2,
+    "totalTarjetasVisibles": 2,
+    "primeros8": [
+      {
+        "nombre": "PINTURA 3 EN 1 DRY COAT SEMI LISO #DC481-4 GALON LANCO",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡20,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "PINTURA 3 EN 1 ULTRA DRY COAT BLANCO #DC2780-4 GALON LANCO",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡33,750",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "pintura anticorosiva",
+    "tiempoMs": 1561,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "esmalte sintetico",
+    "tiempoMs": 1560,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "brocha 2 pulgadas",
+    "tiempoMs": 1555,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 23,
+    "totalTarjetasVisibles": 23,
+    "primeros8": [
+      {
+        "nombre": "Brocha estándar 2\"",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡1,430",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Brocha profesional premium 2\"",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡3,415",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Brocha angular estándar 2\"",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡2,865",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Brocha profesional estándar 2\"",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡2,695",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Brocha de espuma de 2\"",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡695",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Brocha de pintar 2\"/ 50 Mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡771",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Brocha filamentos mixtos 11/2\" mango madera",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡1,195",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Brocha filamentos mixtos 1/2\" mango madera",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡795",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "thinner",
+    "tiempoMs": 1558,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 7,
+    "totalTarjetasVisibles": 5,
+    "primeros8": [
+      {
+        "nombre": "THINNER FINO (GLN)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡8,921",
+        "esFamilia": false
+      },
+      {
+        "nombre": "THINNER FINO (LTRO)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡3,074",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Thinner fino",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡3,555",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Thinner corriente",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡2,625",
+        "esFamilia": true
+      },
+      {
+        "nombre": "THINNER CORRIENTE PREMIUM (GLN)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Pinturas",
+        "precio": "₡8,023",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Ferretería Brenes",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Pinturas",
+    "termino": "pintura spray",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 49,
+    "primeros8": [
+      {
+        "nombre": "Spray Removedor Pintura + Color",
+        "proveedor": "El Lagar",
+        "categoria": "Pinturas",
+        "precio": "₡3,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray. Interiores Y Exteriores Alta Calidad 280Ml",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,463",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rust Oleum pintura en spray dorado destellos brillantes 290 g",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡9,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rust Oleum pintura en spray plateado destellos brillantes 290 g",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡9,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rust Oleum pintura en spray rojo destellos brillantes 290 g",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡9,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray Fluorescente 280Ml. Interiores Y Exteriores Alta Calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,732",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray Zinc Plateado 280Ml. Interiores Y Exteriores Alta Calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,557",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pintura Aerosol En Spray Cromado Brillante 280Ml. Interiores Y Exteriores Alta Calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,544",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "taladro",
+    "tiempoMs": 1566,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Taladro para Tierra",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡118,863",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro de Impacto 1010W",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡27,120",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bomba de Taladro 1M",
+        "proveedor": "Carbone Store",
+        "categoria": "Bombas",
+        "precio": "₡3,390",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Inalámbrico de 20V",
+        "proveedor": "Carbone Store",
+        "categoria": "Mandriles taladro - adaptadores",
+        "precio": "₡76,369",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Soporte Taladro Banco Jadever",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡14,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Soporte Vertical Taladro Jadever",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡10,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Eléctrico--Enchufe Usa 110V",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡30,632",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Mandril Para Taladro 1/4",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡881",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "taladro inalambrico 20v",
+    "tiempoMs": 1552,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 13,
+    "totalTarjetasVisibles": 13,
+    "primeros8": [
+      {
+        "nombre": "Taladro Inalámbrico de 20V",
+        "proveedor": "Carbone Store",
+        "categoria": "Mandriles taladro - adaptadores",
+        "precio": "₡76,369",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Inalambrico Sin Escobillas (Brushless) 20V",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡54,314",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro de impacto inalámbrico sin escobillas (Brushless) 20V",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡37,686",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Inalambrico 3/8\" 20V Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡44,050",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Inalámbrico de Litio Sin Cepillo de 20V",
+        "proveedor": "Carbone Store",
+        "categoria": "Mandriles taladro - adaptadores",
+        "precio": "₡89,788",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Juego de Taladro Inalámbrico de Litio 47pcs 20V",
+        "proveedor": "Carbone Store",
+        "categoria": "Mandriles taladro - adaptadores",
+        "precio": "₡56,204",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro inalámbrico y Llave de impacto 20V sin escobillas Brushless",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡52,771",
+        "esFamilia": false
+      },
+      {
+        "nombre": "DW TALADRO INALAMBRICO 1/2 20V DCD1007WW1 + BOLSO DWST834  (1034622350)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡229,950",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "El Lagar",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "milwaukee",
+    "tiempoMs": 1550,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Base Velcro Lijadora Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡5,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cabezal Cuerda Orillador Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡24,100",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cuchilla Autoretractil Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡8,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cuchilla Multi Usos Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡2,800",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Gorra Antigolpes Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡22,990",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Hielera Tela Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡48,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Marcador Amarillo Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡3,400",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Marcador Anaranjado Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡3,400",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "destornillador phillips",
+    "tiempoMs": 1574,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 6,
+    "totalTarjetasVisibles": 6,
+    "primeros8": [
+      {
+        "nombre": "Destornillador Phillips #1 de 4\"",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡2,295",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Destornillador Phillips PH3 × 200 mm HOTECHE con Punta Magnética",
+        "proveedor": "Carbone Store",
+        "categoria": "Destornillador Phillips",
+        "precio": "₡1,842",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Destornillador Phillips PH2 × 200 mm HOTECHE con Punta Magnética",
+        "proveedor": "Carbone Store",
+        "categoria": "Destornillador Phillips",
+        "precio": "₡1,200",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Destornillador Phillips Resistente A Golpes Ph3 X 250",
+        "proveedor": "Carbone Store",
+        "categoria": "Destornilladores",
+        "precio": "₡2,431",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Destornillador Phillips #2 x 4\" Stanley",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡2,395",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Juego de Puntas Phillips PH2 HOTECHE de 8 × 35 mm, 10 Piezas",
+        "proveedor": "Carbone Store",
+        "categoria": "Puntas para destornillador",
+        "precio": "₡3,177",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "sierra circular 7 1/4",
+    "tiempoMs": 1564,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 29,
+    "totalTarjetasVisibles": 29,
+    "primeros8": [
+      {
+        "nombre": "Sierra circular de 7-1/4\" 1500W",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡57,176",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra Circular 7 1/4\" M18 Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡174,900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra Circular 7 1/4\" M18 Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡395,990",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra circular de 7-1/4\" 1400W 110-120V",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡37,628",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra Circular 7 1/4\" 1400 W Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡56,990",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra Circular 7 1/4\" 20 V Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡49,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra Circular 7 1/4\" M18 Fuel Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡198,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra circular 7 1/4\" 1.500 W Bosch",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡84,950",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "El Lagar",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "martillo de una libra",
+    "tiempoMs": 1567,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 5,
+    "totalTarjetasVisibles": 5,
+    "primeros8": [
+      {
+        "nombre": "Martillo carpintero 8 lb Aksi",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡20,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Martillo carpintero 10 lb Aksi",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡19,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Martillo carpintero 4 lb Aksi",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡7,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Martillo carpintero 12 lb Aksi",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡29,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Martillo Antirebote Deadblow 2 Lb. Antichispa 900Gr .",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,857",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "taladro percutor",
+    "tiempoMs": 1559,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 31,
+    "totalTarjetasVisibles": 31,
+    "primeros8": [
+      {
+        "nombre": "Taladro Percutor 1/2 1100 W Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡45,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Percutor 1/2\" 680W Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡57,990",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Percutor 1/2\" 850W Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡33,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro percutor de 26 mm 110-120V 50/60Hz",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡57,891",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro Percutor 1/2\" 680 W Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡15,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro percutor 1/2\" 750 W Daewoo",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡14,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro percutor 1/2\" 600 W Einhell",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡23,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Taladro percutor 1/2\" 710 W Einhell",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡17,350",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "dewalt",
+    "tiempoMs": 1566,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Guante de uso general DeWALT",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡14,050",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Caja Herramienta 17\" Dewalt",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡23,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Esmeriladora 9\" 2400W Dewalt",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡139,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Caja Herramienta Plastica 17\" Dewalt",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡18,990",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Caja Herramienta Plastica Negra Apilable Dewalt",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡15,990",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sierra sable 1.400 W Dewalt",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡88,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guante de goma texturizado talla L DeWALT",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡3,395",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Medidor laser 50 m Dewalt",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡82,450",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "llave inglesa",
+    "tiempoMs": 1559,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Herramientas",
+    "termino": "desarmador",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 24,
+    "totalTarjetasVisibles": 24,
+    "primeros8": [
+      {
+        "nombre": "Desarmador plano",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡2,295",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desarmador Joyero 15 Piezas Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡12,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desarmador Joyero 6 Piezas Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡4,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desarmador Joyero 7 Piezas Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡5,850",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desarmador plano 3/8\"",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡4,755",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desarmador plano 1/4 pulgada",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡1,695",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desarmador Phillips #2 x 6\"",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡3,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desarmador Phillips #1 x 3\"",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡1,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "cable thhn",
+    "tiempoMs": 1565,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Cable THHN #10 Viakon verde",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡57,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "CONDUCEN CABLE 14 THHN ROJO (METRO) (UL) ECOPLUS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡266",
+        "esFamilia": false
+      },
+      {
+        "nombre": "CONDUCEN CABLE 4 THHN NEGRO (METRO) (UL) ECOPLUS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡2,729",
+        "esFamilia": false
+      },
+      {
+        "nombre": "CONDUCEN CABLE 14 THHN VERDE (METRO) (UL) ECOPLUS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡266",
+        "esFamilia": false
+      },
+      {
+        "nombre": "CONDUCEN CABLE 14 THHN NEGRO (METRO) (UL) ECOPLUS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡266",
+        "esFamilia": false
+      },
+      {
+        "nombre": "CONDUCEN CABLE 2 THHN VERDE (METRO) (UL) ECOPLUS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡4,424",
+        "esFamilia": false
+      },
+      {
+        "nombre": "CONDUCEN CABLE 2 THHN AZUL (METRO) (UL) ECOPLUS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡4,424",
+        "esFamilia": false
+      },
+      {
+        "nombre": "CONDUCEN CABLE 2 THHN ROJO (METRO) (UL) ECOPLUS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡4,424",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "cable 12 awg",
+    "tiempoMs": 1574,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 5,
+    "totalTarjetasVisibles": 5,
+    "primeros8": [
+      {
+        "nombre": "Cable automotriz # 12 AWG blanco",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡390",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable parlante 12 AWG transparente Miyako USA (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡540",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable TSJ 3 x 12 AWG (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡1,635",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable TSJ 2 x 12 AWG (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡1,370",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable TSJ 4 x 12 AWG negro (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡2,735",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "interruptor doble",
+    "tiempoMs": 1563,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 38,
+    "totalTarjetasVisibles": 38,
+    "primeros8": [
+      {
+        "nombre": "Interruptor Doble 15A 120V",
+        "proveedor": "Carbone Store",
+        "categoria": "De Palanca",
+        "precio": "₡1,528",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Interruptor doble grafito Lúzica",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡2,395",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Interruptor doble unipolar marfil",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡3,595",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Interruptor doble unipolar negro",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡4,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Interruptor doble unipolar blanco",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡3,595",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Interruptor doble blanco 15 A",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡7,325",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Interruptor doble 3 V grafito Lúzica",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡1,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Interruptor doble blanco 15 A Eagle",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡3,585",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "breaker 20 amp",
+    "tiempoMs": 1570,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "tomacorriente",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Tomacorriente ovalado doble",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡2,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Placa para Tomacorriente Doble Blanca",
+        "proveedor": "Carbone Store",
+        "categoria": "Placas",
+        "precio": "₡348",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tomacorriente sencillo + USB blanco",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡20,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tomacorriente sencillo + USB negro",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡24,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tomacorriente Superficial 50A 125V",
+        "proveedor": "Carbone Store",
+        "categoria": "Tomacorrientes e Interruptores",
+        "precio": "₡3,076",
+        "esFamilia": false
+      },
+      {
+        "nombre": "BT NOBILE TOMACORRIENTE DUPLEX CHAMPAGNE  AF2228TREBCH",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Electrico",
+        "precio": "₡5,197",
+        "esFamilia": false
+      },
+      {
+        "nombre": "BT NOBILE TOMACORRIENTE DUPLEX MARFIL AF2228TREM",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Electrico",
+        "precio": "₡4,281",
+        "esFamilia": false
+      },
+      {
+        "nombre": "BT NOBILE TOMACORRIENTE DUPLEX BLANCO AF2228TREB",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Electrico",
+        "precio": "₡4,281",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "cable numero 8",
+    "tiempoMs": 1571,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "extension electrica",
+    "tiempoMs": 1558,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Extensión Eléctrica Blanca 2x16 (9 Pies)",
+        "proveedor": "Carbone Store",
+        "categoria": "Cables - Extensiones electricas",
+        "precio": "₡2,049",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extensión Eléctrica Blanca 2x16 (12 Pies)",
+        "proveedor": "Carbone Store",
+        "categoria": "Cables - Extensiones electricas",
+        "precio": "₡3,041",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extensión Eléctrica Blanca 2x16 (15 Pies)",
+        "proveedor": "Carbone Store",
+        "categoria": "Cables - Extensiones electricas",
+        "precio": "₡3,316",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extensión Eléctrica Blanca 2x16 (20 Pies)",
+        "proveedor": "Carbone Store",
+        "categoria": "Cables - Extensiones electricas",
+        "precio": "₡4,161",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extensión Eléctrica Azul 3x16 (25 Pies)",
+        "proveedor": "Carbone Store",
+        "categoria": "Cables - Extensiones electricas",
+        "precio": "₡9,254",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TRUPER VOLTECK EXTENSION ELECTRICA VERDE 8MTS ED-8V (48032)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡3,922",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TRUPER VOLTECK EXTENSION ELECTRICA BLANCA 8MTS ED-8B (48030)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡3,153",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TRUPER VOLTECK EXTENSION ELECTRICA VERDE 6MTS ED-6V (48026)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡2,953",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "viakon",
+    "tiempoMs": 1549,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 7,
+    "totalTarjetasVisibles": 7,
+    "primeros8": [
+      {
+        "nombre": "Cable THHN #10 Viakon verde",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡57,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable THHN #6 Viakon azul (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡1,600",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable THHN #8 Viakon verde (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable TGP 2 x 14 Viakon negro (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡720",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable TGP 3 x 14 Viakon negro (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡1,000",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable TSJ-N 2 x 16 AWG Viakon negro (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡600",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cable TSJ-N 2 x 10 AWG Viakon negro (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡1,800",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "cinta aislante",
+    "tiempoMs": 1556,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 5,
+    "totalTarjetasVisibles": 5,
+    "primeros8": [
+      {
+        "nombre": "Cinta Aislante 0,13mm 19mmx20M",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡523",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta eléctrica aislante Scotch 130",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡15,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta eléctrica aislante industrial 20 m x 19 mm negra Tesa",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡2,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Parche, Cinta Aislante Para Reparacion De Fugas, Impermeable, Alto Rendimiento.10*20Cm - Negro",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,130",
+        "esFamilia": false
+      },
+      {
+        "nombre": "1 Pza- Cinta Adhesiva Aislante, 0.13 Mm 19 Mm X 20 M",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡589",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Electricidad",
+    "termino": "brecker",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "tubo pvc",
+    "tiempoMs": 1551,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Tubo PVC 4\" x 3 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡9,725",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC 2\" x 3 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡4,705",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC 3\" x 3 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡8,625",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC 4\" x 1 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡3,195",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC 3\" x 1 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡3,625",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC 2\" x 1 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡1,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TRUPER CORTADORA TUBO COT-PVC-X (12867)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Herramientas",
+        "precio": "₡9,368",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC SDR17 2\" x 3 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡23,550",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "tubo pvc 1/2 pulgada",
+    "tiempoMs": 1566,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 21,
+    "totalTarjetasVisibles": 21,
+    "primeros8": [
+      {
+        "nombre": "Tubo PVC 2\" x 1 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡1,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC 11/2\" x 1 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡1,400",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC SCH40 1/2\" x 1 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡1,410",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC De 1/2\" X 20' SDR13.5",
+        "proveedor": "Carbone Store",
+        "categoria": "Conexiones PVC",
+        "precio": "₡2,107",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC SDR17 1 1/2\" x 3 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡15,595",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC SDR17 1 1/2\" x 6 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡29,850",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC SCH40 1/2\" x 3 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡3,415",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo PVC SCH40 1/2\" x 6 m",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡6,825",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "codo pvc 90 grados",
+    "tiempoMs": 1568,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "llave de paso",
+    "tiempoMs": 1559,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 48,
+    "totalTarjetasVisibles": 48,
+    "primeros8": [
+      {
+        "nombre": "Llave de paso 1/2\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡7,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula De Bola 1/2\". Llave De Paso.",
+        "proveedor": "Carbone Store",
+        "categoria": "Válvulas y Llaves de Paso",
+        "precio": "₡1,246",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave de paso bola 1/2\" con rosca",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡1,560",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave de bola con paso reducido 1/2\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡5,725",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave Paso 1/2\" Pfister",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡5,600",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave Paso Bola 2 \" Pfister",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡20,810",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave Paso Compuerta 1\" Pfister",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡12,256.64",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave Paso Compuerta 2\" Pfister",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡38,940",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "teflon",
+    "tiempoMs": 1571,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 24,
+    "totalTarjetasVisibles": 24,
+    "primeros8": [
+      {
+        "nombre": "Teflón profesional 1\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta Teflón Paquete 10 Pcs  .NESSATI",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡826",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sarten De Aluminio Con Teflon (320 Mm)",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡18,259",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sarten De Aluminio Con Teflon (280 Mm)",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡14,967",
+        "esFamilia": false
+      },
+      {
+        "nombre": "COFLEX TEFLON 1*12M WT1-120  (2385720)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡413",
+        "esFamilia": false
+      },
+      {
+        "nombre": "COFLEX TEFLON 3/4*12M WT34-120 (2385715)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Griferia",
+        "precio": "₡321",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sarten De Aluminio Con Teflon Para Pancakes (300 Mm)",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡13,048",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta Teflon Ancho: 12Mm Espesor: 0.075Mm Longitud: 10M",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡144",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "valvula check",
+    "tiempoMs": 1561,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 9,
+    "totalTarjetasVisibles": 9,
+    "primeros8": [
+      {
+        "nombre": "Válvula check de bronce 2\" vertical MA faucet",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡24,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula check de bronce 1\" vertical MA faucet",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡9,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula check de bronce 1\" horizontal MA Faucet",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡11,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Filtros Para Válvula De Retención. Mallas De Acero Inoxidable Para Válvula Check.",
+        "proveedor": "Carbone Store",
+        "categoria": "Válvulas y Llaves de Paso",
+        "precio": "₡201",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula check de bronce 3/4\" vertical MA faucet",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡5,325",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula check de bronce 1/2\" vertical MA faucet",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡4,350",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula check de bronce 3/4\" horizontal MA Faucet",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡6,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Check Valve Valvula Antiretorno 180 Grados Conector Rapido 1/4\" X 1/4\"",
+        "proveedor": "Carbone Store",
+        "categoria": "Accesorios y Conectores de Filtros",
+        "precio": "₡1,798",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "reduccion sanitaria",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 13,
+    "totalTarjetasVisibles": 13,
+    "primeros8": [
+      {
+        "nombre": "Reducción sanitaria 6\" x 4\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡28,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reducción sanitaria 3\" a 2\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡2,675",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reducción sanitaria 4\" a 3\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡12,895",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reducción sanitaria 2\" x 11/4\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡2,015",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reducción sanitaria 3\" a 11/2\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡2,525",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reducción sanitaria 4\" x 3\" pared delgada",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡5,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reducción sanitaria 4\" a 2\" pared delgada",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡4,965",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reducción sanitaria 4\" a 2\" pared gruesa",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡7,925",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "durman",
+    "tiempoMs": 1567,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 27,
+    "totalTarjetasVisibles": 27,
+    "primeros8": [
+      {
+        "nombre": "Desague Flexible Blanco Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡8,370",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifon Botella Blanco Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡5,610",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifon Rigido Blanco Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡7,380",
+        "esFamilia": false
+      },
+      {
+        "nombre": "DURMAN CUBREVALVULA 6″ DURA 9010454",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Electrico",
+        "precio": "₡8,074",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desague Con Registro Blanco Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡8,380",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Desague Rigido Rp2 Blanco Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡10,610",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extension Sifon Plastica 180 mm Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡1,420",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tanque Industrial 1100 L Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡160,000",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "tuberia de cobre",
+    "tiempoMs": 1565,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 1,
+    "totalTarjetasVisibles": 1,
+    "primeros8": [
+      {
+        "nombre": "Abocinador Juego De 6 Brocas Expansor De Tubería Cobre",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,819",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Fontanería",
+    "termino": "yee sanitaria",
+    "tiempoMs": 1563,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 9,
+    "totalTarjetasVisibles": 9,
+    "primeros8": [
+      {
+        "nombre": "Yee sanitaria 11/2\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡4,135",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Yee sanitaria PVC 4\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡15,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Yee sanitaria PVC 3\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡14,350",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Yee sanitaria pared delgada 3\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡8,225",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Yee sanitaria pared delgada 2\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡4,435",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Yee sanitaria pared delgada 4\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡12,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Yee sanitaria PVC 11/4\"",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡4,185",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Yee sanitaria 2\" pared gruesa",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡5,375",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "cemento",
+    "tiempoMs": 1554,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 47,
+    "primeros8": [
+      {
+        "nombre": "Mezclador eléctrico de cemento",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡85,653",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cemento Blanco Por Kilo",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡620",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cemento Gris Por Kilo",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Holcim - cemento fuerte saco 50 kg",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡7,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cemento Portland blanco CIMSA 25 KG",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡9,025",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Juego para jardín de cemento",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡155,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "ROCKITE Cemento De Expansion De 25 LB.",
+        "proveedor": "Carbone Store",
+        "categoria": "Cemento de Anclaje Expansivo",
+        "precio": "₡39,934",
+        "esFamilia": false
+      },
+      {
+        "nombre": "ROCKITE Cemento De Expansion De 10 LB.",
+        "proveedor": "Carbone Store",
+        "categoria": "Cemento de Anclaje Expansivo",
+        "precio": "₡18,563",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "El Lagar",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "cemento gris",
+    "tiempoMs": 1577,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 11,
+    "totalTarjetasVisibles": 11,
+    "primeros8": [
+      {
+        "nombre": "Cemento Gris Por Kilo",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cemento Gris Uso General Alto Desempeño 50 Kg Progreso",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡7,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Panel Decorativo WPC Bambú 1.22m x 2.80m x5mm Gris, Cemento Texturizado",
+        "proveedor": "Carbone Store",
+        "categoria": "Paneles Decorativos",
+        "precio": "₡23,730",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Repisa Duetto melamina gris cemento 1,5 x 20 x 40 cm",
+        "proveedor": "EPA",
+        "categoria": "Muebles y organizacion",
+        "precio": "₡5,975",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Repisa Duetto melamina gris cemento 1,5 x 20 x 100 cm",
+        "proveedor": "EPA",
+        "categoria": "Muebles y organizacion",
+        "precio": "₡11,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Repisa Duetto melamina gris cemento 1,5 x 20 x 60 cm",
+        "proveedor": "EPA",
+        "categoria": "Muebles y organizacion",
+        "precio": "₡7,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Mortero Acabado 450 Gris 20 Kg Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡6,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Mortero Muro Seco Mpr150 Gris 20 Kg Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡4,450",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "varilla 3/8",
+    "tiempoMs": 1559,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 4,
+    "totalTarjetasVisibles": 4,
+    "primeros8": [
+      {
+        "nombre": "Varilla retorcida hierro forjado 3/8\"",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡3,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Varilla construcción nacional deformada #3 (3/8\") grado 40- 6 m de largo",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡1,700",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Varilla construcción nacional deformada #3 (3/8\") grado 60- 6 m de largo",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡1,880",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Set 2 piezas Cubo Socket Universal  3/8\"Varilla 1/4\"x50mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,441",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "block de cemento",
+    "tiempoMs": 1542,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "arena para construccion",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 6,
+    "totalTarjetasVisibles": 6,
+    "primeros8": [
+      {
+        "nombre": "Arena industrial en saco 30 kg",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡2,275",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arena de tajo (precio por metro cubico)",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡17,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arena de río saco 0.0189 m3",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡2,275",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arena para play premium saco 22,7 kg",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡9,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Mortero Seco Cemento Arena 40 Kg Supermix",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡3,200",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Concreto Seco Cemento Arena Piedra 40 Kg Supermix",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡3,200",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "holcim",
+    "tiempoMs": 1550,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 2,
+    "totalTarjetasVisibles": 2,
+    "primeros8": [
+      {
+        "nombre": "Holcim - cemento fuerte saco 50 kg",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡7,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cuneta concreto 12\" 29 x 4 x 96 cm Holcim",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡5,695",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "malla electrosoldada",
+    "tiempoMs": 1547,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 2,
+    "totalTarjetasVisibles": 2,
+    "primeros8": [
+      {
+        "nombre": "Malla electrosoldada calibre 4,11 mm 2,2 x 6 m",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡12,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Malla electrosoldada calibre 5,3 mm 2,2 x 6 m",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡20,850",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "cemento 50 kg",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 2,
+    "totalTarjetasVisibles": 2,
+    "primeros8": [
+      {
+        "nombre": "Holcim - cemento fuerte saco 50 kg",
+        "proveedor": "EPA",
+        "categoria": "Construccion",
+        "precio": "₡7,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cemento Gris Uso General Alto Desempeño 50 Kg Progreso",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡7,150",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "bloque",
+    "tiempoMs": 1560,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 16,
+    "totalTarjetasVisibles": 16,
+    "primeros8": [
+      {
+        "nombre": "Bloque enfriador para hielera Igloo",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡1,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bloque de cadena 2 TON*3M",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡45,849",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bloque de cadena 3 TON*3M",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡69,811",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bloque de cadena 1 TON*3M",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡38,796",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bloque limpiador inodoros EarthStone",
+        "proveedor": "EPA",
+        "categoria": "Limpieza",
+        "precio": "₡9,895",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Mortero Pega Bloque Tipo N Sur",
+        "proveedor": "El Lagar",
+        "categoria": "Construcción",
+        "precio": "₡4,200",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cobertor Para Bloque De Aluminio. Aluminio INOX. 5.8 Mt De Largo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡37,373",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cobertor Para Bloque De Aluminio. Aluminio NEGRO. 5.8 Mt De Largo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡37,373",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Construcción",
+    "termino": "concreto premezclado",
+    "tiempoMs": 1552,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "manguera de jardin",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 24,
+    "totalTarjetasVisibles": 24,
+    "primeros8": [
+      {
+        "nombre": "Carretilla Para Manguera De Jardin",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡27,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Carro de carrete de manguera de jardín",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡11,734",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Carro de carrete de manguera de jardín con rueda",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡15,204",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera de jardín bicapa 10 m 1/2\"",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡8,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Manguera de jardín con juego de boquillas de 4 piezas",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡8,568",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave De Manguera 1/2'' X 3/4''. Llave De Agua Para Jardín Cromada. Grifo.",
+        "proveedor": "Carbone Store",
+        "categoria": "Griferías - fregadores y lavamanos",
+        "precio": "Consultar precio",
+        "esFamilia": false
+      },
+      {
+        "nombre": "SUNCAST CARRITO PORTA MANGUERA JNF175B",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Jardineria",
+        "precio": "₡49,900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TRUPER PORTA MANGUERA 25MTS PORMA-50 -10390 (2201010)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Jardineria",
+        "precio": "₡16,431",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "tijeras de podar",
+    "tiempoMs": 1564,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 7,
+    "totalTarjetasVisibles": 7,
+    "primeros8": [
+      {
+        "nombre": "HO-Tijeras telescopicas para podar",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡12,926",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tijeras de podar de paso",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡26,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Tijeras de podar con mango de madera",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡5,093",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tijeras de podar de 6.5\"/165mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tijeras de podar de 7\"/180mm Hoja: Acero inoxidable",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,109",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tijeras de podar de 9\"/230mm Acero de alta calidad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,132",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Juego tijeras podar acero templado 3 piezas Landscapers Select",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡12,950",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "fertilizante",
+    "tiempoMs": 1547,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 18,
+    "totalTarjetasVisibles": 18,
+    "primeros8": [
+      {
+        "nombre": "Fertilizante fórmula completa",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡3,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Fertilizante orgánico de orquídeas",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡2,695",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Fertilizante urea 1,5 kg",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡4,195",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Fertilizante para orquídeas 1 litro",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡4,625",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Fertilizante uso directo 750 ml",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡2,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Fertilizante para rosas 1 litro",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡3,955",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Fertilizante todo propósito 500 g",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡4,895",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Fertilizante granulado urea 46% 5 kg",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡11,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "cortacesped",
+    "tiempoMs": 1564,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 4,
+    "totalTarjetasVisibles": 4,
+    "primeros8": [
+      {
+        "nombre": "Cortacésped inalámbrico 18 V Einhell",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡287,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cortacésped De Batería 18V 43 CM+2X4AH +Doble Cargador",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡165,974",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cortacésped y Cortasetos Inalámbrico HOTECHE de 7,2 V",
+        "proveedor": "Carbone Store",
+        "categoria": "Cortacésped y cortasetos inalámbrico",
+        "precio": "₡18,525",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cortagrama 20\" 139 cc Toyama",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡216,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "manguera 15 metros",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 16,
+    "totalTarjetasVisibles": 16,
+    "primeros8": [
+      {
+        "nombre": "Manguera Compresor Resorte 15 m Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡14,350",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera Compresor Aire 3/8\" X 15 m Campbell",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡23,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera reforzada 15 m x 1/2\" 130 psi",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡14,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera de aire 3/8\" x 15 m",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡23,850",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera Compresor Aire Hule Man 1/4\" 15 m Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡22,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera 15 m uso medio 5/8\"",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡18,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera 1/2\" 15 m tricapa reforzada uso comercial",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡24,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Manguera goma 3/8\" x 15 m 300 psi",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡35,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "carretillo",
+    "tiempoMs": 1569,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 22,
+    "totalTarjetasVisibles": 22,
+    "primeros8": [
+      {
+        "nombre": "Carretillo Ninos Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡16,000",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Carretillo con Rueda de 16\"",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡41,608",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Gata hidráulica Carretillo Capacidad: 3 TON",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡61,140",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Gata hidráulica Carretillo de 2 Toneladas",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡19,616",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TRUPER CARRETILLO BATEA PLASTICA CAT-60PL  ( 11777)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡45,971",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Carretillo Agricola Rojo 65 L + Pro",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡22,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Gata hidráulica Carretillo de 3 Toneladas Heavy Duty",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡232,699",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Gata hidráulica Carretillo 2.5Ton  mango giratorio 360°",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡53,806",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "Carbone Store",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "pala de jardineria",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "tierra abonada",
+    "tiempoMs": 1566,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 2,
+    "totalTarjetasVisibles": 2,
+    "primeros8": [
+      {
+        "nombre": "Tierra abonada 30 kg",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡4,425",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tierra abonada 17 litros",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡1,400",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "macetas",
+    "tiempoMs": 1552,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Base para macetas madera acabado natural",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡8,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Vaso guía grande",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡29,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Vaso girasol grande",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡29,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Maceta colgante terracota",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡1,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Maceta Camote ladrillo",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡19,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Maceta colgante plástica verde",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡1,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Maceta # 2 para orquídeas",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡4,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Canasta fondo redondo mediana",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡3,295",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Jardinería",
+    "termino": "guantes de jardineria",
+    "tiempoMs": 1569,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "tornillo",
+    "tiempoMs": 1556,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Prensa De Tornillo Para Madera",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,601",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo De Anclaje Para Spiders. Para Tubo Plano. Tornillo De Acero Inox Y Cuerpo En Galvanizado.",
+        "proveedor": "Carbone Store",
+        "categoria": "Sistema Fachada Arañas",
+        "precio": "₡8,651",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cubo Magnetico Tornillo Techo 10 mm",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡800",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cubo Magnetico Tornillo Techo 11 mm",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡1,000",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guia Union Oculta 1 Tornillo  Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡15,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guia Union Oculta 2 Tornillo  Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡18,900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Placa blanca de tornillo Decor",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡1,380",
+        "esFamilia": false
+      },
+      {
+        "nombre": "FLUIDMASTER TAPA P/TORNILLO BONE  7116",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡1,450",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "El Lagar",
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "tornillo para madera",
+    "tiempoMs": 1568,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 43,
+    "totalTarjetasVisibles": 43,
+    "primeros8": [
+      {
+        "nombre": "Prensa De Tornillo Para Madera",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,601",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para madera #9 3\" 10 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡680",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para madera #8 1\" 30 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡875",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para madera #10 1\" 20 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡625",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para madera #8 3\" 10 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡725",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para madera #8 2\" 20 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡925",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para madera #6 1\" 50 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡1,050",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para madera #6 2\" 25 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡900",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "tornillo 1/4 x 2",
+    "tiempoMs": 1570,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 20,
+    "totalTarjetasVisibles": 20,
+    "primeros8": [
+      {
+        "nombre": "Tornillo tirafondo 1/4\" x 2 1/2\" 5 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡575",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo tirafondo 1/4 x 2\" 5 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo tirafondo 1/4\" x 1 1/2\" 5 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡390",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TW TORNILLO P/FLANGER 1/4″ x 2 1/4″  SA-315 (P183)  TW 2200443",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡180",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo para concreto cabeza plana 1/4\" x 2 1/4\" 10 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡1,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo de carrocería 1/4\" x 2 1/2\" 5 uds incluye tuercas",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡605",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo estufa cabeza redonda 1/4\" x 2 1/2\" 6 uds incluye tuercas",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡1,320",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo cabeza hexagonal g2 1/4\" x 2 1/2\" 3 uds incluye tuercas",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡600",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "clavo",
+    "tiempoMs": 1568,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Pistola Fulminante Clavo Gypsum Ramset",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡46,990",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Punzon Clavo 3 Unidades Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡3,100",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Clavo Clavadora 1\" 5000 Unidades Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡4,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Clavo Clavadora 2\" 5000 Unidades Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡7,800",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Saca Clavo 9\" Smoothpull Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡10,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Clavo Clavadora 3/4\" 5000 Unidades Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡3,200",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Clavo Clavadora Neumatica 10 mm 5000 Unidades Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡2,050",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pegamento multiusos Súper Clavo 300 ml Lanco",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡5,975",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "tuerca hexagonal",
+    "tiempoMs": 1583,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 18,
+    "totalTarjetasVisibles": 18,
+    "primeros8": [
+      {
+        "nombre": "Tuerca hexagonal milimétrica 6 x 1",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡120",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tuerca hexagonal milimétrica 8 x 1,25 6 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡360",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo cabeza hexagonal g2 3/8\" x 4\" 1 ud incluye tuerca",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡400",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo cabeza hexagonal g2 5/8\" x 3\" 1 ud incluye tuerca",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡1,275",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo cabeza hexagonal g2 1/2\" x 3\" 1 ud incluye tuerca",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡700",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo cabeza hexagonal g2 5/8\" x 2\" 1 ud incluye tuerca",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡850",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo cabeza hexagonal g2 1/2\" x 5\" 1 ud incluye tuerca",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tornillo cabeza hexagonal g2 3/8\" x 6\" 1 ud incluye tuerca",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡480",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "perno",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 26,
+    "totalTarjetasVisibles": 26,
+    "primeros8": [
+      {
+        "nombre": "Anclaje de Perno tipo cuña de Acero Galvanizado",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡402",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Anclaje de Perno tipo cuña de Acero Inoxidable",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,094",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Perno Acero Inoxidable 316 Dia. 30X38mm. (C-3130SUS-10/38MM.).",
+        "proveedor": "Carbone Store",
+        "categoria": "Pernos Decorativos",
+        "precio": "₡10,155",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Perno de caña 5/8\" x 18\"",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡9,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rueda neumática goma perno 14,17\" soporta 150 kg",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡19,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Perno tipo J 10-24 x 1 7/8\"",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Dado Inferior Para Puertas De Madera O Aluminio. Para Perno Aleman.",
+        "proveedor": "Carbone Store",
+        "categoria": "Herrajes Fachadas Patch Fittings",
+        "precio": "₡2,653",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Perno De Araña Chico Dia. 44 Mm. Perforacion En Vidrio 33 Mm.",
+        "proveedor": "Carbone Store",
+        "categoria": "Sistema Fachada Arañas",
+        "precio": "₡5,860",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "tornillo autorroscante",
+    "tiempoMs": 1555,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "arandela",
+    "tiempoMs": 1565,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 24,
+    "totalTarjetasVisibles": 24,
+    "primeros8": [
+      {
+        "nombre": "Tornillo con arandela para policarbonato",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡19,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arandela plana 1\" 3 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡2,095",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TAPON CARTER SIN ARANDELA 3/4 RF (TCP12)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡4,170",
+        "esFamilia": false
+      },
+      {
+        "nombre": "SHINDAIWA ARANDELA ENGRASE P/ C270-C350  22015-13420",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Herramientas",
+        "precio": "₡238",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arandela plana 5/16\" 10 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arandela plana 1/2\" 5 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡975",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arandela plana 3/4\" 3 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡1,400",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arandela plana 3/8\" 10 uds",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡550",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "tornillos numero 8",
+    "tiempoMs": 1567,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Tornillería",
+    "termino": "torniyo",
+    "tiempoMs": 1568,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "casco de seguridad",
+    "tiempoMs": 1559,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 21,
+    "totalTarjetasVisibles": 21,
+    "primeros8": [
+      {
+        "nombre": "Casco de Seguridad",
+        "proveedor": "Carbone Store",
+        "categoria": "Seguridad Industrial",
+        "precio": "₡2,212",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Casco de Seguridad Hoteche",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,671",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Casco De Seguridad Blanco",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡3,305",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Casco de seguridad Azul",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡3,226",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Casco de seguridad Rojo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,906",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Casco de seguridad Amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,906",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Casco de seguridad",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,070",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Casco de seguridad Hoteche Amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,671",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "guantes de trabajo",
+    "tiempoMs": 1561,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 9,
+    "totalTarjetasVisibles": 9,
+    "primeros8": [
+      {
+        "nombre": "Guantes de Trabajo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,001",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guantes De Trabajo Gris 10",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡673",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guantes De Trabajo Talla: L",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡5,860",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guantes De Trabajo Blancos Talla 9",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡673",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guantes de Trabajo Poliester/PU Grises S.9",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡654",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guantes De Trabajo  Foam W. Dots S. 9",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,622",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guantes De Trabajo Nylon/Pu Black S. 10",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡673",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Guantes De Trabajo Nylon/Pu Black S. 9",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡673",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "lentes de seguridad",
+    "tiempoMs": 1567,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 29,
+    "totalTarjetasVisibles": 29,
+    "primeros8": [
+      {
+        "nombre": "Lentes de Seguridad Transparente",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,357",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Lentes de seguridad Cerrados",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡6,168",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Lentes de seguridad transparentes",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡678",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lentes de seguridad transparente antirrayadura y antiempañante 3M",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡7,000",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lentes de protección Virtua antiempañante transparente 3M",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡2,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Gafas para soldar",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡4,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lente de seguridad contra impactos transparente Delta Plus",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Careta fotosensible Furius Fenix",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡9,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "chaleco reflectivo",
+    "tiempoMs": 1565,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 3,
+    "totalTarjetasVisibles": 3,
+    "primeros8": [
+      {
+        "nombre": "Chaleco de seguridad reflectivo verde limón",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡4,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Chaleco Reflectivo De Seguridad Color Amarillo (Talla L)",
+        "proveedor": "Carbone Store",
+        "categoria": "Arnes y Chalecos",
+        "precio": "₡1,099",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Chaleco Reflectivo De Seguridad Color Naranja (Talla L)",
+        "proveedor": "Carbone Store",
+        "categoria": "Arnes y Chalecos",
+        "precio": "₡1,108",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "arnes de seguridad",
+    "tiempoMs": 1564,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 14,
+    "totalTarjetasVisibles": 14,
+    "primeros8": [
+      {
+        "nombre": "Arnes De Seguridad Anticaidas",
+        "proveedor": "Carbone Store",
+        "categoria": "Arnes y Chalecos",
+        "precio": "₡8,989",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arnes De Seguridad Anticaidas",
+        "proveedor": "Carbone Store",
+        "categoria": "Arnes y Chalecos",
+        "precio": "₡15,685",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arnés seguridad 3 anillos de posicionamiento anticaidas",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡12,459",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arnés de seguridad 6 puntos de ajuste",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡26,473",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Arnes de seguridad + cordon absorbente de energia",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡21,526",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arnés de Seguridad para Mascota en Auto, Talla L",
+        "proveedor": "Carbone Store",
+        "categoria": "Cuidado y bienestar",
+        "precio": "₡5,370",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arnés de Seguridad para Mascota en Auto, Talla S",
+        "proveedor": "Carbone Store",
+        "categoria": "Cuidado y bienestar",
+        "precio": "₡4,570",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Arnés de Seguridad para Mascota en Auto, Talla XS",
+        "proveedor": "Carbone Store",
+        "categoria": "Cuidado y bienestar",
+        "precio": "₡5,461",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "botas de seguridad",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 21,
+    "totalTarjetasVisibles": 21,
+    "primeros8": [
+      {
+        "nombre": "Botas de seguridad de PVC encapsulada de acero",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡11,164",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zapatos de Seguridad tipo Botas Tamaño:38 Cuero amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡27,055",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zapatos de Seguridad tipo Botas Tamaño:39 Cuero amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡26,775",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zapatos de Seguridad tipo Botas Tamaño:40 Cuero amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡27,401",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zapatos de Seguridad tipo Botas Tamaño:41 Cuero amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡27,925",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zapatos de Seguridad tipo Botas Tamaño 42 Cuero amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡26,775",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zapatos de Seguridad tipo Botas Tamaño 43 Cuero amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡26,775",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zapatos de Seguridad tipo Botas Tamaño 44 Cuero amarillo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡29,202",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "mascarilla n95",
+    "tiempoMs": 1570,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "tapones para oidos",
+    "tiempoMs": 1558,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 3,
+    "totalTarjetasVisibles": 3,
+    "primeros8": [
+      {
+        "nombre": "Tapones para oídos E-A-Rsoft 3M",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Kit tapones para oídos 4 pares 3m",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapones para los oídos 2 pares incluye estuche",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "extintor",
+    "tiempoMs": 1564,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 9,
+    "totalTarjetasVisibles": 9,
+    "primeros8": [
+      {
+        "nombre": "Rótulo: \"Extintor\"",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo: \"Extintor ABC\"",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡2,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extintor recargable ABC 20 lb (9 kg)",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡42,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo extintor 20 x 20 cm",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extintor de espuma 400 ml fire stop",
+        "proveedor": "EPA",
+        "categoria": "Automotriz",
+        "precio": "₡2,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extintor de fuego recargable ABC 2,2 kg (5 lb)",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡10,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo: \"Extintor\" 23 x 7,5 cm",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡3,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Extintor de fuego recargable ABC 1,1 kg (2,5 lb)",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡6,450",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Seguridad",
+    "termino": "señalizacion",
+    "tiempoMs": 1561,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Rollo cinta de señalización 66 m rojo y blanco Tesa",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡10,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rollo cinta de señalización 66 m amarillo y negro Tesa",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡10,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo: \"Salida\"",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo adhesivo Ley 7600",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,295",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo: \"Extintor\"",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo de salida de emergencia",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo: \"Se Alquila\"",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rótulo: \"Se Vende\"",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡1,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "candado",
+    "tiempoMs": 1566,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Candado anti-cizalla 90x58x18mm 525grs",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡9,257",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Candado de combinacion Padlock 50mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,143",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Candado para volante Majic",
+        "proveedor": "EPA",
+        "categoria": "Automotriz",
+        "precio": "₡9,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Candado U-Lock para bicicleta 195x245mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡7,506",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cadena propileno con candado protector 10x10x1100mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡11,780",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Base soldable para candado",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡1,350",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TOTAL CANDADO BRONCE 70MM TLK32702 (40000961)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Cerrajeria",
+        "precio": "₡8,975",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TOTAL CANDADO BRONCE 40MM TLK32402 (40000958)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Cerrajeria",
+        "precio": "₡3,632",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "cerradura de pomo",
+    "tiempoMs": 1569,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 19,
+    "totalTarjetasVisibles": 19,
+    "primeros8": [
+      {
+        "nombre": "Pomo cerradura pestillo Bilbao negro mate",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡14,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cerradura pomo  bronce antiguo 60mm grosor puerta 30-45mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,030",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cerradura de pomo Acero inoxidable 60mm grosor 30-45mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡3,944",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pomo con llave pestillo y cerradura Cove bronce",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡15,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "YALE CERRADURA POMO YORK 1507 US11 COBRE C/LLAVE 10671",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Cerrajeria",
+        "precio": "₡8,900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "YALE CERRADURA POMO YORK 1502 US5 BRONCE S/LLAVE 8978",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Cerrajeria",
+        "precio": "₡7,900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "YALE CERRADURA POMO YORK 1502 US11 COBRE S/LLAVE 10672",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Cerrajeria",
+        "precio": "₡7,900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "YALE CERRADURA POMO YORK 1507 US5 BRONCE C/LLAVE 8980",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Cerrajeria",
+        "precio": "₡8,900",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "bisagra",
+    "tiempoMs": 1564,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Bisagra 90° Negro",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡9,698",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bisagra 135° Negro",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡8,452",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bisagra 180° negra",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡8,428",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bisagra sencilla negra",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡5,816",
+        "esFamilia": false
+      },
+      {
+        "nombre": "BISAGRA ACERO INOX.",
+        "proveedor": "Carbone Store",
+        "categoria": "Bisagras",
+        "precio": "₡6,882",
+        "esFamilia": false
+      },
+      {
+        "nombre": "BISAGRA DE ACERO INOX.",
+        "proveedor": "Carbone Store",
+        "categoria": "Bisagras",
+        "precio": "₡6,985",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Bisagra Para Soldar. 28 Mm.",
+        "proveedor": "Carbone Store",
+        "categoria": "Bisagras",
+        "precio": "₡2,974",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sub-Conector Bisagra-Cabezal Brillante. Para Bisagra L-2341. Alta Calidad. 10 Años De Garantia",
+        "proveedor": "Carbone Store",
+        "categoria": "Herrajes para Duchas",
+        "precio": "₡8,288",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "cinta metrica 5 metros",
+    "tiempoMs": 1572,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 13,
+    "totalTarjetasVisibles": 13,
+    "primeros8": [
+      {
+        "nombre": "Cinta Metrica Magnetica Compacta 5 m Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡14,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta métrica profesional 7,5 m x 32 mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡5,093",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta Metrica 1\" X 5 m Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡3,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta Metrica 1\" X 5 m Knight",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡5,100",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta métrica 3/4\" x 5 m",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡5,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta Metrica 3/4\" X 5 m Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡2,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta Metrica 5/8\" X 3 m Ingco",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡1,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta métrica 5 m carcasa bimaterial cubierta nylon WORKPRO",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡2,515",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "silicon",
+    "tiempoMs": 1564,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 48,
+    "primeros8": [
+      {
+        "nombre": "Pistola de Silicon 80W",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,374",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pistola de Silicon 10W",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡3,571",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Silicón antihongos 280 ml transparente",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡5,125",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pistola de silicón inalámbrica 18V",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡42,691",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Silicon en Barra de 1Kg",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,727",
+        "esFamilia": false
+      },
+      {
+        "nombre": "8 Pzas Silicon en barra",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡526",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Silicón uso general transparente",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡3,150",
+        "esFamilia": true
+      },
+      {
+        "nombre": "Silicón uso general 280 ml blanco",
+        "proveedor": "EPA",
+        "categoria": "Pinturas",
+        "precio": "₡5,125",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "pegamento epoxico",
+    "tiempoMs": 1581,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "abrazadera",
+    "tiempoMs": 1554,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 43,
+    "totalTarjetasVisibles": 43,
+    "primeros8": [
+      {
+        "nombre": "Abrazadera De Esquina",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "Consultar precio",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Abrazadera F 50x200mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,468",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Abrazadera F 50x250mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,619",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Abrazadera F 50x150mm",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,343",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Abrazadera Plástico De Liberación Rápida",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡2,494",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Multímetro de abrazadera digital - Industrial",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡16,977",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Abrazadera F Toda de Acero",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡11,680",
+        "esFamilia": false
+      },
+      {
+        "nombre": "HO-Abrazadera de barra de trinquete rápida",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡3,018",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "gancho para pared",
+    "tiempoMs": 1552,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 4,
+    "totalTarjetasVisibles": 4,
+    "primeros8": [
+      {
+        "nombre": "Gancho colibrí para pared 11\"",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡5,975",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Soporte Gancho Organizador De Pared Autoadhesivo Para Escoba, Trapeador",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡507",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Recibidor De Pared Para Cerradura De Gancho TD-8600A13A De Sistema Plegable",
+        "proveedor": "Carbone Store",
+        "categoria": "Sistema Puerta Plegable Acordeón",
+        "precio": "₡2,711",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Soporte Gancho Organizador De Pared Para Escoba O Trapeador  Color Gris Con Doble Abrazadera 7.2 × 5 Cm Lavanderia Clip",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,694",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "cadena galvanizada",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 5,
+    "totalTarjetasVisibles": 5,
+    "primeros8": [
+      {
+        "nombre": "Cadena galvanizada 5/16\" G30 soporta hasta 1200 kg (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡4,695",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cadena galvanizada 3/16\" G30 soporta hasta 400 kg (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡2,295",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cadena galvanizada 1/4\" G30 soporta hasta 750 kg (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡2,595",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cadena galvanizada 3/8\" G30 soporta hasta 1700 kg (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡6,595",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cadena galvanizada 1/8\" G30 soporta hasta 200 kg (precio por metro)",
+        "proveedor": "EPA",
+        "categoria": "Ferreteria y cerrajeria",
+        "precio": "₡795",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Ferretería general",
+    "termino": "stanley",
+    "tiempoMs": 1572,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Filtro Aspiradora Stanley",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡6,690",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Nivel de línea Stanley",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Mini pistola aplicadora de adhesivo Stanley",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡5,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tijera aviador centro 10\" Stanley",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡8,875",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cepillo Manual 3C Stanley",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡32,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cepillo Manual 4C Stanley",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡32,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Repuesto Filtro Espuma Aspiradora Stanley",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡5,690",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Escuadra combinada 12\" Stanley",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡7,525",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "porcelanato",
+    "tiempoMs": 1569,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Cortadora Porcelanato Rubi",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡897,800",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Porcelanato cuadrado Feroe gris 2,0 m²",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡31,675",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Porcelanato cuadrado Feroe greige 2,0 m²",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡31,675",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Broca Sierra Porcelanato 3 Piezas Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡23,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cortadora Porcelanato con Bolsa Rubi",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡253,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cortadora Porcelanato con Bolsa Rubi",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡362,800",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Porcelanato cuadrado Feroe greige mate 1,41 m²",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡18,695",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cortadora Porcelanato Profesional 1.2 m",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡305,500",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "ceramica para piso",
+    "tiempoMs": 1574,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 47,
+    "totalTarjetasVisibles": 47,
+    "primeros8": [
+      {
+        "nombre": "Maceta de piso Nubia cerámica 12 cm gris",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡3,295",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Maceta de piso Thalia cerámica 14 cm blanca",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡3,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Maceta de piso Nubia cerámica 12 cm blanca",
+        "proveedor": "EPA",
+        "categoria": "Exteriores",
+        "precio": "₡3,295",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Ceramica 51x51 cm Nevado blanca 2.08m2",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡10,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cerámica Laja 46 x 46 cm 2,58 m2",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡13,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cerámica 46 x 46 cm Carioca beige 2,58 m2",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡13,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cerámica 51 x 51 cm Porto multicolor 1,82 m2",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡11,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cerámica Vulcan Oxid 60 x 60 cm 1,44 m2",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡8,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "rodapie",
+    "tiempoMs": 1572,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Rodapié WPC 8 x 290 cm gris",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rodapié WPC 8 x 290 cm teca",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rodapié / Zócalo PVC Para Piso SPC- Color: Maple",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,119",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rodapié WPC 8 x 290 cm gris oscuro",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rodapié WPC 8 x 290 cm café oscuro",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rodapié pvc café 10 x 240 cm",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡6,125",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rodapié Curves blanco 8 x 250 cm",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Rodapié PVC negro 10 x 240 cm",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡6,125",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "moldura",
+    "tiempoMs": 1568,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Cuchilla Router Moldura Clasica Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡6,300",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cuchilla Router Redondeado Moldura Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡6,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cuchilla Router Redondeado Moldura 1\" Truper",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡4,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Moldura desnivel aluminio champán 3 m",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Moldura desnivel aluminio caoba 3 m",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Moldura desnivel aluminio 3 m plata",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Moldura desnivel aluminio wengué 3 m",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡7,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Moldura T aluminio plata 3 m",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡6,025",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "piso laminado",
+    "tiempoMs": 1569,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 16,
+    "totalTarjetasVisibles": 16,
+    "primeros8": [
+      {
+        "nombre": "Abrillantador de piso laminado 900 ml",
+        "proveedor": "EPA",
+        "categoria": "Limpieza",
+        "precio": "₡3,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Limpiador de piso laminado 900 ml",
+        "proveedor": "EPA",
+        "categoria": "Limpieza",
+        "precio": "₡2,845",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Piso laminado 6 mm Canadian 3,01 m²",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡20,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Piso laminado 7 mm Rock Ridge Oak  2,47 m²",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡19,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Piso laminado 7 mm Manhattan walnut 2.47 m² x caja",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡19,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Piso laminado HDF y madera 8mm café claro texturizado 2.26m2 residencial",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡26,050",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Piso laminado HDF y madera 8mm marron oscuro texturizado 2.26m2 residencial",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡23,350",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Piso laminado HDF y madera 8mm café oscuro texturizado 2.26m2 residencial",
+        "proveedor": "EPA",
+        "categoria": "Pisos",
+        "precio": "₡26,050",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "cornisa decorativa",
+    "tiempoMs": 1563,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "baldosa",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 6,
+    "totalTarjetasVisibles": 6,
+    "primeros8": [
+      {
+        "nombre": "Broca Baldosa y Piedra 1/4\" Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡4,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Broca Baldosa y Piedra 1/8\" Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡3,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Broca Baldosa y Piedra 3/16\" Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡4,100",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Broca Baldosa y Piedra 3/8\" Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡7,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Broca Baldosa y Piedra 5/16\" Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡5,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pisos Para Taller De PVC Suave Tipo Epóxico Plástico De Alta Resistencia Y Alto Tráfico Pvc Tiles Suelo Goma De Garaje Antideslizante  (50X50cm X 6Mm) (Se Vende Por Baldosa)",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡5,560",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "zocalo",
+    "tiempoMs": 1561,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Zócalo PVC Para Piso SPC- Color: Roble",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,300",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zócalo PVC Para Piso SPC- Color: Bambú",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡5,242",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zócalo PVC Para Piso SPC- Color: Fresno",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,119",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zócalo PVC Para Piso SPC- Color: Ébano",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡4,490",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa Zocalo 46 Mm.SSS",
+        "proveedor": "Carbone Store",
+        "categoria": "Zócalo Elite Puerta y Paños Fijos",
+        "precio": "₡1,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa Zocalo 80 Mm.PSS",
+        "proveedor": "Carbone Store",
+        "categoria": "Zócalo Elite Puerta y Paños Fijos",
+        "precio": "₡1,892",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa Zocalo 80 Mm.SSS",
+        "proveedor": "Carbone Store",
+        "categoria": "Zócalo Elite Puerta y Paños Fijos",
+        "precio": "₡1,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Zócalo PVC Para Piso SPC DE161 Golden Oak",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡3,895",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "porcelanato 60x60",
+    "tiempoMs": 1566,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Acabados",
+    "termino": "adhesivo para porcelanato",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 1,
+    "totalTarjetasVisibles": 1,
+    "primeros8": [
+      {
+        "nombre": "SUR MORTERO ADHESIVO PORCELANATO MPI 720 SACO 20K 39720-720",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Construccion",
+        "precio": "₡4,953",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "plomeria",
+    "tiempoMs": 1559,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Adaptador para máquina lavaplatos",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡4,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Pedal temporizado de agua",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡72,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Soporte para lavamanos reforzado",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡3,925",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Kit de instalación de lavaplatos",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡20,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Accesorio para inodoro de 6 litros",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡7,895",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Set completo para tanque inodoro Laguna",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡9,350",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Kit de instalación para ice maker",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡5,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifón flexible PVC",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡6,475",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "llave de lavamanos",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 21,
+    "totalTarjetasVisibles": 21,
+    "primeros8": [
+      {
+        "nombre": "Llave Mezcladora Para Lavamanos Zinc Cromada NESSATI",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡16,377",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave Mez Para Lavamanos Plástica Cromada NESSATI",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡10,032",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave De Lavamanos Individual. Acabado Cromado. Grifo.",
+        "proveedor": "Carbone Store",
+        "categoria": "Griferías - fregadores y lavamanos",
+        "precio": "₡3,699",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave Individual De Lavamanos Tipo Push Con Temporizador. NESSATI",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡21,277",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave Sencilla Para Lavamanos Maneral De Cruz Zinc Cromada NESSATI",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡12,956",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave De Lavamanos Individual. Grifo De Lavabo Color Negro.",
+        "proveedor": "Carbone Store",
+        "categoria": "Griferías - fregadores y lavamanos",
+        "precio": "Consultar precio",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave De Lavamanos Individual Maneral De Cruceta. Acabado Cromado. Grifo.",
+        "proveedor": "Carbone Store",
+        "categoria": "Griferías - fregadores y lavamanos",
+        "precio": "Consultar precio",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Llave De Lavamanos Individual Maneral De Cruceta.  Color Blanco. Grifo.",
+        "proveedor": "Carbone Store",
+        "categoria": "Griferías - fregadores y lavamanos",
+        "precio": "Consultar precio",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "sifon",
+    "tiempoMs": 1565,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Sifón flexible PVC",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡6,475",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifón 100 mm",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡5,825",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifon Botella Blanco Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡5,610",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifon Rigido Blanco Durman",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡7,380",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifón flexible con desagüe para lavamanos",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡9,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifón PVC 3\" pared gruesa",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡20,850",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifón flexible PVC pared y piso",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡7,025",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sifón PVC 2\" pared gruesa",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡10,650",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "inodoro",
+    "tiempoMs": 1570,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Tubos De Abasto Inodoro, NESSATI",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡607",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Inodoro plástico portátil tamaño estándar",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡37,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula De Entrada Reparación Inodoro NESSATI.",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡1,256",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa inodoro plástica redonda blanca",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡8,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa inodoro plástica elongada bone",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡9,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa inodoro redonda madera blanca",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡19,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa de inodoro elongada blanca",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡13,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tapa inodoro elongada madera bone",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡30,950",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "grifo monomando",
+    "tiempoMs": 1567,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Grifo Monomando De Lavabo",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡17,371",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo cocina cuello recto satin monomando",
+        "proveedor": "EPA",
+        "categoria": "Cocinas",
+        "precio": "₡45,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo lavamanos monomando Bruxie cromo pulido",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡143,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo lavamanos monomando cromado cuello alto palanca",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡42,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo lavamanos monomando cuello bajo gun metal",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡23,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo cocina cuello ganso monomando negro mate",
+        "proveedor": "EPA",
+        "categoria": "Cocinas",
+        "precio": "₡145,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo cuello ganso Venturi Spot Defense monomando",
+        "proveedor": "EPA",
+        "categoria": "Cocinas",
+        "precio": "₡224,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo para lavamanos monomando cuello alto cromado",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡69,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "flexible para inodoro",
+    "tiempoMs": 1572,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 12,
+    "totalTarjetasVisibles": 12,
+    "primeros8": [
+      {
+        "nombre": "COFLEX FLANGER P/INODORO FLEXIBLE 4 CORTO PB-205  (5140015)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡6,463",
+        "esFamilia": false
+      },
+      {
+        "nombre": "COFLEX FLANGER P/INODORO FLEXIBLE 4 LARGO PB-300  (5140018)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Ferreteria",
+        "precio": "₡9,558",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Accesorio Inodoro con Brida Flexible 4\" Coflex",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡9,900",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo Abasto Inodoro Metal Flexible 1/2 x 7/8\" x 40 cm Coflex",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡2,550",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo Abasto Inodoro Metal Flexible 1/2 X 7/8\" X 40 cm Coflex",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡2,800",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo Abasto Inodoro Metal Flexible 1/2 X 7/8\" X 40 cm Coflex",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡3,790",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo Abasto Inodoro Metal Flexible 1/2 x 7/8\" x 50 cm Coflex",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡2,880",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubo Abasto Inodoro Metal Flexible 1/2 x 7/8\" x 50 cm Coflex",
+        "proveedor": "El Lagar",
+        "categoria": "Fontanería",
+        "precio": "₡3,020",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Ferretería Brenes",
+      "El Lagar"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "destapador de canerias",
+    "tiempoMs": 1563,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 1,
+    "totalTarjetasVisibles": 1,
+    "primeros8": [
+      {
+        "nombre": "Trompo Eléctrico Destapador de Cañerías con Cable de 30 m x 1/2\", 110 V",
+        "proveedor": "Carbone Store",
+        "categoria": "Maquinas de plomeria",
+        "precio": "₡423,086",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "pega tubo pvc",
+    "tiempoMs": 1562,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "plomero",
+    "tiempoMs": 1558,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 1,
+    "totalTarjetasVisibles": 1,
+    "primeros8": [
+      {
+        "nombre": "Llave de plomero Stanley 11\"",
+        "proveedor": "EPA",
+        "categoria": "Herramientas",
+        "precio": "₡7,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA"
+    ]
+  },
+  {
+    "categoriaQA": "Plomería",
+    "termino": "lavamanos",
+    "tiempoMs": 1557,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Lavamanos elba vidrio dorado",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡44,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Tubos De Abasto Lavamanos, NESSATI",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡509",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lavamanos con pedestal Colony blanco",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡32,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lavamanos de sobreponer estella blanco",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡39,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Soporte para lavamanos reforzado",
+        "proveedor": "EPA",
+        "categoria": "Plomeria",
+        "precio": "₡3,925",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lavamanos Sanitario, De Accionamiento De Rodilla",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡99,905",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Grifo lavamanos monomando Bruxie cromo pulido",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡143,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Válvula para lavamanos a pared delta",
+        "proveedor": "EPA",
+        "categoria": "Baños",
+        "precio": "₡23,250",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "bombillo led",
+    "tiempoMs": 1570,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "TLD BOMBILLO LED E27 15W 6000K 018000328",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡1,150",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD BOMBILLO LED E27 20W 6000K 018000323",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡1,850",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD BOMBILLO LED P/EXTERIOR 2W 018000271",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡1,325",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD BOMBILLO LED MR16 7W 6500K (018000214)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡1,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD BOMBILLO LED G45 E27 5W 6000K 018000206",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡1,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD BOMBILLO LED GLOBO E27 12W 6000K 018000208",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡3,447",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD BOMBILLO LED TORPEDO E27 5W 3000K (018000166)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡1,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD BOMBILLO LED TORPEDO E14 5W 3000K (018000169)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡1,450",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "lampara colgante",
+    "tiempoMs": 1574,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "TLD LAMPARA COLGANTE 11012912",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡64,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD LAMPARA COLGANTE 11012911",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡29,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD LAMPARA COLGANTE 11012928",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡17,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD LAMPARA COLGANTE 11012913",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡49,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD LAMPARA COLGANTE 11012886",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡29,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD LAMPARA COLGANTE 11012885",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡23,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD LAMPARA COLGANTE REDONDA 11012927",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡14,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD LAMPARA COLGANTE REDONDA 11012904",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡44,500",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "bombillo 9 watts",
+    "tiempoMs": 1569,
+    "consoleErrors": [],
+    "sinResultados": true,
+    "errorConexion": false,
+    "totalResultadosTexto": null,
+    "totalTarjetasVisibles": 0,
+    "primeros8": [],
+    "proveedoresUnicosTop8": []
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "panel led",
+    "tiempoMs": 1560,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 50,
+    "totalTarjetasVisibles": 50,
+    "primeros8": [
+      {
+        "nombre": "Panel led blanco 54 W",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡35,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Panel led inteligente 6,5\"",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡7,595",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Panel led inteligente 4,5\"",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡6,795",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Panel led blanco 36 W luz blanca",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡28,500",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lampara Con Panel Solar Y Soporte LED 200W",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡40,631",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TLD PANEL LED CUADRADO 60*60 L/BLANCA 11012947",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡12,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Panel led sobreponer 18 W madera luz fría",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡8,175",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Panel led sobreponer 18 W bronce luz fría",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡8,175",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Carbone Store",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "reflector led 50w",
+    "tiempoMs": 1567,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 5,
+    "totalTarjetasVisibles": 5,
+    "primeros8": [
+      {
+        "nombre": "IM1 LAMPARA REFLECTOR LED 50W LUZ AMARILLA 60100D-WW",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡7,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM1 LAMPARA REFLECTOR LED PORTATIL RECARGABLE 50W 2000LM 60078C",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡52,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM1 LAMPARA REFLECTOR LED MULTICOLOR (RGB) 50W 60100D-RGB",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡17,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "G-FORCE SMART LAMPARA REFLECTOR LED 50W RGB 4500LM GF-SM50WFL-5CCT-BK",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Hogar",
+        "precio": "₡14,100",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM1 LAMPARA REFLECTOR LED 50W LUZ BLANCA GE-60055D-DL 6500K 100-227V 4500LM",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡7,450",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "luminaria",
+    "tiempoMs": 1561,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 21,
+    "totalTarjetasVisibles": 21,
+    "primeros8": [
+      {
+        "nombre": "Luminaria comercial antipolvo sobreponer 2 luces",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡14,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Luminaria comercial  sobreponer 2 luces 18 w",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡2,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Luminaria comercial led colgante 1 luz 30 w",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡40,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Luminaria de emergencia 60 led recargable",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡13,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Luminaria led hermética 36 W y 4.500 lm",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡18,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Luminaria de emergencia",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡15,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM1 LUMINARIA/HERMETICA 36W 6000K GE-61015C-2",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡26,000",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Luminaria led para exterior 150 W 6500 K color negro",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡34,950",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "bombilla",
+    "tiempoMs": 1561,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 1,
+    "totalTarjetasVisibles": 1,
+    "primeros8": [
+      {
+        "nombre": "Bombilla De Repuesto Para Lampara UV YA/T8",
+        "proveedor": "Carbone Store",
+        "categoria": "Sistema Pegamento Fotocurado Ultravioleta",
+        "precio": "₡30,801",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "sensor de movimiento",
+    "tiempoMs": 1556,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 38,
+    "totalTarjetasVisibles": 38,
+    "primeros8": [
+      {
+        "nombre": "Lampara Solar Con Sensor De Movimiento",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡12,845",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Sensor  De Movimiento (Unidad). Economico",
+        "proveedor": "Carbone Store",
+        "categoria": "Accesorios y Repuestos",
+        "precio": "₡21,970",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lámpara veladora led con sensor de movimiento",
+        "proveedor": "EPA",
+        "categoria": "Seguridad",
+        "precio": "₡6,595",
+        "esFamilia": false
+      },
+      {
+        "nombre": "TRUPER SENSOR DE MOVIMIENTO P/EXTERIOR SEMO (47231)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "General",
+        "precio": "₡4,740",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Reflector Rectangular con sensor de movimiento 6w LED",
+        "proveedor": "Carbone Store",
+        "categoria": "General",
+        "precio": "₡26,992",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM1 SENSOR DE MOVIMIENTO 32009A DE OJO MOVIBLE",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡6,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM1 SENSOR DE MOVIMIENTO 32004A DE TECHO EMPOTRAR GRANDE",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡7,750",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Lámpara sobreponer solar 6.500 K con sensor de movimiento",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡19,995",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "Carbone Store",
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "cinta led",
+    "tiempoMs": 1542,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 6,
+    "totalTarjetasVisibles": 6,
+    "primeros8": [
+      {
+        "nombre": "Cinta led inteligente con control remoto",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡11,995",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta LED neón inteligente RGB 5 m Nexxt Solutions",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡24,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Cinta led flexible interior RGB 24 W 5 m Sylvania",
+        "proveedor": "EPA",
+        "categoria": "Lamparas",
+        "precio": "₡17,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "GEL SMART CINTA LED RGB MUSICAL GE-SM92 IP65 60LEDS/M",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Hogar",
+        "precio": "₡13,110",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM3 CINTA LED COLOR AMARILLA 24W 5MTS GF-3528-012-18 60LEDS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡13,950",
+        "esFamilia": false
+      },
+      {
+        "nombre": "IM3 CINTA LED COLOR CALIDA P/INTERIOR 24W 5MTS DC GF-3528-002 60LEDS",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Iluminacion",
+        "precio": "₡13,950",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  },
+  {
+    "categoriaQA": "Iluminación",
+    "termino": "philips",
+    "tiempoMs": 1560,
+    "consoleErrors": [],
+    "sinResultados": false,
+    "errorConexion": false,
+    "totalResultadosTexto": 16,
+    "totalTarjetasVisibles": 16,
+    "primeros8": [
+      {
+        "nombre": "Punta Philips #1 2\" Shockwave Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡1,400",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Punta Philips #3 2\" Shockwave Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡1,650",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Mouse inalámbrico bluetooth negro Philips",
+        "proveedor": "EPA",
+        "categoria": "Electricidad",
+        "precio": "₡6,495",
+        "esFamilia": false
+      },
+      {
+        "nombre": "DW PUNTA PHILIPS CON TOPE DW2014",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Herramientas",
+        "precio": "₡1,300",
+        "esFamilia": false
+      },
+      {
+        "nombre": "PHILIPS SOPORTE PANTALLA LCD SQM6435/27 (LIQUIDACION)",
+        "proveedor": "Ferretería Brenes",
+        "categoria": "Hogar",
+        "precio": "₡37,078",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Punta Philips #1 2\" 2 Unidades Shockwave Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡1,450",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Punta Philips #2 1\" 5 Unidades Shockwave Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡3,250",
+        "esFamilia": false
+      },
+      {
+        "nombre": "Punta Philips #2 2\" 5 Unidades Shockwave Milwaukee",
+        "proveedor": "El Lagar",
+        "categoria": "Herramientas",
+        "precio": "₡5,600",
+        "esFamilia": false
+      }
+    ],
+    "proveedoresUnicosTop8": [
+      "El Lagar",
+      "EPA",
+      "Ferretería Brenes"
+    ]
+  }
+]

@@ -1,0 +1,632 @@
+{
+  "alambre": {
+    "proveedores": {
+      "Carbone Store": 27,
+      "EPA": 23
+    },
+    "top5": [
+      "Cepillos De Alambre Tubular",
+      "Alambre para jardín 30 m",
+      "Alambre navaja galvanizado 8 m",
+      "Alambre verde 100 m",
+      "Alambre galvanizado # 20 (Precio por metro)"
+    ],
+    "total": 50
+  },
+  "angulo": {
+    "proveedores": {
+      "Carbone Store": 36,
+      "EPA": 5,
+      "El Lagar": 4,
+      "Ferretería Brenes": 5
+    },
+    "top5": [
+      "Angulo Inoxidable 304 Decorativo",
+      "Taladro de ángulo de 10mm",
+      "Multímetro digital de angulo ajustable",
+      "Regla Angulo Digital Ingco",
+      "Adaptador Angulo Recto Impacto Shockwave Milwaukee"
+    ],
+    "total": 50
+  },
+  "block": {
+    "proveedores": {
+      "EPA": 21,
+      "El Lagar": 12,
+      "Ferretería Brenes": 3
+    },
+    "top5": [
+      "Pintura Seal Block Blanco Cuarto Sur",
+      "Pintura Seal Block Blanco Cubeta Sur",
+      "Pintura Seal Block Blanco Galon Sur",
+      "Espaciador para vidrio block blanco",
+      "Pintura Seal Block Satinada Blanco Cuarto Sur"
+    ],
+    "total": 36
+  },
+  "bosch": {
+    "proveedores": {
+      "EPA": 14,
+      "El Lagar": 18,
+      "Ferretería Brenes": 4
+    },
+    "top5": [
+      "Cuchilla Router Cortar Formica Bosch",
+      "Cuchilla Router Cortar Formica Bosch",
+      "Cuchilla Router Cortar Formica Bosch",
+      "Cuchilla Router Cuarto Redondo Bosch",
+      "Cuchilla Router Media Caña Bosch"
+    ],
+    "total": 36
+  },
+  "broca": {
+    "proveedores": {
+      "Carbone Store": 26,
+      "El Lagar": 24
+    },
+    "top5": [
+      "Broca Diamante",
+      "Juego de broca sierra y broca paleta de 3 piezas",
+      "Mandril Broca Sierra Mamposteria Broca Piloto 3/8\" Ivy",
+      "Broca de tierra",
+      "Broca Piloto Eje Broca Sierra 1/4\" X 4\" Milwaukee"
+    ],
+    "total": 50
+  },
+  "broca para concreto 3/8": {
+    "proveedores": {
+      "EPA": 8,
+      "El Lagar": 8,
+      "Ferretería Brenes": 3
+    },
+    "top5": [
+      "Broca Concreto 3/8 X 5\" Truper",
+      "Broca Concreto 1/8 X 2 3/8\" Intruder",
+      "Broca Concreto 3/8 X 4 3/4\" Intruder",
+      "Broca Concreto Hexagonal 3/8 x 12\" Milwaukee",
+      "Broca Concreto Hexagonal Multi material 3/8\" Milwaukee"
+    ],
+    "total": 19
+  },
+  "brocha": {
+    "proveedores": {
+      "Carbone Store": 9,
+      "EPA": 20,
+      "Ferretería Brenes": 21
+    },
+    "top5": [
+      "Brocha estándar 2\"",
+      "Brocha estándar 4\"",
+      "Brocha estándar 3\"",
+      "Brocha estándar 1\"",
+      "Brocha de espuma de 32"
+    ],
+    "total": 50
+  },
+  "cable 12 awg": {
+    "proveedores": {
+      "EPA": 5
+    },
+    "top5": [
+      "Cable automotriz # 12 AWG blanco",
+      "Cable parlante 12 AWG transparente Miyako USA (precio por metro)",
+      "Cable TSJ 3 x 12 AWG (precio por metro)",
+      "Cable TSJ 2 x 12 AWG (precio por metro)",
+      "Cable TSJ 4 x 12 AWG negro (precio por metro)"
+    ],
+    "total": 5
+  },
+  "cable thhn": {
+    "proveedores": {
+      "EPA": 22,
+      "Ferretería Brenes": 28
+    },
+    "top5": [
+      "Cable THHN #10 Viakon verde",
+      "CONDUCEN CABLE 14 THHN ROJO (METRO) (UL) ECOPLUS",
+      "CONDUCEN CABLE 4 THHN NEGRO (METRO) (UL) ECOPLUS",
+      "CONDUCEN CABLE 14 THHN VERDE (METRO) (UL) ECOPLUS",
+      "CONDUCEN CABLE 14 THHN NEGRO (METRO) (UL) ECOPLUS"
+    ],
+    "total": 50
+  },
+  "candado": {
+    "proveedores": {
+      "Carbone Store": 17,
+      "EPA": 14,
+      "Ferretería Brenes": 19
+    },
+    "top5": [
+      "Candado anti-cizalla 90x58x18mm 525grs",
+      "Candado de combinacion Padlock 50mm",
+      "Candado para volante Majic",
+      "Candado U-Lock para bicicleta 195x245mm",
+      "Cadena propileno con candado protector 10x10x1100mm"
+    ],
+    "total": 50
+  },
+  "cemento": {
+    "proveedores": {
+      "Carbone Store": 6,
+      "EPA": 13,
+      "El Lagar": 30,
+      "Ferretería Brenes": 1
+    },
+    "top5": [
+      "Mezclador eléctrico de cemento",
+      "Cemento Blanco Por Kilo",
+      "Cemento Gris Por Kilo",
+      "Holcim - cemento fuerte saco 50 kg",
+      "Cemento Portland blanco CIMSA 25 KG"
+    ],
+    "total": 50
+  },
+  "cemento gris": {
+    "proveedores": {
+      "Carbone Store": 1,
+      "EPA": 3,
+      "El Lagar": 7
+    },
+    "top5": [
+      "Cemento Gris Por Kilo",
+      "Cemento Gris Uso General Alto Desempeño 50 Kg Progreso",
+      "Panel Decorativo WPC Bambú 1.22m x 2.80m x5mm Gris, Cemento Texturizado",
+      "Repisa Duetto melamina gris cemento 1,5 x 20 x 40 cm",
+      "Repisa Duetto melamina gris cemento 1,5 x 20 x 100 cm"
+    ],
+    "total": 11
+  },
+  "cerradura": {
+    "proveedores": {
+      "Carbone Store": 35,
+      "EPA": 10,
+      "El Lagar": 1,
+      "Ferretería Brenes": 4
+    },
+    "top5": [
+      "CERRADURA AL CENTRO.",
+      "Cerradura Cuadrada Brillante",
+      "CERRADURA DE PISTILLO.",
+      "CERRADURA AL CENTRO. SATINADA",
+      "CERRADURA AL CENTRO SATINADA."
+    ],
+    "total": 50
+  },
+  "cerradura de pomo": {
+    "proveedores": {
+      "Carbone Store": 10,
+      "EPA": 5,
+      "Ferretería Brenes": 4
+    },
+    "top5": [
+      "Pomo cerradura pestillo Bilbao negro mate",
+      "Cerradura pomo  bronce antiguo 60mm grosor puerta 30-45mm",
+      "Cerradura de pomo Acero inoxidable 60mm grosor 30-45mm",
+      "Pomo con llave pestillo y cerradura Cove bronce",
+      "YALE CERRADURA POMO YORK 1507 US11 COBRE C/LLAVE 10671"
+    ],
+    "total": 19
+  },
+  "cinta metrica 5 metros": {
+    "proveedores": {
+      "Carbone Store": 2,
+      "EPA": 5,
+      "El Lagar": 6
+    },
+    "top5": [
+      "Cinta Metrica Magnetica Compacta 5 m Milwaukee",
+      "Cinta métrica profesional 7,5 m x 32 mm",
+      "Cinta Metrica 1\" X 5 m Ingco",
+      "Cinta Metrica 1\" X 5 m Knight",
+      "Cinta métrica 3/4\" x 5 m"
+    ],
+    "total": 13
+  },
+  "destornillador": {
+    "proveedores": {
+      "Carbone Store": 36,
+      "EPA": 6,
+      "El Lagar": 7,
+      "Ferretería Brenes": 1
+    },
+    "top5": [
+      "Punta De Destornillador",
+      "Destornillador Ratchet 53Pcs",
+      "Porta Puntas De Destornillador",
+      "Porta-Puntas De Destornillador",
+      "Puntas De Destornillador PH2"
+    ],
+    "total": 50
+  },
+  "dewalt": {
+    "proveedores": {
+      "EPA": 46,
+      "El Lagar": 4
+    },
+    "top5": [
+      "Guante de uso general DeWALT",
+      "Caja Herramienta 17\" Dewalt",
+      "Esmeriladora 9\" 2400W Dewalt",
+      "Caja Herramienta Plastica 17\" Dewalt",
+      "Caja Herramienta Plastica Negra Apilable Dewalt"
+    ],
+    "total": 50
+  },
+  "disco": {
+    "proveedores": {
+      "Carbone Store": 27,
+      "EPA": 6,
+      "El Lagar": 9,
+      "Ferretería Brenes": 8
+    },
+    "top5": [
+      "Disco De Diamante",
+      "Disco Cortador Metal",
+      "Disco + Mandril Dremel",
+      "Disco Cortador Para Metal",
+      "Disco De Diamante Segmentado"
+    ],
+    "total": 50
+  },
+  "escalera": {
+    "proveedores": {
+      "Carbone Store": 13,
+      "EPA": 28,
+      "Ferretería Brenes": 9
+    },
+    "top5": [
+      "Escalera de Aluminio",
+      "Escalera plástica 2 peldaños",
+      "Escalera de acero 2 peldaños",
+      "Escalera De Acero Inoxidable Para Piscina.",
+      "Escalera de extensión de tres secciones"
+    ],
+    "total": 50
+  },
+  "escalera 3 metros": {
+    "proveedores": {
+      "Carbone Store": 1,
+      "EPA": 8
+    },
+    "top5": [
+      "Escalera Multipropósito HOTECHE 4 x 3, Longitud 3,5 m",
+      "Moldura borde escalera aluminio caoba 3 m",
+      "Moldura borde escalera aluminio champán 3 m",
+      "Moldura borde escalera aluminio plata 3 m",
+      "Moldura borde escalera aluminio wengué 3 m"
+    ],
+    "total": 9
+  },
+  "ingco": {
+    "proveedores": {
+      "El Lagar": 50
+    },
+    "top5": [
+      "Carrete Motoguadaña Ingco",
+      "Carretilla Demoledor Ingco",
+      "Filtro Aspiradora Ingco",
+      "Cargador Bateria 20V Ingco",
+      "Cuchilla Cortadora Zacate Ingco"
+    ],
+    "total": 50
+  },
+  "lija": {
+    "proveedores": {
+      "Carbone Store": 4,
+      "EPA": 21,
+      "Ferretería Brenes": 25
+    },
+    "top5": [
+      "Lija para drywall",
+      "3M LIJA MADERA 36",
+      "Lija agua grano 600",
+      "Lija agua grano 360",
+      "Lija triangular 12 unidades"
+    ],
+    "total": 50
+  },
+  "llave": {
+    "proveedores": {
+      "Carbone Store": 33,
+      "EPA": 11,
+      "El Lagar": 6
+    },
+    "top5": [
+      "Llave Semiabierta",
+      "Llave corofija combinada",
+      "Llave Francesa Ajustable 250mm",
+      "Llave Francesa Ajustable 300mm",
+      "Llave Corofija/Combinada Cromada"
+    ],
+    "total": 50
+  },
+  "llave de tuerca 1/2 pulgada": {
+    "proveedores": {},
+    "top5": [],
+    "total": 0
+  },
+  "manguera": {
+    "proveedores": {
+      "Carbone Store": 24,
+      "EPA": 8,
+      "El Lagar": 7,
+      "Ferretería Brenes": 11
+    },
+    "top5": [
+      "Carrete De Manguera",
+      "Carrete de manguera automático",
+      "Carrete de manguera agua",
+      "Acople macho para manguera",
+      "Conector Hembra Manguera Campbell"
+    ],
+    "total": 50
+  },
+  "martillo": {
+    "proveedores": {
+      "Carbone Store": 22,
+      "EPA": 21,
+      "El Lagar": 7
+    },
+    "top5": [
+      "Martillo De Hojalatero",
+      "Martillo Venilla",
+      "Martillo De Goma 450G",
+      "Martillo De Carrocero 250G",
+      "Martillo De Porra 1500G"
+    ],
+    "total": 50
+  },
+  "martillo neumatico": {
+    "proveedores": {},
+    "top5": [],
+    "total": 0
+  },
+  "perno": {
+    "proveedores": {
+      "Carbone Store": 20,
+      "EPA": 6
+    },
+    "top5": [
+      "Anclaje de Perno tipo cuña de Acero Galvanizado",
+      "Anclaje de Perno tipo cuña de Acero Inoxidable",
+      "Perno Acero Inoxidable 316 Dia. 30X38mm. (C-3130SUS-10/38MM.).",
+      "Perno de caña 5/8\" x 18\"",
+      "Rueda neumática goma perno 14,17\" soporta 150 kg"
+    ],
+    "total": 26
+  },
+  "pintura": {
+    "proveedores": {
+      "EPA": 1,
+      "El Lagar": 48,
+      "Ferretería Brenes": 1
+    },
+    "top5": [
+      "Pintura Anticorrosiva Blanco Cuarto Sur",
+      "Pintura Anticorrosiva Negro Cuarto Sur",
+      "Pintura Anticorrosiva Poliuretano Gris Cuarto",
+      "Pintura Anticorrosiva Poliuretano Gris Galon",
+      "Accesorio batidor de pintura"
+    ],
+    "total": 50
+  },
+  "pintura 1 galon": {
+    "proveedores": {
+      "El Lagar": 2
+    },
+    "top5": [
+      "PINTURA 3 EN 1 DRY COAT SEMI LISO #DC481-4 GALON LANCO",
+      "PINTURA 3 EN 1 ULTRA DRY COAT BLANCO #DC2780-4 GALON LANCO"
+    ],
+    "total": 2
+  },
+  "pintura blanca": {
+    "proveedores": {
+      "EPA": 1,
+      "El Lagar": 4,
+      "Ferretería Brenes": 5
+    },
+    "top5": [
+      "Pintura Supra Satinada Blanca Cuarto Lanco",
+      "Pintura Supra Satinada Blanca Cubeta Lanco",
+      "Pintura Supra Satinada Blanca Galon Lanco",
+      "Pintura Transito Blanca Galon Sur",
+      "Spray línea blanca brillante blanco nieve 325 ml"
+    ],
+    "total": 10
+  },
+  "sierra": {
+    "proveedores": {
+      "Carbone Store": 24,
+      "EPA": 11,
+      "El Lagar": 15
+    },
+    "top5": [
+      "Sierra de corte transversal Dremel para mini sierra 546",
+      "Sierra De Metal",
+      "Sierra recíproca Industrial",
+      "Sierra Sable De Batería",
+      "Hoja sierra caladora"
+    ],
+    "total": 50
+  },
+  "sierra circular 7 1/4": {
+    "proveedores": {
+      "Carbone Store": 4,
+      "EPA": 13,
+      "El Lagar": 11,
+      "Ferretería Brenes": 1
+    },
+    "top5": [
+      "Sierra circular de 7-1/4\" 1500W",
+      "Sierra Circular 7 1/4\" M18 Milwaukee",
+      "Sierra Circular 7 1/4\" M18 Milwaukee",
+      "Sierra circular de 7-1/4\" 1400W 110-120V",
+      "Sierra Circular 7 1/4\" 1400 W Ingco"
+    ],
+    "total": 29
+  },
+  "silicon": {
+    "proveedores": {
+      "Carbone Store": 11,
+      "EPA": 29,
+      "Ferretería Brenes": 10
+    },
+    "top5": [
+      "Pistola de Silicon 80W",
+      "Pistola de Silicon 10W",
+      "Silicón antihongos 280 ml transparente",
+      "Pistola de silicón inalámbrica 18V",
+      "Silicon en Barra de 1Kg"
+    ],
+    "total": 50
+  },
+  "stanley": {
+    "proveedores": {
+      "EPA": 36,
+      "El Lagar": 11,
+      "Ferretería Brenes": 3
+    },
+    "top5": [
+      "Filtro Aspiradora Stanley",
+      "Nivel de línea Stanley",
+      "Mini pistola aplicadora de adhesivo Stanley",
+      "Tijera aviador centro 10\" Stanley",
+      "Cepillo Manual 3C Stanley"
+    ],
+    "total": 50
+  },
+  "taladro": {
+    "proveedores": {
+      "Carbone Store": 36,
+      "EPA": 3,
+      "El Lagar": 10,
+      "Ferretería Brenes": 1
+    },
+    "top5": [
+      "Taladro para Tierra",
+      "Taladro de Impacto 1010W",
+      "Bomba de Taladro 1M",
+      "Taladro Inalámbrico de 20V",
+      "Soporte Taladro Banco Jadever"
+    ],
+    "total": 50
+  },
+  "taladro 1/2": {
+    "proveedores": {
+      "Carbone Store": 5,
+      "EPA": 14,
+      "El Lagar": 20,
+      "Ferretería Brenes": 11
+    },
+    "top5": [
+      "Llave Chuck Taladro 1/2\"",
+      "Taladro de impacto de 1/2'' 650W",
+      "Adaptador para taladro 1/2\"",
+      "Shock Taladro 1/2 - 1/4\" Milwaukee",
+      "Llave Chuck Taladro 1/2\" Ingco"
+    ],
+    "total": 50
+  },
+  "teja": {
+    "proveedores": {
+      "EPA": 20,
+      "El Lagar": 17,
+      "Ferretería Brenes": 13
+    },
+    "top5": [
+      "Lámina techo teja colonial hierro # 26 0.46 mm 106 x 191 cm teja metalco",
+      "Lámina techo teja colonial hierro # 26 0.46 mm 105 x 366 cm teja metalco",
+      "Lámina techo teja colonial hierro # 26 0.46 mm 106 x 291 cm teja metalco",
+      "Lámina techo teja colonial hierro # 26 0.46 mm 106 x 261 cm teja metalco",
+      "Cumbrera teja colonial hierro # 28 0.32 mm 30 x 121 cm teja metalco"
+    ],
+    "total": 50
+  },
+  "tornillo": {
+    "proveedores": {
+      "Carbone Store": 11,
+      "EPA": 19,
+      "El Lagar": 11,
+      "Ferretería Brenes": 9
+    },
+    "top5": [
+      "Prensa De Tornillo Para Madera",
+      "Tornillo De Anclaje Para Spiders. Para Tubo Plano. Tornillo De Acero Inox Y Cuerpo En Galvanizado.",
+      "Cubo Magnetico Tornillo Techo 10 mm",
+      "Cubo Magnetico Tornillo Techo 11 mm",
+      "Guia Union Oculta 1 Tornillo  Truper"
+    ],
+    "total": 50
+  },
+  "truper": {
+    "proveedores": {
+      "EPA": 1,
+      "El Lagar": 49
+    },
+    "top5": [
+      "Remachadora Truper",
+      "Cautín Truper",
+      "Alicate Sacabocados Truper",
+      "Avellanador 7 Piezas Truper",
+      "Carretillo Ninos Truper"
+    ],
+    "total": 50
+  },
+  "tubo pvc 1/2 pulgada": {
+    "proveedores": {
+      "Carbone Store": 6,
+      "EPA": 15
+    },
+    "top5": [
+      "Tubo PVC 2\" x 1 m",
+      "Tubo PVC 11/2\" x 1 m",
+      "Tubo PVC SCH40 1/2\" x 1 m",
+      "Tubo PVC De 1/2\" X 20' SDR13.5",
+      "Tubo PVC SDR17 1 1/2\" x 3 m"
+    ],
+    "total": 21
+  },
+  "tuerca": {
+    "proveedores": {
+      "Carbone Store": 2,
+      "EPA": 42,
+      "El Lagar": 3,
+      "Ferretería Brenes": 3
+    },
+    "top5": [
+      "Cepillo circular de acero trenzado con tuerca",
+      "Tuerca de compresión 1/4\"",
+      "Tuerca 1/2\" 5 uds",
+      "Tuerca 3/8\" 10 uds",
+      "Tuerca 3/4\" 3 uds"
+    ],
+    "total": 50
+  },
+  "varilla": {
+    "proveedores": {
+      "Carbone Store": 7,
+      "EPA": 19,
+      "El Lagar": 13,
+      "Ferretería Brenes": 2
+    },
+    "top5": [
+      "Varilla Mezclador Mortero 4\"",
+      "Tig Pen Aportador De Varilla Tig.",
+      "Varilla cuadrada 12 mm- 6 metros",
+      "Varilla cuadrada 9 mm- 6 metros",
+      "Varilla Mezclador Mortero 80 mm Stanley"
+    ],
+    "total": 41
+  },
+  "varilla corrugada 3/8": {
+    "proveedores": {
+      "EPA": 2
+    },
+    "top5": [
+      "Varilla construcción nacional deformada #3 (3/8\") grado 40- 6 m de largo",
+      "Varilla construcción nacional deformada #3 (3/8\") grado 60- 6 m de largo"
+    ],
+    "total": 2
+  }
+}
