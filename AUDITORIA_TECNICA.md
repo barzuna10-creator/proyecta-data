@@ -149,3 +149,22 @@ Recorrido real con Playwright contra datos reales (búsqueda, caracteres especia
 - `nombre`/`comentario` de un proyecto no tienen `max_length` en el modelo Pydantic -- técnicamente se podría enviar un string arbitrariamente largo. Riesgo real bajo para el tamaño y uso actual del proyecto (herramienta de uso personal/pequeño, no una API pública multi-tenant a escala), no se corrigió para no introducir un límite arbitrario sin que el usuario decida el valor correcto.
 
 Verificación de regresión tras Fase 4: suite completa 68/68 `OK` (22 backend original + 46 nuevas), smoke test end-to-end de presupuestos contra datos reales reproduce exactamente los mismos resultados que antes del fix (el caso de precio desconocido no se presentó en los datos reales probados, así que el comportamiento visible no cambió para ningún caso ya validado).
+
+---
+
+## Fase 5 — Rendimiento
+
+### Verificado funcionando
+- **`PRAGMA journal_mode`** en `database/proyecta.db` confirmado en `wal` (persiste en el archivo, no solo en la sesión) -- el fix de Fase 2 está activo de verdad, no solo en el código.
+- **`EXPLAIN QUERY PLAN`** confirma `SEARCH productos USING INDEX idx_producto_familia` para `familia_id` (índice agregado en Fase 2) y, además, `SEARCH productos USING INDEX idx_producto_categoria` para `categoria` -- este segundo índice ya existía de una sesión anterior (parte del trabajo de Productos Similares), no fue necesario agregarlo.
+- `ProductGrid.tsx` con `useMemo` (Fase 2): confirmado lógicamente correcto -- única dependencia es `productos`, se recalcula solo cuando la lista real cambia, no en cada tecla de otros estados del componente padre.
+
+### Medido con datos reales: el hallazgo #23 de Fase 1 es un problema real, cuantificado
+- `obtener_similares()` para un producto de categoría "General" o "Herramientas" (las más grandes del catálogo) tarda **~200ms por llamada**, dominado por escanear y puntuar en Python cada fila de esa categoría (hasta ~5.000 filas) sin ningún filtro SQL previo a la fase de puntuación.
+- `calcular_presupuesto()` llama a `obtener_similares()` una vez POR CADA ítem pendiente del proyecto. Medido con un proyecto sintético de 15 ítems reales de esas categorías: **~3.0 segundos** de principio a fin, síncrono, dentro de una sola petición HTTP.
+- Para un proyecto real de cotización con 20-30 ítems en esas categorías, esto se acerca a 4-6+ segundos de latencia -- notorio para un usuario esperando ver su presupuesto, una vez que exista la UI (ver Fase 3: la UI de Presupuestos Inteligentes todavía no está construida).
+
+### Por qué no se corrigió en esta sesión
+La forma correcta de arreglar esto de fondo es evitar recalcular candidatos de la misma categoría una y otra vez para ítems del mismo proyecto (cachear por categoría dentro de una sola llamada a `calcular_presupuesto`, o acotar la consulta SQL antes de puntuar en Python) -- pero cualquiera de las dos requiere reestructurar `similares.py`, el módulo más cuidadosamente validado de todo este trabajo (determinístico, sin ML, probado contra las 6 categorías pedidas, con una advertencia explícita en su propio código de "no tocar" repetida en varios lugares de esta sesión). Fase 5 pide explícitamente "optimizaciones seguras" -- tocar la lógica de `similares.py` bajo presión de tiempo para ganar velocidad no calza con ese criterio. Se documenta aquí, medido y cuantificado, como la oportunidad de rendimiento de mayor impacto real para una sesión dedicada aparte.
+
+Verificación de regresión tras Fase 5: no se modificó código en esta fase (solo medición), suite completa sigue en 68/68 `OK`.
