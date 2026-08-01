@@ -216,7 +216,13 @@ def _crear_db_temporal():
             fecha_objetivo TEXT,
             token_compartido TEXT UNIQUE NOT NULL,
             fecha_creacion TEXT,
-            fecha_actualizacion TEXT
+            fecha_actualizacion TEXT,
+            cliente TEXT,
+            direccion TEXT,
+            area_m2 REAL,
+            indirectos_porcentaje REAL NOT NULL DEFAULT 0,
+            imprevistos_porcentaje REAL NOT NULL DEFAULT 0,
+            margen_porcentaje REAL NOT NULL DEFAULT 0
         )
         """
     )
@@ -239,6 +245,7 @@ def _crear_db_temporal():
             url_imagen_al_agregar TEXT,
             url_producto_al_agregar TEXT,
             fecha_agregado TEXT,
+            partida TEXT,
             UNIQUE(proyecto_id, proveedor, id_proveedor)
         )
         """

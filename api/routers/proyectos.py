@@ -29,6 +29,12 @@ class ActualizarProyectoRequest(BaseModel):
     comentario: str | None = None
     estado: str | None = None
     fecha_objetivo: str | None = None
+    cliente: str | None = None
+    direccion: str | None = None
+    area_m2: float | None = Field(default=None, gt=0)
+    indirectos_porcentaje: float | None = Field(default=None, ge=0)
+    imprevistos_porcentaje: float | None = Field(default=None, ge=0)
+    margen_porcentaje: float | None = Field(default=None, ge=0)
 
     _validar_nombre = field_validator("nombre")(_no_vacio)
 
@@ -44,6 +50,7 @@ class ActualizarItemRequest(BaseModel):
     estado: str | None = None
     prioridad: str | None = None
     comentario: str | None = None
+    partida: str | None = None
 
 
 @router.get("/compartido/{token}")
