@@ -237,7 +237,19 @@ def agregar_item(proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=
             fecha_agregado
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(proyecto_id, proveedor, id_proveedor)
-        DO UPDATE SET cantidad = cantidad + excluded.cantidad
+        DO UPDATE SET
+            -- Si el ítem ya existía pendiente, sumar es lo esperado (agregar
+            -- "2 más" de algo que ya estaba en la lista). Pero si estaba
+            -- descartado o comprado, sumarle a esa cantidad vieja no tiene
+            -- sentido -- el usuario está agregándolo de nuevo, no ajustando
+            -- una cantidad activa. Antes de este fix, reagregar un ítem
+            -- descartado no lo reactivaba (seguía sin aparecer en ningún
+            -- total) sin ningún error visible.
+            cantidad = CASE
+                WHEN estado = 'pendiente' THEN cantidad + excluded.cantidad
+                ELSE excluded.cantidad
+            END,
+            estado = 'pendiente'
         """,
         (
             proyecto_id, proveedor, id_proveedor, cantidad,

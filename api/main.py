@@ -1,13 +1,17 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import json
 import sqlite3
 
 from db import BASE_DATOS
 from api.routers import proyectos
+from api.identidad import obtener_propietario_id
 from busqueda import buscar_fts as _buscar_fts_motor
 from familias import analizar_nombre as _analizar_nombre_familia
 from reranking import reordenar as _reordenar_resultados
 from capa_intencion import detectar_concepto, PALABRAS_CONTEXTO_NORMALIZADAS
+from similares import obtener_similares as _obtener_similares_motor, LIMITE_DEFECTO as _LIMITE_SIMILARES_DEFECTO
+from presupuestos import calcular_presupuesto as _calcular_presupuesto_motor
 
 app = FastAPI(
     title="Proyecta CR API",
@@ -44,6 +48,15 @@ USE_RERANKING = True
 # Bandera independiente de las anteriores -- apagarla vuelve al buscador
 # exactamente como estaba antes de este experimento, sin tocar nada más.
 USE_INTENT_LAYER = False
+
+# Presupuestos inteligentes (ver ARQUITECTURA_PRESUPUESTOS_INTELIGENTES.md y
+# PRESUPUESTOS_INTELIGENTES.md): calcula ahorro comparando cada renglón de
+# un proyecto contra alternativas de otros proveedores, pero solo cuenta el
+# ahorro cuando la alternativa está CONFIRMADA como comparable (ver
+# presupuestos.py/especificaciones.py) -- nunca sobre una relación débil.
+# Bandera independiente de las demás -- apagarla hace que el endpoint
+# devuelva 404 sin tocar nada del resto de proyectos.
+USE_SMART_BUDGETS = True
 
 LIMITE_RESULTADOS = 50
 LIMITE_CANDIDATOS_RERANKING = 300
@@ -98,6 +111,48 @@ def _buscar_like(q):
     return productos
 
 
+def _serializar_producto(r):
+    """Convierte una fila de producto (de /buscar o de similares.py) al
+    dict que espera el frontend -- cobertura de estos campos varía mucho
+    por proveedor, se omiten si vienen NULL en vez de mandar el campo
+    vacío."""
+
+    item = {
+        "nombre": r["nombre"],
+        "precio": r["precio"],
+        "categoria": r["categoria"],
+        "proveedor": r["proveedor"],
+        "id_proveedor": r["id_proveedor"],
+        "url_producto": r["url_producto"],
+        "url_imagen": r["url_imagen"],
+    }
+
+    if r["marca"] is not None:
+        item["marca"] = r["marca"]
+    if r["sku"] is not None:
+        item["sku"] = r["sku"]
+    if r["subcategoria"] is not None:
+        item["subcategoria"] = r["subcategoria"]
+    if r["descripcion"] is not None:
+        item["descripcion"] = r["descripcion"]
+    if r["peso"] is not None:
+        item["peso"] = r["peso"]
+    if r["imagenes_adicionales"] is not None:
+        try:
+            item["imagenes_adicionales"] = json.loads(r["imagenes_adicionales"])
+        except ValueError:
+            pass
+
+    # Agrupación de variantes de presentación (solo Pinturas por ahora,
+    # ver familias.py) -- familia_id viene NULL para todo lo demás.
+    if r["familia_id"] is not None:
+        item["familia_id"] = r["familia_id"]
+        item["nombre_familia"] = r["nombre_familia"]
+        item["presentacion"] = _analizar_nombre_familia(r["nombre"])[2]
+
+    return item
+
+
 def _buscar_fts(q):
     categorias_permitidas = None
     exclusiones = None
@@ -128,29 +183,7 @@ def _buscar_fts(q):
             palabras_a_ignorar=palabras_a_ignorar,
         )
 
-    productos = []
-
-    for r in resultados:
-        item = {
-            "nombre": r["nombre"],
-            "precio": r["precio"],
-            "categoria": r["categoria"],
-            "proveedor": r["proveedor"],
-            "id_proveedor": r["id_proveedor"],
-            "url_producto": r["url_producto"],
-            "url_imagen": r["url_imagen"],
-        }
-
-        # Agrupación de variantes de presentación (solo Pinturas por ahora,
-        # ver familias.py) -- familia_id viene NULL para todo lo demás.
-        if r["familia_id"] is not None:
-            item["familia_id"] = r["familia_id"]
-            item["nombre_familia"] = r["nombre_familia"]
-            item["presentacion"] = _analizar_nombre_familia(r["nombre"])[2]
-
-        productos.append(item)
-
-    return productos
+    return [_serializar_producto(r) for r in resultados]
 
 
 @app.get("/buscar")
@@ -159,3 +192,30 @@ def buscar(q: str):
         return _buscar_fts(q)
 
     return _buscar_like(q)
+
+
+@app.get("/productos/similares")
+def productos_similares(proveedor: str, id_proveedor: str, limite: int = _LIMITE_SIMILARES_DEFECTO):
+    # Tope defensivo -- este endpoint es para la sección de la página de
+    # detalle (hasta 6 por diseño), no un listado general.
+    limite = max(1, min(limite, 12))
+
+    resultados = _obtener_similares_motor(proveedor, id_proveedor, limite=limite)
+
+    return [_serializar_producto(r) for r in resultados]
+
+
+@app.get("/proyectos/{proyecto_id}/presupuesto")
+def presupuesto_de_proyecto(
+    proyecto_id: int,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    if not USE_SMART_BUDGETS:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    presupuesto = _calcular_presupuesto_motor(proyecto_id, propietario_id)
+
+    if presupuesto is None:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return presupuesto
