@@ -105,3 +105,25 @@ No tocado en esta fase (documentado para Fase 6): #23 (consulta sin `LIMIT` en `
 No tocado en esta fase (documentado para Fase 6): #6–8 (duplicación estructural en `ProductCard`/`FamilyCard`, `proyectos/[id]/page.tsx`, `comparar/page.tsx` — refactors de mayor alcance), #12 (contraste de `--accent`, se atiende en Fase 3 UX), #18 (`obtenerProyectoCompartido` sin UI — feature a medio construir, no se completa ni se borra sin decisión del usuario), #19 (Playwright sin config committeada — se mantiene, ya se usa activamente como herramienta de verificación).
 
 Verificación de regresión tras Fase 2: `npx tsc --noEmit` limpio, `npx eslint app` sin errores nuevos, `next build` exitoso, suite de pruebas Python completa (22/22 `OK`), y el smoke test end-to-end de presupuestos reproduce exactamente los mismos resultados que antes de los cambios.
+
+---
+
+## Fase 3 — Recorrido de UX (como ingeniero civil cotizando materiales reales)
+
+Recorrido real con Playwright contra datos reales (búsqueda, caracteres especiales, sin resultados, detalle de producto, agregar a proyecto, lista/detalle de proyecto, comparación entre navegaciones completas, vista móvil de 390px).
+
+### Corregido
+- **#12 contraste de `--accent`** — ver commit de Fase 3 más arriba (~4.7:1 en modo claro, sin cambios en modo oscuro).
+- **Menú de "+ Proyecto" podía abrirse fuera de la pantalla** — al hacer clic en un producto cerca del borde inferior del viewport, el menú se abría hacia abajo sin comprobar si cabía, dejando "Todavía no tienes proyectos" / "+ Nuevo proyecto" fuera de vista sin scroll automático. Se acotó su alto a 320px con scroll interno y se agregó el mismo criterio de "flip" que ya usaba el clamp horizontal existente: si no cabe debajo, se abre hacia arriba.
+
+### Hallazgo importante, fuera de alcance de esta fase (no tocado: `busqueda.py`/`reranking.py` están congelados)
+- **Relevancia de búsqueda con falsos positivos por coincidencia literal de substring**: buscar "cemento" devuelve como resultado #1 "Quita cementos y limpia juntas MPL 1 litro" (un limpiador, no cemento) por encima de productos que sí son cemento. Buscar `varilla 1/2" #4` devuelve como resultado #1 un "Set 2 piezas Cubo Socket Universal" (herramienta, no varilla) por encima de dos varillas reales. Ambos casos son búsquedas que un ingeniero civil real haría literalmente el primer día de uso. Es un problema de ranking/relevancia en `busqueda.py`/`reranking.py`, explícitamente fuera de alcance de esta sesión (congelados por decisión previa del proyecto) — se documenta aquí como el hallazgo de UX de mayor impacto real, para decidir en otra sesión dedicada.
+
+### Verificado sin problema
+- Estado vacío ("Sin resultados") y guardas de búsqueda en blanco/espacios funcionan correctamente, sin llamadas de red innecesarias.
+- Selección de comparación persiste correctamente entre navegaciones completas de página (no solo client-side routing).
+- Vista móvil (390px): navbar, filtros colapsados en botón, tarjetas de producto y flujo de agregar a proyecto se adaptan correctamente. El subtítulo "Materiales y herramientas para tu proyecto" oculto en mobile es `hidden sm:block` intencional (decorativo, no es un enlace), no un bug.
+- Fallback de imagen rota, foco de teclado en el nombre del proyecto y navegación con Escape (fixes de Fase 2) verificados funcionando en el recorrido real.
+
+### No se construyó en esta fase (fuera del alcance "sin funcionalidades nuevas")
+- No existe ninguna UI para Presupuestos Inteligentes (`GET /proyectos/{id}/presupuesto`) en el detalle de proyecto — el backend está completo, probado y ahora commiteado, pero no tiene ninguna pantalla que lo muestre. Es trabajo pendiente de una feature ya aprobada en una sesión anterior, no una funcionalidad nueva de esta auditoría, pero construir la UI completa excede "mejoras pequeñas que no cambien el flujo principal". Se deja como oportunidad de alto impacto para Fase 6.
