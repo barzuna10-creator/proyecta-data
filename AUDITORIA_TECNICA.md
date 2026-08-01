@@ -127,3 +127,25 @@ Recorrido real con Playwright contra datos reales (búsqueda, caracteres especia
 
 ### No se construyó en esta fase (fuera del alcance "sin funcionalidades nuevas")
 - No existe ninguna UI para Presupuestos Inteligentes (`GET /proyectos/{id}/presupuesto`) en el detalle de proyecto — el backend está completo, probado y ahora commiteado, pero no tiene ninguna pantalla que lo muestre. Es trabajo pendiente de una feature ya aprobada en una sesión anterior, no una funcionalidad nueva de esta auditoría, pero construir la UI completa excede "mejoras pequeñas que no cambien el flujo principal". Se deja como oportunidad de alto impacto para Fase 6.
+
+---
+
+## Fase 4 — Pruebas nuevas e intentos de romper el sistema
+
+### Cobertura nueva (0% → cubierto)
+- **`tests/test_especificaciones.py`** (29 pruebas): extracción de cada spec (diámetro en pulgadas con enteros/fracciones/números mixtos/símbolo unicode, calibre con y sin "#", potencia, voltaje, longitud sin confundirse con "mm", peso en kg/lb, cantidad de unidades), casos límite (nombre vacío/`None`/sin specs), y las 4 combinaciones de `comparar_specs` (coincidencia, conflicto, asimetría, tolerancia de rendimiento) para cada categoría de spec (compatibilidad/unidad de venta/rendimiento).
+- **`tests/test_presupuestos.py`** (17 pruebas): `clasificar_equivalencia()` con diccionarios sintéticos (misma familia, presentación de pintura distinta dentro de la misma familia, conflicto de diámetro/calibre, reglas de subcategoría+marca+tokens, el caso real de tokens genéricos "por"/"kilo", asimetría de unidad de venta) y `calcular_presupuesto()` de punta a punta contra una base SQLite temporal (proyecto sin ítems, proyecto ajeno, proyecto inexistente, ítems descartados/comprados excluidos, alternativa confirmada aplicada, sin alternativa comparable).
+
+### Bug real encontrado escribiendo las pruebas (y corregido)
+- **Ahorro agregado podía quedar negativo cuando un ítem sin precio conocido tenía una alternativa confirmada.** `costo_actual` de un renglón sin `precio_actual` ni `precio_al_agregar` se computaba como 0 (no se puede saber cuánto cuesta hoy), pero `costo_optimizado` de ese mismo renglón sí incluía el precio real de la alternativa confirmada -- el agregado del proyecto completo restaba un costo real contra un costo actual ficticio de 0, mostrando un "ahorro confirmado" negativo sin sentido (verificado con datos sintéticos: -₡4,500 en un caso de una sola línea). No es el "ahorro engañoso hacia arriba" que preocupaba en el diseño original -- nunca se mostraba una ganancia falsa -- pero sí una cifra confusa. Corregido: cuando el precio es desconocido, el renglón no aporta nada al agregado (`costo_optimizado` también queda en 0), pero la alternativa recomendada se sigue mostrando en el detalle del renglón. Prueba de regresión: `test_item_sin_precio_no_infla_ahorro_agregado`.
+
+### Intentos de "romper el sistema" verificados sin problema
+- `cantidad` negativa o cero al agregar/actualizar un ítem: ya rechazada por Pydantic (`Field(gt=0)`) antes de llegar a la base de datos -- 422 limpio, no hay forma de guardar una cantidad inválida.
+- Producto inexistente en el catálogo al agregar a un proyecto: `agregar_item` lanza `ValueError`, el router lo traduce a un 422 con mensaje claro -- no es un 500 sin explicación.
+- Encabezado `X-Propietario-Id` ausente o en blanco: 400 explícito (`api/identidad.py`), no una excepción sin manejar.
+- Inyección SQL en cualquier parámetro (`q` de `/buscar`, `proveedor`/`id_proveedor` al agregar ítems): confirmado en Fase 1 que todo lo dinámico son placeholders `?`, no interpolación de texto.
+
+### Documentado, no corregido (impacto bajo)
+- `nombre`/`comentario` de un proyecto no tienen `max_length` en el modelo Pydantic -- técnicamente se podría enviar un string arbitrariamente largo. Riesgo real bajo para el tamaño y uso actual del proyecto (herramienta de uso personal/pequeño, no una API pública multi-tenant a escala), no se corrigió para no introducir un límite arbitrario sin que el usuario decida el valor correcto.
+
+Verificación de regresión tras Fase 4: suite completa 68/68 `OK` (22 backend original + 46 nuevas), smoke test end-to-end de presupuestos contra datos reales reproduce exactamente los mismos resultados que antes del fix (el caso de precio desconocido no se presentó en los datos reales probados, así que el comportamiento visible no cambió para ningún caso ya validado).

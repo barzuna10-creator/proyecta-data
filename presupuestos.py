@@ -195,10 +195,19 @@ def _evaluar_renglon(item):
     # distintas: acá "no se puede calcular" (None), no "no hay ahorro" (0).
     # Se sigue mostrando la alternativa confirmada aunque no se pueda decir
     # cuánto se ahorra, en vez de ocultarla por completo.
+    #
+    # precio_optimizado_unitario se deja en None (no en el precio de la
+    # alternativa) a propósito: costo_actual de este renglón ya es 0 por no
+    # tener precio conocido, así que si costo_optimizado tomara el precio
+    # real de la alternativa, el agregado de todo el proyecto restaría un
+    # costo real contra un costo_actual ficticio de 0 -- un ahorro agregado
+    # negativo sin sentido (encontrado escribiendo las pruebas de esta
+    # fase). Con ambos en 0, el renglón no distorsiona el agregado; el
+    # detalle por renglón sigue mostrando la alternativa igual.
     if precio_desconocido:
         alternativa_recomendada = mejor_confirmada
         ahorro_renglon = None
-        precio_optimizado_unitario = mejor_confirmada["precio"] if mejor_confirmada else None
+        precio_optimizado_unitario = None
     elif es_mas_barata:
         alternativa_recomendada = mejor_confirmada
         ahorro_renglon = round((precio_item - mejor_confirmada["precio"]) * cantidad, 2)
