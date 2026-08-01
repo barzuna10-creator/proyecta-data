@@ -2,7 +2,12 @@ from datetime import datetime
 
 import requests
 
-from crawlers.comun import guardar_productos
+from crawlers.comun import (
+    guardar_productos,
+    limpiar_html,
+    pedir_con_reintentos,
+    serializar_imagenes,
+)
 
 
 API_URL = "https://cr.epaenlinea.com/graphql"
@@ -47,6 +52,15 @@ query ($categoriaId: String!, $pagina: Int!, $tamanoPagina: Int!) {
             name
             url_key
             stock_status
+            description {
+                html
+            }
+            media_gallery {
+                url
+            }
+            ... on SimpleProduct {
+                weight
+            }
             price_range {
                 minimum_price {
                     final_price {
@@ -84,7 +98,8 @@ def descargar_categoria(categoria_id):
             },
         }
 
-        response = requests.post(
+        response = pedir_con_reintentos(
+            requests.post,
             API_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
@@ -133,6 +148,13 @@ def normalizar_producto(producto, categoria_nombre):
     )
 
     imagen = producto.get("image") or {}
+    descripcion_html = (producto.get("description") or {}).get("html")
+
+    # Todas las imágenes de la galería, sin repetir la que ya se usa como
+    # url_imagen principal (para no duplicarla en "imágenes adicionales").
+    galeria = producto.get("media_gallery") or []
+    imagen_principal = imagen.get("url")
+    imagenes_extra = [g.get("url") for g in galeria if g.get("url") != imagen_principal]
 
     return {
         "proveedor": "EPA",
@@ -145,13 +167,19 @@ def normalizar_producto(producto, categoria_nombre):
         "precio": round(precio_final) if precio_final is not None else None,
         "iva": None,
         "cabys": None,
-        "descripcion": None,
-        "url_imagen": imagen.get("url"),
+        "descripcion": limpiar_html(descripcion_html),
+        "url_imagen": imagen_principal,
         "url_producto": construir_url_producto(producto.get("url_key")),
         "compra_online": 1 if producto.get("stock_status") == "IN_STOCK" else 0,
         "fecha_actualizacion": datetime.now().strftime(
             "%Y-%m-%d %H:%M:%S"
         ),
+        # Peso tal como lo devuelve la API de EPA -- no se etiqueta la
+        # unidad porque no encontré ningún campo que la confirme
+        # explícitamente (ver informe: se infiere "gramos" por la magnitud
+        # típica, pero no está confirmado).
+        "peso": str(producto.get("weight")) if producto.get("weight") is not None else None,
+        "imagenes_adicionales": serializar_imagenes(imagenes_extra),
     }
 
 

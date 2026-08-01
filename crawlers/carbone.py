@@ -1,8 +1,15 @@
+import time
 from datetime import datetime
 
 import requests
 
-from crawlers.comun import guardar_productos
+from crawlers.comun import (
+    CABECERAS_NAVEGADOR,
+    guardar_productos,
+    limpiar_html,
+    pedir_con_reintentos,
+    serializar_imagenes,
+)
 
 
 API_URL = "https://carbonestore.cr/products.json"
@@ -16,12 +23,14 @@ def descargar_productos():
     productos_totales = []
 
     while True:
-        response = requests.get(
+        response = pedir_con_reintentos(
+            requests.get,
             API_URL,
             params={
                 "limit": TAMANO_PAGINA,
                 "page": pagina,
             },
+            headers=CABECERAS_NAVEGADOR,
             timeout=30,
         )
 
@@ -40,6 +49,7 @@ def descargar_productos():
         )
 
         pagina += 1
+        time.sleep(0.6)  # el endpoint empieza a devolver 429 tras ~28 páginas seguidas
 
     return productos_totales
 
@@ -50,6 +60,7 @@ def normalizar_producto(producto):
 
     imagenes = producto.get("images") or []
     url_imagen = imagenes[0]["src"] if imagenes else None
+    imagenes_extra = [img.get("src") for img in imagenes[1:]]
 
     precio = variante.get("price")
 
@@ -64,13 +75,17 @@ def normalizar_producto(producto):
         "precio": round(float(precio)) if precio is not None else None,
         "iva": None,
         "cabys": None,
-        "descripcion": None,
+        "descripcion": limpiar_html(producto.get("body_html")),
         "url_imagen": url_imagen,
         "url_producto": f"{SITIO}/products/{producto.get('handle')}",
         "compra_online": 1 if variante.get("available") else 0,
         "fecha_actualizacion": datetime.now().strftime(
             "%Y-%m-%d %H:%M:%S"
         ),
+        # "weight" del variant viene en 0 para prácticamente todo el
+        # catálogo muestreado -- no se guarda para no llenar la columna de
+        # ceros sin significado real.
+        "imagenes_adicionales": serializar_imagenes(imagenes_extra),
     }
 
 

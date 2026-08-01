@@ -133,7 +133,11 @@ def reconstruir_indice():
 
     conexion = conectar()
 
-    conexion.execute("DELETE FROM productos_fts")
+    # `productos_fts` es una tabla FTS5 "contentless" (content='') -- no
+    # soporta DELETE normal (SQLite lo rechaza: "cannot DELETE from
+    # contentless fts5 table"). El comando especial 'delete-all' es la
+    # forma correcta de vaciarla antes de reinsertar todo.
+    conexion.execute("INSERT INTO productos_fts(productos_fts) VALUES ('delete-all')")
 
     filas = conexion.execute(
         "SELECT id, nombre, categoria, subcategoria FROM productos"
@@ -232,6 +236,8 @@ def buscar_fts(
             SELECT
                 p.nombre, p.precio, p.categoria, p.proveedor,
                 p.id_proveedor, p.url_producto, p.url_imagen,
+                p.marca, p.sku, p.subcategoria, p.descripcion,
+                p.peso, p.imagenes_adicionales,
                 p.familia_id, f.nombre_familia,
                 bm25(productos_fts, {PESO_NOMBRE}, {PESO_CATEGORIA}, {PESO_SUBCATEGORIA}) AS puntaje
             FROM productos_fts
