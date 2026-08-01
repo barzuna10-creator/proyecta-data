@@ -23,11 +23,21 @@ from busqueda import normalizar_texto, tokenizar
 from conceptos_intencion import CONCEPTOS, PALABRAS_CONTEXTO
 
 _LOG_DIR = Path(__file__).resolve().parent / "logs"
-_LOG_DIR.mkdir(exist_ok=True)
 
 logger = logging.getLogger("capa_intencion")
 logger.setLevel(logging.INFO)
-if not logger.handlers:
+
+
+def _asegurar_handler():
+    # Perezoso a propósito: api/main.py importa este módulo incondicional-
+    # mente aunque USE_INTENT_LAYER esté apagada. Crear el directorio/log
+    # a nivel de import (como estaba antes) rompía ese "apagarla no toca
+    # nada más" en cualquier filesystem de solo lectura fuera de un
+    # directorio específico -- con la capa apagada, detectar_concepto()
+    # nunca se llama, así que este I/O nunca ocurre en absoluto.
+    if logger.handlers:
+        return
+    _LOG_DIR.mkdir(exist_ok=True)
     _handler = logging.FileHandler(_LOG_DIR / "intencion.log", encoding="utf-8")
     _handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
     logger.addHandler(_handler)
@@ -58,6 +68,7 @@ def detectar_concepto(consulta):
             continue
 
         nombre = definicion["nombre"]
+        _asegurar_handler()
         logger.info("consulta=%r concepto=%r", consulta, nombre)
 
         return {

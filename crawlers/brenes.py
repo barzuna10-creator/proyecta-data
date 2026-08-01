@@ -3,7 +3,7 @@ from datetime import datetime
 
 import requests
 
-from crawlers.comun import guardar_productos
+from crawlers.comun import guardar_productos, pedir_con_reintentos
 
 
 API_URL = "https://ferreteriabrenes.com/wp-json/wc/store/v1/products"
@@ -32,7 +32,8 @@ def descargar_categoria(categoria_id):
     productos_totales = []
 
     while True:
-        response = requests.get(
+        response = pedir_con_reintentos(
+            requests.get,
             API_URL,
             params={
                 "category": categoria_id,
