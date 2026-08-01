@@ -168,3 +168,40 @@ Verificación de regresión tras Fase 4: suite completa 68/68 `OK` (22 backend o
 La forma correcta de arreglar esto de fondo es evitar recalcular candidatos de la misma categoría una y otra vez para ítems del mismo proyecto (cachear por categoría dentro de una sola llamada a `calcular_presupuesto`, o acotar la consulta SQL antes de puntuar en Python) -- pero cualquiera de las dos requiere reestructurar `similares.py`, el módulo más cuidadosamente validado de todo este trabajo (determinístico, sin ML, probado contra las 6 categorías pedidas, con una advertencia explícita en su propio código de "no tocar" repetida en varios lugares de esta sesión). Fase 5 pide explícitamente "optimizaciones seguras" -- tocar la lógica de `similares.py` bajo presión de tiempo para ganar velocidad no calza con ese criterio. Se documenta aquí, medido y cuantificado, como la oportunidad de rendimiento de mayor impacto real para una sesión dedicada aparte.
 
 Verificación de regresión tras Fase 5: no se modificó código en esta fase (solo medición), suite completa sigue en 68/68 `OK`.
+
+---
+
+## Fase 6 — Informe final
+
+Verificación de regresión de cierre de toda la sesión: `tsc --noEmit` limpio, `npx eslint app` sin errores nuevos (1 advertencia aceptada y documentada), `next build` exitoso, suite Python completa 68/68 `OK`, `verificar_catalogo.py` en verde, smoke test de presupuestos contra datos reales sin cambios de comportamiento, recorrido final en navegador sin errores de consola.
+
+### 1. Todo lo encontrado
+32 hallazgos de Fase 1 (frontend #1-19, backend #20-32, ver arriba) más lo que salió del recorrido de UX (Fase 3), de escribir pruebas (Fase 4) y de medir rendimiento (Fase 5). El más importante de toda la sesión no estaba en ninguna lista: **nada de lo construido en sesiones anteriores (Presupuestos Inteligentes, Productos Similares, enriquecimiento de El Lagar) ni de lo corregido en esta (WAL, índices, bugs de `agregar_item`/`presupuestos.py`) estaba commiteado en git** -- 48 archivos de cambios reales viviendo solo en este disco, y el backend en producción (Render) corriendo una versión de 2 commits de antigüedad que no conoce ninguna de estas dos features.
+
+### 2. Todo lo corregido
+- **Backend**: `.gitignore` + 24 `.pyc` sacados del tracking; índice en `familia_id`; WAL + `busy_timeout`; `capa_intencion.py` con log perezoso (evita que un filesystem de solo lectura tumbe el servicio); reintentos en `crawlers/brenes.py`; bug de `agregar_item` que dejaba ítems reactivados invisibles en los totales; bug de `presupuestos.py` que ocultaba una alternativa confirmada cuando el precio actual era desconocido; bug nuevo de `presupuestos.py` (encontrado en Fase 4) que podía mostrar un ahorro agregado negativo.
+- **Frontend**: race condition en el toggle de archivados; doble envío y error de red mal identificado en "Agregar a proyecto"; `FamilyCard` no resincronizaba selección; comas sin escapar en la URL; memoización de `agruparPorFamilia`; fuente muerta eliminada; `lang="en"`→`"es"`; accesibilidad de teclado (nombre de proyecto, menú de agregar); fallback de imagen rota en 7 lugares; URL del backend centralizada; 4 casos de `setState` en efecto corregidos; contraste de `--accent`; menú que podía abrirse fuera de la pantalla.
+- **Pruebas**: 46 pruebas nuevas (0% → cobertura real en `especificaciones.py` y `presupuestos.py`).
+- **Higiene de repositorio**: 9 commits organizados por tema en el backend, 4 en el frontend -- nada de esto existía como historial de git antes de esta sesión.
+
+### 3. Todo lo que se decidió NO tocar (y por qué)
+- `busqueda.py`/`reranking.py`: el hallazgo de UX más importante de la sesión (falsos positivos de relevancia por coincidencia literal de substring, ej. "cemento" trae un limpiador de cemento antes que cemento) vive ahí. Están congelados por decisión previa del proyecto -- tocar el algoritmo de ranking bajo el paraguas de una auditoría de limpieza es exactamente el tipo de cambio de comportamiento que esta sesión se propuso NO hacer.
+- `similares.py`: la optimización de rendimiento correcta (cachear candidatos por categoría dentro de `calcular_presupuesto`) requiere reestructurar este módulo, el más cuidadosamente validado de todo el proyecto. Documentado y medido (~200ms/llamada, ~3s para 15 ítems), no corregido.
+- Duplicación estructural real (`ProductCard`/`FamilyCard` ~90% idénticos, `proyectos/[id]/page.tsx` con ~500 líneas, `comparar/page.tsx` con 6 bloques repetidos): refactors de mayor alcance, fuera de "cambios pequeños y seguros".
+- UI de Presupuestos Inteligentes: el backend está completo, probado y commiteado, pero no existe ninguna pantalla que lo muestre. Construirla es una funcionalidad completamente nueva desde la perspectiva de esta sesión ("no implementes funcionalidades completamente nuevas"), aunque el feature en sí ya estaba aprobado en una sesión anterior.
+- `database/proyecta.db` sin sacar del tracking de git (35 MB versionado) -- requiere decidir de antemano cómo se resembraría la base en un despliegue limpio si se saca; no es un cambio "seguro y reversible" sin esa decisión.
+- `nombre`/`comentario` de proyecto sin `max_length`: riesgo real bajo para el tamaño actual del proyecto, no se introdujo un límite arbitrario sin que el usuario decida el valor.
+
+### 4. Riesgos pendientes
+- **El repositorio local sigue sin `git push`.** Todo lo de esta sesión (y de las anteriores) está seguro en commits locales, pero no en GitHub ni en Render/Vercel. Un problema con esta máquina antes de hacer push volvería a dejar todo este trabajo solo en un disco.
+- **Producción sigue corriendo la versión vieja.** `/productos/similares` y `/proyectos/{id}/presupuesto` siguen devolviendo 404 en Render hasta que se decida hacer push y redeploy.
+- **Hay un proyecto de prueba huérfano en la base de datos de producción** ("Cotización casa Barzuna", creado sin querer durante el recorrido de UX de Fase 3 porque el frontend local apunta a `https://proyecta-data.onrender.com` por defecto). Es invisible para cualquier usuario real (quedó bajo un ID de propietario aleatorio generado por el navegador de la prueba, nunca capturado), pero es un dato real sin limpiar en una base de producción.
+- **83 productos de Carbone Store con precio nulo o ≤0** (hallazgo de `verificar_catalogo.py`, preexistente, no investigado a fondo en esta sesión).
+- **`database/proyecta.db` de 35 MB versionado en git** sigue creciendo con cada actualización de catálogo -- sin una decisión sobre cómo manejarlo, cada commit futuro que toque la base seguirá agregando peso al repositorio.
+
+### 5. Próximas oportunidades de alto impacto
+1. **Hacer push y decidir el redeploy** -- la oportunidad de mayor impacto inmediato: dos features completas (Presupuestos Inteligentes, Productos Similares) están terminadas y no llegan a ningún usuario real.
+2. **Relevancia de búsqueda** -- el hallazgo de UX más consecuente: revisar por qué coincidencias de substring le ganan a coincidencias de producto real en `busqueda.py`/`reranking.py`. Necesita su propia sesión dedicada, con los mismos estándares de validación contra datos reales que ya se usaron para Presupuestos/Similares.
+3. **UI de Presupuestos Inteligentes** -- el backend ya resuelve el problema difícil (nunca mostrar un ahorro engañoso); falta la pantalla.
+4. **Rendimiento de `calcular_presupuesto` para proyectos grandes** -- medido en ~200ms por ítem en categorías grandes; antes de que la UI exista y usuarios reales prueben proyectos de 20-30 ítems, vale la pena resolver esto con calma (no bajo presión de "optimización segura" de una sola sesión).
+5. **Limpiar el proyecto de prueba huérfano en producción** y decidir una convención para no volver a escribir accidentalmente contra producción durante pruebas manuales (ej. una bandera de entorno o un backend local para verificación).
