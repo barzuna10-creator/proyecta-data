@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Logs y checkpoints de corridas (regenerables, no versionados)
+logs/*.log
+logs/*.json
+
+# SO
+.DS_Store
+
+# Nota deliberada: database/proyecta.db NO se agrega acá todavía -- ya está
+# versionado en git (35 MB) y sacarlo del tracking podría romper un despliegue
+# que dependa de que el archivo exista al clonar. Ver AUDITORIA_TECNICA.md,
+# hallazgo #25, para la decisión pendiente antes de tocar esto.
