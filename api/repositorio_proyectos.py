@@ -70,9 +70,12 @@ def _calcular_totales(items):
 # partida (texto libre del usuario) se ordena alfabéticamente después de
 # estas, y "Sin partida" siempre queda de último -- es la señal visual de
 # "esto todavía no lo he organizado".
+# "Demolición", "Obra gris" y "Sanitarios" agregados en
+# PLANTILLAS_PROYECTO_V1.md para remodelaciones -- insertados sin mover
+# ninguna partida existente de su posición relativa.
 ORDEN_PARTIDAS_SUGERIDAS = [
-    "Cimentación", "Estructura", "Paredes", "Techo",
-    "Eléctrico", "Hidráulico", "Acabados", "Pintura", "Otros",
+    "Demolición", "Obra gris", "Cimentación", "Estructura", "Paredes", "Techo",
+    "Eléctrico", "Hidráulico", "Acabados", "Pintura", "Sanitarios", "Otros",
 ]
 SIN_PARTIDA = "Sin partida"
 

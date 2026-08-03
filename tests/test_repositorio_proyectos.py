@@ -96,6 +96,27 @@ class PruebaAgruparPorPartida(unittest.TestCase):
 
         self.assertEqual(orden, ["Cimentación", "Estructura", "Acabados"])
 
+    def test_partidas_de_remodelacion_respetan_el_orden_nuevo(self):
+        # PLANTILLAS_PROYECTO_V1.md agregó "Demolición", "Obra gris" y
+        # "Sanitarios" -- confirma que se intercalan en el orden de
+        # construcción correcto (demolición y obra gris primero,
+        # sanitarios después de pintura) sin desplazar a las partidas ya
+        # existentes.
+        items = [
+            _item(cantidad=1, partida="Sanitarios", precio_actual=100),
+            _item(cantidad=1, partida="Pintura", precio_actual=100),
+            _item(cantidad=1, partida="Obra gris", precio_actual=100),
+            _item(cantidad=1, partida="Hidráulico", precio_actual=100),
+            _item(cantidad=1, partida="Demolición", precio_actual=100),
+        ]
+        grupos = _agrupar_por_partida(items)
+        orden = [g["partida"] for g in grupos]
+
+        self.assertEqual(
+            orden,
+            ["Demolición", "Obra gris", "Hidráulico", "Pintura", "Sanitarios"],
+        )
+
     def test_sin_partida_siempre_queda_de_ultimo(self):
         items = [
             _item(cantidad=1, partida=None, precio_actual=100),
