@@ -1,17 +1,19 @@
-"""Actualización rápida del catálogo: EPA, Ferretería Brenes y Carbone Store
-(unos ~20 minutos los tres juntos, todos vía llamadas en lote). El Lagar
-queda fuera a propósito -- necesita una llamada HTTP por producto y tarda
-~50 minutos; se actualiza por separado con `actualizar_ellagar.py`, pensado
-para correr de noche (ver ese archivo)."""
+"""Actualización rápida del catálogo: EPA, Ferretería Brenes, Carbone Store
+y Construplaza (todos vía llamadas en lote -- Construplaza es el más
+liviano de los cuatro, ~22 páginas para todo su catálogo vía la API
+pública de Algolia). El Lagar queda fuera a propósito -- necesita una
+llamada HTTP por producto y tarda ~50 minutos; se actualiza por separado
+con `actualizar_ellagar.py`, pensado para correr de noche (ver ese
+archivo)."""
 
 import sys
 import time
 from datetime import datetime
 
-from crawlers import brenes, carbone, epa
+from crawlers import brenes, carbone, construplaza, epa
 from busqueda import reconstruir_indice
 
-PROVEEDORES = [epa, brenes, carbone]
+PROVEEDORES = [epa, brenes, carbone, construplaza]
 
 
 def _actualizar_proveedores(proveedores):
