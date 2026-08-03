@@ -1,5 +1,3 @@
-import json
-import os
 import re
 import time
 import unicodedata
@@ -8,7 +6,10 @@ from urllib.parse import unquote
 
 import requests
 
+from crawlers import comun
 from crawlers.comun import (
+    descargar_paginado,
+    descargar_y_normalizar_por_categoria,
     guardar_productos,
     limpiar_html,
     pedir_con_reintentos,
@@ -59,48 +60,22 @@ CHECKPOINT_PATH = "logs/ellagar_checkpoint.json"
 CHECKPOINT_MAX_HORAS = 6
 
 
+# Persistencia del checkpoint: delegada a crawlers/comun.py (compartida
+# con cualquier proveedor futuro que también enriquezca producto por
+# producto), pero se mantienen estas funciones envoltorio con el mismo
+# nombre de siempre -- tests/test_enriquecimiento.py las usa directamente
+# vía mock.patch.object(ellagar, ...) y no había motivo para tocar ese
+# contrato solo porque la implementación de adentro ahora es compartida.
 def _cargar_checkpoint():
-    if not os.path.exists(CHECKPOINT_PATH):
-        return set()
-
-    try:
-        with open(CHECKPOINT_PATH, encoding="utf-8") as archivo:
-            datos = json.load(archivo)
-
-        guardado_en = datetime.fromisoformat(datos["guardado_en"])
-        edad_horas = (datetime.now() - guardado_en).total_seconds() / 3600
-
-        if edad_horas > CHECKPOINT_MAX_HORAS:
-            print(
-                f"Checkpoint de El Lagar tiene {edad_horas:.1f}h -- se "
-                "descarta y se arranca de cero.\n"
-            )
-            return set()
-
-        ids = set(datos.get("ids_completados") or [])
-        print(f"Checkpoint encontrado: {len(ids)} productos ya enriquecidos, se retoma.\n")
-        return ids
-
-    except (OSError, ValueError, KeyError):
-        return set()
+    return comun.cargar_checkpoint(CHECKPOINT_PATH, CHECKPOINT_MAX_HORAS)
 
 
 def _guardar_checkpoint(ids_completados):
-    os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
-
-    with open(CHECKPOINT_PATH, "w", encoding="utf-8") as archivo:
-        json.dump(
-            {
-                "guardado_en": datetime.now().isoformat(),
-                "ids_completados": sorted(ids_completados),
-            },
-            archivo,
-        )
+    comun.guardar_checkpoint(CHECKPOINT_PATH, ids_completados)
 
 
 def _borrar_checkpoint():
-    if os.path.exists(CHECKPOINT_PATH):
-        os.remove(CHECKPOINT_PATH)
+    comun.borrar_checkpoint(CHECKPOINT_PATH)
 
 
 def convertir_a_slug(texto):
@@ -137,10 +112,16 @@ def descargar_categoria(categoria_id):
         "Referer": "https://www.ellagar.com",
     }
 
-    pagina = 1
-    productos_totales = []
+    # El Lagar no avisa "esta es la última página" por sí sola -- hay que
+    # comparar cuántos productos se llevan acumulados contra TotalItems,
+    # que sí viene en cada respuesta. Se lleva la cuenta en esta variable
+    # cerrada sobre pedir_pagina en vez de en descargar_paginado (que no
+    # sabe nada de "total_items", solo de "productos"/"es_ultima").
+    acumulado = 0
 
-    while True:
+    def pedir_pagina(pagina):
+        nonlocal acumulado
+
         payload = {
             "Filtros": {
                 "Categoria": categoria_id,
@@ -168,24 +149,12 @@ def descargar_categoria(categoria_id):
         data = respuesta.get("Data") or {}
         productos = data.get("PaginaItems") or []
 
-        if not productos:
-            break
-
-        productos_totales.extend(productos)
-
-        print(
-            f"Página {pagina}: "
-            f"{len(productos)} productos"
-        )
-
+        acumulado += len(productos)
         total_items = data.get("TotalItems", 0)
 
-        if len(productos_totales) >= total_items:
-            break
+        return productos, acumulado >= total_items
 
-        pagina += 1
-
-    return productos_totales
+    return descargar_paginado(pedir_pagina)
 
 
 def normalizar_producto(producto, categoria_nombre):
@@ -281,34 +250,9 @@ def obtener_detalle(articulo_id):
 def actualizar(con_detalle=True):
     print("\n=== ACTUALIZANDO EL LAGAR ===\n")
 
-    productos_normalizados = []
-
-    for nombre_categoria, categoria_id in CATEGORIAS.items():
-        print(f"Descargando {nombre_categoria}...")
-
-        try:
-            productos = descargar_categoria(categoria_id)
-
-        except requests.RequestException as error:
-            print(
-                f"Error descargando {nombre_categoria}: "
-                f"{error}"
-            )
-            continue
-
-        for producto in productos:
-            producto_normalizado = normalizar_producto(
-                producto,
-                nombre_categoria,
-            )
-
-            productos_normalizados.append(
-                producto_normalizado
-            )
-
-        print(
-            f"{len(productos)} productos descargados.\n"
-        )
+    productos_normalizados = descargar_y_normalizar_por_categoria(
+        CATEGORIAS, descargar_categoria, normalizar_producto
+    )
 
     # Se guarda el listado base de una vez, antes de arrancar el
     # enriquecimiento por producto -- así, si el proceso de detalle se

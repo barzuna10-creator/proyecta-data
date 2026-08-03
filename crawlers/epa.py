@@ -3,7 +3,9 @@ from datetime import datetime
 import requests
 
 from crawlers.comun import (
-    guardar_productos,
+    descargar_paginado,
+    descargar_y_normalizar_por_categoria,
+    ejecutar_actualizacion,
     limpiar_html,
     pedir_con_reintentos,
     serializar_imagenes,
@@ -85,10 +87,7 @@ def construir_url_producto(url_key):
 
 
 def descargar_categoria(categoria_id):
-    pagina = 1
-    productos_totales = []
-
-    while True:
+    def pedir_pagina(pagina):
         payload = {
             "query": CONSULTA_PRODUCTOS,
             "variables": {
@@ -115,25 +114,11 @@ def descargar_categoria(categoria_id):
 
         data = respuesta.get("data", {}).get("products") or {}
         productos = data.get("items") or []
-
-        if not productos:
-            break
-
-        productos_totales.extend(productos)
-
-        print(
-            f"Página {pagina}: "
-            f"{len(productos)} productos"
-        )
-
         total_paginas = data.get("page_info", {}).get("total_pages", pagina)
 
-        if pagina >= total_paginas:
-            break
+        return productos, pagina >= total_paginas
 
-        pagina += 1
-
-    return productos_totales
+    return descargar_paginado(pedir_pagina)
 
 
 def normalizar_producto(producto, categoria_nombre):
@@ -184,44 +169,9 @@ def normalizar_producto(producto, categoria_nombre):
 
 
 def actualizar():
-    print("\n=== ACTUALIZANDO EPA ===\n")
-
-    productos_normalizados = []
-
-    for nombre_categoria, categoria_id in CATEGORIAS.items():
-        print(f"Descargando {nombre_categoria}...")
-
-        try:
-            productos = descargar_categoria(categoria_id)
-
-        except requests.RequestException as error:
-            print(
-                f"Error descargando {nombre_categoria}: "
-                f"{error}"
-            )
-            continue
-
-        for producto in productos:
-            producto_normalizado = normalizar_producto(
-                producto,
-                nombre_categoria,
-            )
-
-            productos_normalizados.append(
-                producto_normalizado
-            )
-
-        print(
-            f"{len(productos)} productos descargados.\n"
-        )
-
-    cantidad = guardar_productos(
-        productos_normalizados
+    return ejecutar_actualizacion(
+        "EPA",
+        lambda: descargar_y_normalizar_por_categoria(
+            CATEGORIAS, descargar_categoria, normalizar_producto
+        ),
     )
-
-    print(
-        f"✅ EPA actualizado: "
-        f"{cantidad} productos."
-    )
-
-    return cantidad

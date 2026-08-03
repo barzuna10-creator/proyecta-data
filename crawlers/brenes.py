@@ -3,7 +3,12 @@ from datetime import datetime
 
 import requests
 
-from crawlers.comun import guardar_productos, pedir_con_reintentos
+from crawlers.comun import (
+    descargar_paginado,
+    descargar_y_normalizar_por_categoria,
+    ejecutar_actualizacion,
+    pedir_con_reintentos,
+)
 
 
 API_URL = "https://ferreteriabrenes.com/wp-json/wc/store/v1/products"
@@ -28,10 +33,7 @@ CATEGORIAS = {
 
 
 def descargar_categoria(categoria_id):
-    pagina = 1
-    productos_totales = []
-
-    while True:
+    def pedir_pagina(pagina):
         response = pedir_con_reintentos(
             requests.get,
             API_URL,
@@ -46,27 +48,11 @@ def descargar_categoria(categoria_id):
         response.raise_for_status()
 
         productos = response.json()
+        total_paginas = int(response.headers.get("X-WP-TotalPages", pagina))
 
-        if not productos:
-            break
+        return productos, pagina >= total_paginas
 
-        productos_totales.extend(productos)
-
-        print(
-            f"Página {pagina}: "
-            f"{len(productos)} productos"
-        )
-
-        total_paginas = int(
-            response.headers.get("X-WP-TotalPages", pagina)
-        )
-
-        if pagina >= total_paginas:
-            break
-
-        pagina += 1
-
-    return productos_totales
+    return descargar_paginado(pedir_pagina)
 
 
 def normalizar_producto(producto, categoria_nombre):
@@ -109,44 +95,10 @@ def normalizar_producto(producto, categoria_nombre):
 
 
 def actualizar():
-    print("\n=== ACTUALIZANDO FERRETERÍA BRENES ===\n")
-
-    productos_normalizados = []
-
-    for nombre_categoria, categoria_id in CATEGORIAS.items():
-        print(f"Descargando {nombre_categoria}...")
-
-        try:
-            productos = descargar_categoria(categoria_id)
-
-        except requests.RequestException as error:
-            print(
-                f"Error descargando {nombre_categoria}: "
-                f"{error}"
-            )
-            continue
-
-        for producto in productos:
-            producto_normalizado = normalizar_producto(
-                producto,
-                nombre_categoria,
-            )
-
-            productos_normalizados.append(
-                producto_normalizado
-            )
-
-        print(
-            f"{len(productos)} productos descargados.\n"
-        )
-
-    cantidad = guardar_productos(
-        productos_normalizados
+    return ejecutar_actualizacion(
+        "Ferretería Brenes",
+        lambda: descargar_y_normalizar_por_categoria(
+            CATEGORIAS, descargar_categoria, normalizar_producto
+        ),
+        forma_verbo="actualizada",
     )
-
-    print(
-        f"✅ Ferretería Brenes actualizada: "
-        f"{cantidad} productos."
-    )
-
-    return cantidad

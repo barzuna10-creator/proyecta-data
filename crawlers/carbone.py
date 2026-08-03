@@ -1,10 +1,10 @@
-import time
 from datetime import datetime
 
 import requests
 
 from crawlers.comun import (
     CABECERAS_NAVEGADOR,
+    descargar_paginado,
     guardar_productos,
     limpiar_html,
     pedir_con_reintentos,
@@ -19,10 +19,7 @@ TAMANO_PAGINA = 250
 
 
 def descargar_productos():
-    pagina = 1
-    productos_totales = []
-
-    while True:
+    def pedir_pagina(pagina):
         response = pedir_con_reintentos(
             requests.get,
             API_URL,
@@ -38,20 +35,13 @@ def descargar_productos():
 
         productos = response.json().get("products") or []
 
-        if not productos:
-            break
+        # Carbone no expone un total de páginas -- la única señal de que
+        # se acabó es una página vacía, que descargar_paginado ya detecta
+        # por su cuenta antes de mirar este segundo valor.
+        return productos, False
 
-        productos_totales.extend(productos)
-
-        print(
-            f"Página {pagina}: "
-            f"{len(productos)} productos"
-        )
-
-        pagina += 1
-        time.sleep(0.6)  # el endpoint empieza a devolver 429 tras ~28 páginas seguidas
-
-    return productos_totales
+    # el endpoint empieza a devolver 429 tras ~28 páginas seguidas
+    return descargar_paginado(pedir_pagina, pausa_entre_paginas=0.6)
 
 
 def normalizar_producto(producto):
