@@ -68,9 +68,27 @@ GRUPOS_MORFOLOGICOS = [
     {"grande", "grandes"},
 ]
 
+# A diferencia de GRUPOS_MORFOLOGICOS (variantes de género/número de LA
+# MISMA palabra), estos son términos DISTINTOS que nombran el mismo
+# material -- confirmados contra el catálogo real, no supuestos (ver
+# BUSCADOR_AUDITORIA.md):
+#
+# - "bloque" (español) nunca encontraba los bloques de concreto reales del
+#   catálogo, porque EPA los lista como "Block" (préstamo del inglés, uso
+#   común en construcción en Costa Rica) -- "Block PC clase A 20 x 20 x 40
+#   cm" y ~15 productos más eran invisibles a la búsqueda "bloque".
+# - "perlín" (término coloquial costarricense para el perfil C/Z de acero
+#   usado en techos) devolvía cero resultados -- el catálogo lo llama
+#   "Perfil C" (EPA) o "Perfil" en general (El Lagar), nunca "perlín".
+GRUPOS_VOCABULARIO_MATERIALES = [
+    {"bloque", "bloques", "block", "blocks"},
+    {"perlin", "perlines", "perfil", "perfiles"},
+]
+
 VARIANTE_A_GRUPO = {
     variante: grupo
-    for grupo in GRUPOS_MORFOLOGICOS
+    for grupos in (GRUPOS_MORFOLOGICOS, GRUPOS_VOCABULARIO_MATERIALES)
+    for grupo in grupos
     for variante in grupo
 }
 

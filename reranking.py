@@ -30,6 +30,27 @@ PALABRAS_ACCESORIO = {
     "soporte", "soportes", "filtro", "filtros", "adaptador", "adaptadores",
 }
 
+# Caso real medido (BUSCADOR_AUDITORIA.md): "Quita cementos y limpia juntas"
+# le ganaba a cemento real en la búsqueda "cemento" porque PALABRAS_ACCESORIO
+# solo cubre patrones de preposición+sustantivo ("para accesorio"), no
+# verbos/sustantivos de acción que indican "este producto ACTÚA SOBRE X",
+# no "este producto ES X". Confirmados contra el catálogo real (no
+# hipotéticos): "quita", "limpia" (adyacentes directos, "Quita cementos"),
+# y "limpiador"/"removedor" (con "de" en medio, "Limpiador de vidrios",
+# "Removedor de óxido" -- de ahí PREPOSICIONES_SALTABLES abajo).
+PALABRAS_ACCION_SOBRE = {
+    "quita", "limpia", "limpiador", "limpiadores",
+    "removedor", "removedores", "destapador", "destapadores",
+    "desmanchador", "desmanchadores", "quitamanchas",
+}
+
+# Preposiciones que pueden mediar entre un sustantivo de acción y el
+# material sobre el que actúa ("Limpiador DE vidrios", "Removedor DE
+# óxido") -- deliberadamente NO se trata "de" como accesorio por sí solo
+# (sin un sustantivo de acción antes): "Mortero de cemento" es cemento de
+# verdad, no un accesorio de cemento.
+PREPOSICIONES_SALTABLES = {"de", "para"}
+
 # bm25 sigue siendo la señal dominante (ya demostró funcionar bien para
 # recuperación) -- las señales de Python ajustan el orden dentro del
 # candidate set que ya trajo FTS5, no lo reemplazan.
@@ -60,6 +81,47 @@ def _posiciones_en_nombre(token, palabras_nombre):
     return [i for i, palabra in enumerate(palabras_nombre) if palabra in variantes]
 
 
+def _frase_como_palabras(frase, palabras_nombre):
+    """¿Aparece `frase` como secuencia de PALABRAS COMPLETAS y consecutivas
+    dentro de palabras_nombre? A diferencia de un `in` sobre el string
+    completo, esto no confunde un plural/derivado con la frase exacta --
+    "cemento" no debe leerse como encontrado dentro de "cementos" solo
+    porque es un substring literal de esa palabra (caso real medido en
+    BUSCADOR_AUDITORIA.md: infla el puntaje de falsos positivos)."""
+
+    palabras_frase = frase.split()
+    if not palabras_frase:
+        return False
+
+    n = len(palabras_frase)
+    return any(
+        palabras_nombre[i:i + n] == palabras_frase
+        for i in range(len(palabras_nombre) - n + 1)
+    )
+
+
+def _precedida_por_accesorio(palabras_nombre, i):
+    """¿La palabra en la posición `i` está precedida por algo que indica
+    "esto es un accesorio de" (para, filtro...) o "esto actúa sobre"
+    (quita, limpiador...)? Para el segundo caso también revisa dos
+    posiciones atrás cuando hay una preposición en medio -- "Limpiador DE
+    vidrios" -- sin tratar la preposición como accesorio por sí sola."""
+
+    if i == 0:
+        return False
+    if palabras_nombre[i - 1] in PALABRAS_ACCESORIO:
+        return True
+    if palabras_nombre[i - 1] in PALABRAS_ACCION_SOBRE:
+        return True
+    if (
+        palabras_nombre[i - 1] in PREPOSICIONES_SALTABLES
+        and i >= 2
+        and palabras_nombre[i - 2] in PALABRAS_ACCION_SOBRE
+    ):
+        return True
+    return False
+
+
 def _calcular_senales(candidato, tokens_consulta, frase_consulta):
     nombre_normalizado = normalizar_texto(candidato["nombre"])
     palabras_nombre = nombre_normalizado.split()
@@ -81,12 +143,12 @@ def _calcular_senales(candidato, tokens_consulta, frase_consulta):
             posicion_minima = min(posiciones)
 
         # ¿TODAS las apariciones de este token están precedidas por una
-        # palabra de "accesorio"? Si al menos una aparición es "limpia" (sin
-        # ese prefijo), el token no se penaliza -- ej. "Tornillo 1/4 x 2"
-        # tiene una aparición limpia de "tornillo" aunque exista también
-        # "Prensa de Tornillo" en el catálogo.
+        # palabra de "accesorio" o de "acción sobre"? Si al menos una
+        # aparición es "limpia" (sin ese prefijo), el token no se penaliza
+        # -- ej. "Tornillo 1/4 x 2" tiene una aparición limpia de "tornillo"
+        # aunque exista también "Prensa de Tornillo" en el catálogo.
         todas_precedidas = all(
-            i > 0 and palabras_nombre[i - 1] in PALABRAS_ACCESORIO
+            _precedida_por_accesorio(palabras_nombre, i)
             for i in posiciones
         )
         if todas_precedidas:
@@ -100,21 +162,45 @@ def _calcular_senales(candidato, tokens_consulta, frase_consulta):
         "bonus_categoria": sum(
             1 for t in tokens_consulta if _tokens_expandidos(t) & set(palabras_categoria)
         ) / total_tokens,
-        "frase_exacta": 1.0 if frase_consulta and frase_consulta in nombre_normalizado else 0.0,
+        "frase_exacta": 1.0 if frase_consulta and _frase_como_palabras(frase_consulta, palabras_nombre) else 0.0,
         "penalizacion_accesorio": (tokens_accesorio / tokens_en_nombre) if tokens_en_nombre else 0.0,
     }
 
 
 def _normalizar_bm25(candidatos):
-    """bm25 de SQLite es negativo y sin cota (más negativo = mejor). Se
-    normaliza linealmente al rango [0, 1] dentro del propio candidate set de
-    esta consulta, para poder combinarlo con las demás señales (que ya están
-    en [0, 1])."""
+    """bm25 de SQLite es negativo y sin cota (más negativo = mejor), y su
+    MAGNITUD no es una señal confiable de qué tan relevante es un candidato
+    -- ver BUSCADOR_AUDITORIA.md para los casos reales medidos. Dos
+    situaciones concretas producen un bm25 extremo sin que el candidato sea
+    más relevante:
+
+    - coincidir solo por una variante rara del token (ej. buscar "cemento"
+      y coincidir vía el plural "cementos", que aparece en apenas 1 producto
+      de todo el catálogo frente a 34 con "cemento" -- bm25 favorece el
+      término más raro, no el más relevante).
+    - coincidir a la vez en el nombre y en la categoría del propio producto
+      (frecuente en Carbone Store, cuyos nombres de categoría repiten el
+      tipo de producto -- "Bloque..." con categoría "Sistema Bloques...").
+
+    La normalización anterior era lineal sobre la magnitud cruda, así que
+    un solo candidato con un bm25 extremo por cualquiera de estos motivos
+    dominaba el puntaje combinado. Acá se normaliza por RANGO DE POSICIÓN
+    dentro del candidate set: el mejor bm25 crudo vale 1.0, el peor vale
+    0.0, todo lo demás interpolado por su puesto -- bm25 sigue siendo la
+    señal de orden dominante (su ranking relativo se respeta tal cual),
+    pero un solo valor atípico ya no puede, solo por su magnitud, opacar
+    las demás señales."""
 
     puntajes = [c["puntaje"] for c in candidatos]
-    peor, mejor = max(puntajes), min(puntajes)
-    rango = (peor - mejor) or 1.0
-    return [(peor - p) / rango for p in puntajes]
+    # Ascendente: bm25 más negativo (mejor) primero.
+    unicos = sorted(set(puntajes))
+    total = len(unicos)
+
+    if total == 1:
+        return [1.0 for _ in puntajes]
+
+    posicion = {valor: indice for indice, valor in enumerate(unicos)}
+    return [1.0 - (posicion[p] / (total - 1)) for p in puntajes]
 
 
 def _firma_dedup(nombre):
