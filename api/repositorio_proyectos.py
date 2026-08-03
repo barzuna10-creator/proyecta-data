@@ -2,9 +2,38 @@ import secrets
 from datetime import datetime
 
 from db import conectar
+from busqueda import normalizar_texto
 
 ESTADOS_PROYECTO = {"activo", "completado", "archivado"}
 ESTADOS_ITEM = {"pendiente", "comprado", "descartado"}
+
+# Auditoría de UX (ver UX_COTIZACION_AUDITORIA.md): organizar en partidas un
+# proyecto de 30-80 ítems a mano, uno por uno, es el punto de fricción más
+# grande del flujo real de cotizar. La categoría del producto (ya capturada
+# en cada ítem) es una señal gratis para adelantar ese trabajo -- se
+# preasigna la partida solo en los casos donde la categoría real del
+# catálogo no deja ambigüedad (verificado contra las categorías reales de
+# los 4 proveedores, no adivinado). El resto se deja "Sin partida" -- igual
+# que hoy -- para no asignar mal por exceso de confianza. Es solo un valor
+# inicial: el usuario lo puede cambiar en cualquier momento, igual que
+# antes de este cambio.
+SUGERENCIA_PARTIDA_POR_CATEGORIA = {
+    "electricidad": "Eléctrico",
+    "electrico": "Eléctrico",
+    "plomeria": "Hidráulico",
+    "fontaneria": "Hidráulico",
+    "griferia": "Hidráulico",
+    "pinturas": "Pintura",
+    "construccion": "Estructura",
+    "pisos": "Acabados",
+    "maderas y puertas": "Acabados",
+}
+
+
+def _sugerir_partida(categoria):
+    if not categoria:
+        return None
+    return SUGERENCIA_PARTIDA_POR_CATEGORIA.get(normalizar_texto(categoria))
 
 
 def _ahora():
@@ -320,6 +349,7 @@ def agregar_item(proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=
         raise ValueError("Producto no encontrado en el catálogo")
 
     ahora = _ahora()
+    partida_sugerida = _sugerir_partida(producto["categoria"])
 
     conexion.execute(
         """
@@ -327,8 +357,8 @@ def agregar_item(proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=
             proyecto_id, proveedor, id_proveedor, cantidad,
             nombre_al_agregar, marca_al_agregar, categoria_al_agregar,
             precio_al_agregar, url_imagen_al_agregar, url_producto_al_agregar,
-            fecha_agregado
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            fecha_agregado, partida
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(proyecto_id, proveedor, id_proveedor)
         DO UPDATE SET
             -- Si el ítem ya existía pendiente, sumar es lo esperado (agregar
@@ -343,12 +373,15 @@ def agregar_item(proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=
                 ELSE excluded.cantidad
             END,
             estado = 'pendiente'
+            -- partida NO se toca aquí a propósito: si el ítem ya existía
+            -- (reactivado desde descartado, por ejemplo), el usuario pudo
+            -- haberla organizado a mano -- reagregarlo no debe pisarla.
         """,
         (
             proyecto_id, proveedor, id_proveedor, cantidad,
             producto["nombre"], producto["marca"], producto["categoria"],
             producto["precio"], producto["url_imagen"], producto["url_producto"],
-            ahora,
+            ahora, partida_sugerida,
         ),
     )
 

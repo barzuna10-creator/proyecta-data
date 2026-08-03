@@ -19,6 +19,7 @@ from api.repositorio_proyectos import (
     SIN_PARTIDA,
     _agrupar_por_partida,
     _calcular_cotizacion,
+    _sugerir_partida,
     actualizar_item,
     actualizar_proyecto,
     agregar_item,
@@ -164,6 +165,41 @@ class PruebaCalcularCotizacion(unittest.TestCase):
         self.assertEqual(cot["partidas"], [])
         self.assertEqual(cot["subtotal_materiales"], 0)
         self.assertEqual(cot["total_final"], 0)
+
+
+class PruebaSugerirPartida(unittest.TestCase):
+    """Hallazgo de la auditoría de UX (UX_COTIZACION_AUDITORIA.md): organizar
+    30-80 ítems en partidas a mano es la mayor fricción del flujo real.
+    _sugerir_partida() da un valor inicial basado en la categoría real del
+    catálogo, verificada contra los 4 proveedores -- nunca adivinada."""
+
+    def test_categorias_con_mapeo_claro(self):
+        self.assertEqual(_sugerir_partida("Electricidad"), "Eléctrico")
+        self.assertEqual(_sugerir_partida("Electrico"), "Eléctrico")
+        self.assertEqual(_sugerir_partida("Plomeria"), "Hidráulico")
+        self.assertEqual(_sugerir_partida("Fontanería"), "Hidráulico")
+        self.assertEqual(_sugerir_partida("Griferia"), "Hidráulico")
+        self.assertEqual(_sugerir_partida("Pinturas"), "Pintura")
+        self.assertEqual(_sugerir_partida("Pisos"), "Acabados")
+        self.assertEqual(_sugerir_partida("Maderas y puertas"), "Acabados")
+
+    def test_normaliza_mayusculas_y_acentos(self):
+        # "Construccion" (EPA) y "Construcción" (El Lagar/Brenes) son la
+        # misma categoría real, con grafía distinta entre proveedores.
+        self.assertEqual(_sugerir_partida("construccion"), "Estructura")
+        self.assertEqual(_sugerir_partida("Construcción"), "Estructura")
+        self.assertEqual(_sugerir_partida("CONSTRUCCION"), "Estructura")
+
+    def test_categoria_ambigua_no_sugiere_nada(self):
+        # "Herramientas"/"General" no son una partida real -- sugerir algo
+        # ahí sería adivinar, no reducir trabajo. Debe quedar "Sin partida"
+        # exactamente como antes de este cambio, no un valor inventado.
+        self.assertIsNone(_sugerir_partida("Herramientas"))
+        self.assertIsNone(_sugerir_partida("General"))
+
+    def test_categoria_vacia_o_none(self):
+        self.assertIsNone(_sugerir_partida(None))
+        self.assertIsNone(_sugerir_partida(""))
 
 
 def _crear_db_temporal():
@@ -382,6 +418,54 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
         self.assertIsNone(resultado)
 
         eliminar_proyecto(proyecto["id"], self.PROPIETARIO)
+
+
+class PruebaSugerenciaPartidaAlAgregar(BasePruebaIntegracion):
+    def test_agregar_item_preasigna_partida_segun_categoria(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cable eléctrico THHN",
+             "categoria": "Electricidad", "precio": 2000},
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Martillo de goma",
+             "categoria": "Herramientas", "precio": 3000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto con sugerencias")
+        pid = proyecto["id"]
+
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 1)
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "2", 1)
+
+        item_cable = next(i for i in proyecto["items"] if i["id_proveedor"] == "1")
+        item_martillo = next(i for i in proyecto["items"] if i["id_proveedor"] == "2")
+
+        self.assertEqual(item_cable["partida"], "Eléctrico")
+        # "Herramientas" es ambigua a propósito -- no se le inventa partida.
+        self.assertIsNone(item_martillo["partida"])
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_reactivar_item_descartado_no_pisa_partida_elegida_a_mano(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cable eléctrico THHN",
+             "categoria": "Electricidad", "precio": 2000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto reactivación")
+        pid = proyecto["id"]
+
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 1)
+        item_id = proyecto["items"][0]["id"]
+        # El usuario reclasifica a mano, en contra de la sugerencia.
+        proyecto = actualizar_item(pid, self.PROPIETARIO, item_id, {"partida": "Otros"})
+        proyecto = actualizar_item(pid, self.PROPIETARIO, item_id, {"estado": "descartado"})
+
+        # Se vuelve a agregar (flujo real: el usuario lo quitó por error y
+        # lo busca de nuevo) -- la reactivación no debe pisar su elección.
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 1)
+
+        item = proyecto["items"][0]
+        self.assertEqual(item["estado"], "pendiente")
+        self.assertEqual(item["partida"], "Otros")
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
 
 
 if __name__ == "__main__":

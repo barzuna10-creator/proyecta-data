@@ -12,6 +12,11 @@ logs/*.json
 # SO
 .DS_Store
 
+# Archivos auxiliares de SQLite en modo WAL (regenerables, se crean al
+# correr el backend localmente contra database/proyecta.db -- ver db.py)
+database/proyecta.db-shm
+database/proyecta.db-wal
+
 # Nota deliberada: database/proyecta.db NO se agrega acá todavía -- ya está
 # versionado en git (35 MB) y sacarlo del tracking podría romper un despliegue
 # que dependa de que el archivo exista al clonar. Ver AUDITORIA_TECNICA.md,
