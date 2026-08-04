@@ -132,6 +132,31 @@ class PruebaAgruparPorPartida(unittest.TestCase):
     def test_lista_vacia_sin_items(self):
         self.assertEqual(_agrupar_por_partida([]), [])
 
+    def test_partida_de_texto_libre_no_se_fragmenta_por_tilde_o_mayuscula(self):
+        # Bug real: "Plomeria" y "Plomería" (partida de texto libre, ver
+        # SelectorPartida.tsx -> "Otra...") quedaban como dos secciones
+        # separadas con subtotal propio cada una -- silencioso, sin ningún
+        # aviso al usuario de que la partida se fragmentó.
+        items = [
+            _item(cantidad=1, partida="Plomeria", precio_actual=1000),
+            _item(cantidad=1, partida="Plomería", precio_actual=500),
+            _item(cantidad=1, partida="PLOMERÍA", precio_actual=250),
+        ]
+        grupos = _agrupar_por_partida(items)
+
+        self.assertEqual(len(grupos), 1)
+        self.assertEqual(grupos[0]["subtotal"], 1750)
+        self.assertEqual(len(grupos[0]["items"]), 3)
+
+    def test_partida_de_texto_libre_conserva_la_ortografia_del_primero(self):
+        items = [
+            _item(cantidad=1, partida="jardin", precio_actual=100),
+            _item(cantidad=1, partida="Jardín", precio_actual=100),
+        ]
+        grupos = _agrupar_por_partida(items)
+
+        self.assertEqual(grupos[0]["partida"], "jardin")
+
 
 class PruebaCalcularCotizacion(unittest.TestCase):
     def _proyecto(self, **overrides):

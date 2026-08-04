@@ -109,7 +109,7 @@ cada par que cruzó el umbral de "presupuestos" (0.85):
   de un breaker, ángulo de un codo PVC, cantidad de piezas por paquete,
   talla, grosor de mina, dientes por pulgada de una hoja de sierra, potencia
   en HP (no en W) de una bomba, etc. Ejemplos reales, todos puntuando 1.0
-  (\"el mismo producto\"):
+  ("el mismo producto"):
   - `Breaker de enchufar 2 x 40 A QO Square D` vs. `... 2 x 70 A ...` (amperaje distinto -- riesgo eléctrico real si alguien compra por este número).
   - `Codo 45° liso PVC SCH40 3/4"` vs. `Codo 90° roscado PVC SCH40 3/4"` (ángulo y tipo de rosca distintos).
   - `Terminal de ojo para cable 4 con ojo de 3/8 pulg` vs. `... cable 8 ...` (calibre de cable distinto).
@@ -172,3 +172,90 @@ el hook/componente de UI.
 - No se tocó ningún archivo de frontend en esta fase, así que no aplica
   Playwright ni build de Next.js todavía -- se harán quando exista la UI que
   depende de este motor.
+
+---
+
+# Segunda ronda: 3 fixes de fricción encontrados recorriendo el resto del producto
+
+Después de decidir no exponer todavía Presupuestos Inteligentes, seguí el
+mandato de recorrer el resto del producto buscando funciones de alto
+impacto que un ingeniero usaría cada semana. Antes de tocar nada, leí
+`tests/UX_COTIZACION_AUDITORIA.md` (2026-08-02) para no repetir análisis ya
+hecho -- ese documento ya dejó registrado y decidido que la relevancia de
+búsqueda y la normalización de `categoria` de Carbone Store quedan **fuera
+de alcance** (son cambios grandes al motor de búsqueda/datos, no mejoras
+pequeñas). Enfoqué el resto de esta sesión en tres fricciones reales que
+esa auditoría no cubrió.
+
+## 5. Cambiar la cantidad de un ítem exigía un clic por unidad
+
+**Problema real:** tanto en el popup de "agregar a proyecto" como en cada
+fila del proyecto, la única forma de cambiar cantidad eran botones +/-, de
+uno en uno. Para una cantidad real de obra (50 sacos de cemento, 200
+tornillos, 12.5 m² de piso) eso son decenas de clics para algo que debería
+ser escribir un número. Cantidad además es un campo `float` de verdad en el
+backend (`cantidad: float = Field(default=1, gt=0)`, `api/routers/
+proyectos.py:45`) -- el stepper ni siquiera dejaba usar esa mitad
+fraccionaria del campo.
+
+**Fix:** nuevo componente compartido `EditorCantidad.tsx` -- el número entre
+los botones +/- ahora es un input editable directamente (con teclado
+numérico en mobile vía `inputMode="decimal"`), los botones quedan para el
+ajuste fino de ±1. Usado en `AgregarAProyecto.tsx` (popup de agregar) y
+`ItemProyectoRow.tsx` (fila del proyecto), sin duplicar la lógica de
+validación/redondeo entre los dos lugares.
+
+**Verificado con Playwright:** cantidad "12" tipeada directamente en el
+popup, confirmada guardada como 12 en el proyecto; cantidad editada a "7.5"
+directamente en la fila del proyecto, confirmada persistida -- sin errores
+de consola. `tsc --noEmit` y `next build` limpios.
+
+## 6. El comparador pierde de vista qué fila es cuál al deslizar en mobile
+
+**Problema real:** el comparador ya tenía scroll horizontal con indicador
+("Desliza hacia la derecha") en mobile, pero la primera columna (las
+etiquetas "Nombre", "Precio", "Proveedor"...) no era `sticky` -- al deslizar
+para ver el tercer o cuarto producto, esas etiquetas desaparecían de la
+pantalla y el usuario perdía de vista qué fila estaba mirando.
+
+**Fix:** `sticky left-0` + fondo sólido + borde derecho en la columna de
+etiquetas (`app/comparar/page.tsx`), tanto en el encabezado como en cada
+fila del cuerpo de la tabla.
+
+**Verificado con Playwright:** 4 productos reales agregados a comparación,
+viewport de 380px (mobile), scroll horizontal de 500px -- la columna de
+etiquetas se mantiene fija en `x≈25px` (el borde izquierdo del contenedor)
+mientras las columnas de producto se deslizan detrás. Screenshot:
+`comparador-3productos.png` (scratchpad de la sesión).
+
+## 7. Una partida de texto libre se fragmentaba silenciosamente por tilde/mayúscula
+
+**Problema real, encontrado auditando cómo se organizan las partidas:**
+`_agrupar_por_partida()` usaba `item["partida"]` tal cual como clave de
+agrupación. Las partidas de la lista fija (Cimentación, Eléctrico...) nunca
+tienen este problema, pero la opción "Otra..." (texto libre, ver
+`SelectorPartida.tsx`) sí -- "Plomeria" y "Plomería", escritas por el mismo
+usuario en dos ítems distintos, terminaban en dos secciones separadas de la
+cotización, cada una con su propio subtotal parcial, sin ningún aviso.
+
+**Fix:** `_agrupar_por_partida()` ahora agrupa por el texto ya normalizado
+(`normalizar_texto()` de `busqueda.py`, la misma función que ya se usaba en
+este archivo para `_sugerir_partida()` -- sin duplicar lógica de
+normalización). El nombre que se muestra sigue siendo el de la primera vez
+que apareció esa partida, para no imponer una ortografía distinta a la que
+el usuario ya venía usando.
+
+**Verificado:** 2 pruebas nuevas en `tests/test_repositorio_proyectos.py`
+("Plomeria"/"Plomería"/"PLOMERÍA" ahora se agrupan en 1 sola sección con
+subtotal correcto; se conserva la ortografía de la primera aparición).
+251/251 pruebas del backend pasan.
+
+## Verificación conjunta de esta segunda ronda
+
+- `python -m unittest discover -s tests -p "test_*.py"` → 251/251 OK.
+- `npx tsc --noEmit` → limpio.
+- `npx next build` → compila y genera todas las rutas sin errores.
+- Playwright contra el backend local con datos reales (no producción),
+  proyectos de prueba creados y eliminados al terminar
+  (`eliminar_proyecto`), base de datos real sin quedar con basura de la
+  verificación.

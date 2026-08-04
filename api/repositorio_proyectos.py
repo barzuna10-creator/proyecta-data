@@ -98,7 +98,17 @@ def _agrupar_por_partida(items):
     de nada específico de "material" más allá de cantidad/precio/partida --
     cuando exista mano de obra, sumarla a esta misma agrupación no debería
     requerir cambiar esta función, solo pasarle una lista de renglones que
-    también tengan esos tres campos (ver COTIZACIONES_V1.md)."""
+    también tengan esos tres campos (ver COTIZACIONES_V1.md).
+
+    Se agrupa por el texto de partida ya normalizado (sin tildes, sin
+    mayúsculas) -- las partidas de la lista fija siempre coinciden entre
+    sí, pero las de texto libre ("Otra...", ver SelectorPartida.tsx) no
+    tenían ninguna protección: "Plomeria" y "Plomería" quedaban como dos
+    secciones separadas, cada una con su propio subtotal parcial, sin
+    ningún aviso de que la partida se había fragmentado. El nombre que se
+    muestra es el de la primera vez que apareció esa partida (por
+    fecha_agregado), para no imponer una ortografía distinta a la que el
+    usuario ya venía usando."""
 
     grupos = {}
 
@@ -111,8 +121,9 @@ def _agrupar_por_partida(items):
             precio = item["precio_al_agregar"] or 0
 
         nombre_partida = item["partida"] or SIN_PARTIDA
+        clave = normalizar_texto(nombre_partida)
         grupo = grupos.setdefault(
-            nombre_partida, {"partida": nombre_partida, "items": [], "subtotal": 0}
+            clave, {"partida": nombre_partida, "items": [], "subtotal": 0}
         )
         grupo["items"].append(item)
         grupo["subtotal"] += item["cantidad"] * precio
