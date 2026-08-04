@@ -37,6 +37,21 @@ class PruebaExtraccionDiametroPulgadas(unittest.TestCase):
         specs = extraer_specs("Tubo 1/2 pulg PVC")
         self.assertEqual(specs["diametro_pulg"], 0.5)
 
+    def test_numero_mixto_con_guion(self):
+        # Bug real encontrado en la auditoría (ver EQUIVALENCIAS.md):
+        # "2-1/2 pulg" (muy común en National Hardware, Stanley) se leía
+        # como solo "1/2" = 0.5, ignorando el "2-" -- un error de 5x que
+        # dejaba tamaños físicos distintos (2.5" vs 0.5") sin conflicto.
+        specs = extraer_specs('Bisagra 2-1/2" x 2-1/2" bronce satinado')
+        self.assertEqual(specs["diametro_pulg"], 2.5)
+
+    def test_comilla_tipografica_se_reconoce(self):
+        # Bug real: "102 mm (4”)" usa la comilla tipográfica curva (”),
+        # distinta de la comilla recta (") y del símbolo de pulgada (″) --
+        # sin reconocerla, el valor en pulgadas se perdía por completo.
+        specs = extraer_specs("Espatula 102 mm (4”) con mango plastico")
+        self.assertEqual(specs["diametro_pulg"], 4.0)
+
 
 class PruebaExtraccionCalibre(unittest.TestCase):
     def test_con_numeral(self):
@@ -90,6 +105,100 @@ class PruebaExtraccionPesoYCantidad(unittest.TestCase):
     def test_cantidad_uds_abreviado(self):
         specs = extraer_specs("Tornillo gypsum #6 100 uds")
         self.assertEqual(specs["cantidad_unidades"], 100.0)
+
+    def test_cantidad_piezas(self):
+        # Bug real encontrado en la auditoría: "piezas" (muy común en
+        # juegos de herramientas) no estaba en la lista, así que un
+        # juego de 9 piezas y uno de 25 piezas quedaban sin conflicto.
+        specs = extraer_specs("Juego de ratchet con cubos de 9 piezas")
+        self.assertEqual(specs["cantidad_unidades"], 9.0)
+
+
+class PruebaExtraccionLongitudCm(unittest.TestCase):
+    """longitud_cm es distinto de longitud_m (SPECS_RENDIMIENTO, con
+    tolerancia -- ver PruebaExtraccionPotenciaVoltajeLongitud): acá un
+    tubo de 40cm nunca es sustituto de uno de 100cm, así que se compara
+    como compatibilidad física (sin tolerancia), no como rendimiento."""
+
+    def test_longitud_cm_se_detecta(self):
+        specs = extraer_specs("Tubo Abasto Calentador 1/2 x 1/2 x 60 cm Coflex")
+        self.assertEqual(specs["longitud_cm"], 60.0)
+
+    def test_longitud_cm_formato_ancho_x_largo(self):
+        # Bug real encontrado en la auditoría: Novex escribe "anchoxlargo
+        # centimetros" con la unidad al final, no pegada al primer
+        # número ("40x244 centimetros") -- sin esto, esa medida no se
+        # detectaba en absoluto y anchos distintos quedaban sin conflicto.
+        specs = extraer_specs("Precinta plyrock 8mm 40x244 centimetros")
+        self.assertEqual(specs["longitud_cm"], 40.0)
+
+    def test_formato_ancho_x_largo_no_confunde_medida_en_pulgadas(self):
+        # El patrón nuevo exige la "x" pegada a los números -- "1/2 x 60
+        # cm" (con espacios, típico de medidas en pulgadas separadas)
+        # nunca debe leerse como si "2" (de la fracción) fuera el ancho.
+        specs = extraer_specs("Tubo Abasto Calentador 1/2 x 1/2 x 60 cm Coflex")
+        self.assertEqual(specs["longitud_cm"], 60.0)
+
+    def test_longitud_cm_distinta_es_conflicto(self):
+        resultado = comparar_specs({"longitud_cm": 100.0}, {"longitud_cm": 55.0})
+        self.assertTrue(resultado["conflicto"])
+        self.assertIn("longitud_cm", resultado["conflicto_en"])
+
+    def test_longitud_cm_igual_coincide(self):
+        resultado = comparar_specs({"longitud_cm": 60.0}, {"longitud_cm": 60.0})
+        self.assertFalse(resultado["conflicto"])
+        self.assertIn("longitud_cm", resultado["coincidencias"])
+
+
+class PruebaExtraccionVolumen(unittest.TestCase):
+    """volumen_l normaliza galón/litro/ml a un valor común en litros --
+    a diferencia de peso_kg/peso_lb (que se guardan separados sin
+    convertir), acá sí hace falta convertir: es la única forma de que
+    '1 galón' y '3.79 l' del mismo producto sean comparables."""
+
+    def test_galon(self):
+        specs = extraer_specs("Pintura latex 1 galon blanco")
+        self.assertAlmostEqual(specs["volumen_l"], 3.785)
+
+    def test_litro(self):
+        specs = extraer_specs("Sellador acrilico 3.79 l")
+        self.assertAlmostEqual(specs["volumen_l"], 3.79)
+
+    def test_mililitros_se_convierten_a_litros(self):
+        specs = extraer_specs("Thinner corriente 500 ml")
+        self.assertAlmostEqual(specs["volumen_l"], 0.5)
+
+    def test_varios_galones(self):
+        specs = extraer_specs("Impermeabilizante 5 galones cubeta")
+        self.assertAlmostEqual(specs["volumen_l"], 18.925)
+
+    def test_fraccion_de_galon_se_calcula_correcto(self):
+        # Bug real encontrado corriendo el motor de equivalencias
+        # completo: el patrón original solo capturaba un decimal simple,
+        # así que "1/16 galon" perdía el "1/" y leía "16" -- 16 galones
+        # en vez de 1/16, un error de 256x que igual parecía un valor
+        # válido (no fallaba, solo mentía).
+        specs = extraer_specs("Masilla para madera 1/16 galon Lanco (caoba)")
+        self.assertAlmostEqual(specs["volumen_l"], 0.2366, places=3)
+
+    def test_otra_fraccion_de_galon_se_calcula_correcto(self):
+        specs = extraer_specs("Masilla para madera 1/32 galon Lanco (caoba)")
+        self.assertAlmostEqual(specs["volumen_l"], 0.1181, places=3)
+
+    def test_fracciones_distintas_de_galon_no_coinciden(self):
+        resultado = comparar_specs({"volumen_l": 0.2366}, {"volumen_l": 0.1181})
+        self.assertTrue(resultado["conflicto"])
+        self.assertIn("volumen_l", resultado["conflicto_en"])
+
+    def test_galvanizado_no_se_confunde_con_galon(self):
+        # "gal" dentro de "galvanizado" no debe leerse como volumen -- el
+        # patrón exige "gal" como palabra completa (o "galon"/"galones").
+        specs = extraer_specs("Tubo galvanizado 1/2 pulg")
+        self.assertNotIn("volumen_l", specs)
+
+    def test_sin_volumen_detectable(self):
+        specs = extraer_specs("Cemento gris 42.5 kg")
+        self.assertNotIn("volumen_l", specs)
 
 
 class PruebaExtraccionCasosLimite(unittest.TestCase):
@@ -148,6 +257,21 @@ class PruebaComparacionSpecs(unittest.TestCase):
         resultado = comparar_specs({"peso_kg": 42.5}, {})
         self.assertFalse(resultado["conflicto"])
         self.assertIn("peso_kg", resultado["asimetrias"])
+
+    def test_volumen_distinto_es_conflicto(self):
+        # 1 galón vs 1 cuarto (aprox 0.95 l) -- presentaciones distintas,
+        # nunca deben confirmarse como el mismo producto comprable.
+        resultado = comparar_specs({"volumen_l": 3.785}, {"volumen_l": 0.946})
+        self.assertTrue(resultado["conflicto"])
+        self.assertIn("volumen_l", resultado["conflicto_en"])
+
+    def test_volumen_equivalente_en_litros_coincide(self):
+        # El mismo galón, descrito por dos proveedores distintos -- ambos
+        # se normalizan al mismo factor fijo (3.785), así que coinciden
+        # exactamente tras la conversión (misma precisión que peso_kg).
+        resultado = comparar_specs({"volumen_l": 3.785}, {"volumen_l": 3.785})
+        self.assertFalse(resultado["conflicto"])
+        self.assertIn("volumen_l", resultado["coincidencias"])
 
     def test_rendimiento_dentro_de_tolerancia_es_coincidencia(self):
         # 750W vs 710W: ~5.3% de diferencia, dentro del 20% de tolerancia.
