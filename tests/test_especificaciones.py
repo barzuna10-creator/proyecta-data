@@ -10,7 +10,16 @@ durante el desarrollo (fracciones, "#", límites de palabra con "mm"/"m").
 
 import unittest
 
-from especificaciones import comparar_specs, extraer_presentacion_pintura, extraer_specs, unidad_comercial
+from especificaciones import (
+    SPECS_COMPATIBILIDAD_NUEVAS,
+    SPECS_RENDIMIENTO_NUEVAS,
+    TODAS_LAS_SPECS,
+    TODAS_LAS_SPECS_NUEVAS,
+    comparar_specs,
+    extraer_presentacion_pintura,
+    extraer_specs,
+    unidad_comercial,
+)
 
 
 class PruebaExtraccionDiametroPulgadas(unittest.TestCase):
@@ -342,6 +351,181 @@ class PruebaPresentacionPinturaSinContaminacion(unittest.TestCase):
 
     def test_presentacion_simple_sigue_funcionando(self):
         self.assertEqual(extraer_presentacion_pintura("Barniz Poliuretano Mate Cuarto Lanco"), "Cuarto")
+
+
+class PruebaBugSchConfundidoConFraccionMixta(unittest.TestCase):
+    # Bug real y ya activo en producción, encontrado en la Fase 2
+    # implementando la spec "schedule" (ver MOTOR_ESPECIFICACIONES_ANALISIS.md,
+    # Hallazgo #5): sin el lookbehind, "SCH40 1/2"" leía "40 1/2" como
+    # número mixto (40.5 pulg) -- el "40" de "SCH40" (spec distinta) se
+    # colaba como la parte entera de la fracción.
+    def test_sch_no_se_confunde_con_parte_entera(self):
+        specs = extraer_specs('Adaptador macho PVC SCH40 1/2"')
+        self.assertEqual(specs["diametro_pulg"], 0.5)
+
+    def test_sch_con_numero_mixto_real_no_se_confunde(self):
+        specs = extraer_specs('Conector conduit macho UL SCH40 11/2"')
+        # "11/2" (sin separador) sigue siendo un caso distinto y ya
+        # documentado (Hallazgo #5, no resuelto todavía) -- lo que importa
+        # acá es que ya NO se lea como "40 11/2" (¡fusionando el 40 de
+        # SCH40!), que sí era el bug original.
+        self.assertNotEqual(specs["diametro_pulg"], 40.0 + 11 / 2)
+
+    def test_numero_mixto_legitimo_sigue_funcionando(self):
+        # El caso que este patrón existe para resolver en primer lugar
+        # (ver EQUIVALENCIAS.md) no se puede romper con el fix del bug de
+        # arriba.
+        specs = extraer_specs('Bisagra 2-1/2" x 2-1/2" bronce satinado')
+        self.assertEqual(specs["diametro_pulg"], 2.5)
+
+
+class PruebaSpecsNuevasFase2SoloExtraccion(unittest.TestCase):
+    """Las specs de la Fase 2 (ver MOTOR_ESPECIFICACIONES_ANALISIS.md) se
+    extraen pero deliberadamente NO se comparan todavía -- comparar_specs()
+    solo itera sobre TODAS_LAS_SPECS, así que agregarlas al dict de
+    extraer_specs() no puede cambiar ningún veredicto existente. Esta
+    clase prueba ambas mitades de esa garantía: que se extraen bien, y que
+    siguen fuera de TODAS_LAS_SPECS."""
+
+    def test_ninguna_spec_nueva_esta_activa_todavia(self):
+        self.assertFalse(TODAS_LAS_SPECS_NUEVAS & TODAS_LAS_SPECS)
+
+    def test_angulo_grados_simbolo_real(self):
+        specs = extraer_specs("Codo 90° PVC")
+        self.assertEqual(specs["angulo_grados"], 90.0)
+
+    def test_angulo_grados_indicador_ordinal(self):
+        # El catálogo usa "º" (indicador ordinal) y "°" (grado real)
+        # indistintamente para lo mismo -- confirmado contra el catálogo
+        # real (ver Hallazgo del análisis).
+        specs = extraer_specs("Bisagra esquinera cierre lento 90º satín")
+        self.assertEqual(specs["angulo_grados"], 90.0)
+
+    def test_angulo_grados_palabra_plural(self):
+        specs = extraer_specs("Calentador de ambiente 1500w 360 grados 2 velocidades")
+        self.assertEqual(specs["angulo_grados"], 360.0)
+
+    def test_angulo_grados_no_confunde_temperatura(self):
+        # "°C"/"°F" es temperatura, no ángulo -- 33 casos reales mezclados
+        # en el mismo catálogo (spray de alta temperatura, pistolas de
+        # calor). Ver Hallazgo del análisis.
+        specs = extraer_specs("Pistola Calor 300 a 500 °C Ingco")
+        self.assertNotIn("angulo_grados", specs)
+        specs = extraer_specs("Spray Alta Temperatura 1200°F Negro Mate")
+        self.assertNotIn("angulo_grados", specs)
+
+    def test_angulo_grados_no_confunde_grado_de_acero_de_varilla(self):
+        # "grado 60"/"grado 40" en varilla de construcción es la
+        # resistencia del acero, no un ángulo -- por eso solo se acepta
+        # "grados" en plural, nunca "grado" en singular.
+        specs = extraer_specs("Varilla construcción nacional deformada #4 grado 60- 6 m de largo")
+        self.assertNotIn("angulo_grados", specs)
+
+    def test_schedule_pegado(self):
+        specs = extraer_specs('Conector conduit macho UL SCH40 1 1/2"')
+        self.assertEqual(specs["schedule"], 40.0)
+
+    def test_schedule_con_espacio(self):
+        specs = extraer_specs('Tubo PVC SCH 80 1"')
+        self.assertEqual(specs["schedule"], 80.0)
+
+    def test_amperaje_glued(self):
+        specs = extraer_specs("Breaker de enchufar 2 x 40A QO Square D")
+        self.assertEqual(specs["amperaje_a"], 40.0)
+
+    def test_amperaje_con_espacio_no_se_extrae(self):
+        # Decisión de diseño deliberada (ver Hallazgo #3 del análisis):
+        # "15 A" con espacio es indistinguible de usos de "a" como
+        # preposición ("#40 A Presión", "#8 A #10" como rango) sin más
+        # contexto -- se prefiere perder este caso real a inventar una
+        # incompatibilidad falsa.
+        specs = extraer_specs("Enchufe hule 125 V 15 A UL NEMA 5-15p")
+        self.assertNotIn("amperaje_a", specs)
+
+    def test_amperaje_descarta_codigos_de_catalogo(self):
+        # Bug real encontrado en el análisis: sin el tope de magnitud, un
+        # código de SKU que termina en número+"a" se leía como amperaje.
+        specs = extraer_specs("IM1 LAMPARA COLGANTE NEGRA COPAS AMBAR 21142A-8H-BK 8L E27")
+        self.assertNotIn("amperaje_a", specs)
+
+    def test_calibre_awg(self):
+        specs = extraer_specs("Cable TSJ-N 2 x 16 AWG Viakon negro")
+        self.assertEqual(specs["calibre_awg"], 16.0)
+
+    def test_calibre_awg_no_se_confunde_con_calibre_generico(self):
+        # calibre_awg es una clave separada de "calibre" (#N: broca,
+        # varilla, cordel de albañil, lámina de gypsum -- ver Hallazgo #2).
+        specs = extraer_specs("Varilla construcción nacional deformada #4")
+        self.assertNotIn("calibre_awg", specs)
+
+    def test_presion_psi(self):
+        specs = extraer_specs("Hidrolavadora 110 V 1600 PSI K2 Karcher")
+        self.assertEqual(specs["presion_psi"], 1600.0)
+
+    def test_potencia_hp_entero(self):
+        specs = extraer_specs("Compresor 2 Hp 13.2 Galones 120V")
+        self.assertEqual(specs["potencia_hp"], 2.0)
+
+    def test_potencia_hp_fraccion(self):
+        # Sin _NUM_O_FRACCION, "1/2 Hp" se leía como "2" (el denominador
+        # solo) -- el mismo bug ya corregido para diametro_pulg y volumen.
+        specs = extraer_specs("Motor Porton 1/2 Hp Chamberlain")
+        self.assertEqual(specs["potencia_hp"], 0.5)
+
+    def test_potencia_hp_distinta_de_potencia_w(self):
+        specs = extraer_specs("Compresor 2 Hp 13.2 Galones 120V")
+        self.assertNotIn("potencia_w", specs)
+
+    def test_energia_btu_sin_separador(self):
+        specs = extraer_specs("Aire acondicionado 12000 BTU portátil 115 V Mabe")
+        self.assertEqual(specs["energia_btu"], 12000.0)
+
+    def test_energia_btu_con_punto_como_separador_de_miles(self):
+        # Hallazgo #4 del análisis: "12.000 BTU" es doce mil, no doce --
+        # ningún BTU real es fraccionario en este catálogo.
+        specs = extraer_specs("Aire acondicionado 12.000 BTU inverter 220 V Mabe")
+        self.assertEqual(specs["energia_btu"], 12000.0)
+
+    def test_energia_btu_con_coma_como_separador_de_miles(self):
+        specs = extraer_specs("Aire acondicionado portátil 12,000 BTU Hisense 115 V Wi-Fi")
+        self.assertEqual(specs["energia_btu"], 12000.0)
+
+    def test_voltaje_ampliado_reconoce_vac(self):
+        specs = extraer_specs("Interruptor 10A 250Vac 1 modulo iluminable")
+        self.assertEqual(specs["voltaje"], 250.0)
+
+    def test_voltaje_ampliado_reconoce_volt(self):
+        specs = extraer_specs("Protector De Voltaje 220Volt - 50/60Hz")
+        self.assertEqual(specs["voltaje"], 220.0)
+
+    def test_voltaje_simple_sigue_funcionando(self):
+        specs = extraer_specs("Bateria 12V 1.5 A Ingco")
+        self.assertEqual(specs["voltaje"], 12.0)
+
+    def test_cantidad_unidades_reconoce_pzas(self):
+        specs = extraer_specs('Juego cubos 3/8" milimétricas 6 puntas 75 pzas Workpro')
+        self.assertEqual(specs["cantidad_unidades"], 75.0)
+
+    def test_cantidad_unidades_reconoce_ud(self):
+        specs = extraer_specs('Hueso mascotas 4" natural 1 ud')
+        self.assertEqual(specs["cantidad_unidades"], 1.0)
+
+    def test_diametro_mm_se_extrae(self):
+        # diametro_mm ya se extraía desde antes de esta sesión (bug de
+        # Hallazgo #1: se extrae pero nunca se comparaba). Sigue
+        # extrayéndose igual; lo nuevo es que ahora está clasificado en
+        # SPECS_COMPATIBILIDAD_NUEVAS, listo para activarse cuando se mida
+        # el impacto.
+        specs = extraer_specs("Broca Bisagra Invisible 35 mm Ingco")
+        self.assertEqual(specs["diametro_mm"], 35.0)
+        self.assertIn("diametro_mm", SPECS_COMPATIBILIDAD_NUEVAS)
+
+    def test_clasificacion_completa_de_specs_nuevas(self):
+        self.assertEqual(
+            SPECS_COMPATIBILIDAD_NUEVAS,
+            {"diametro_mm", "angulo_grados", "schedule", "amperaje_a", "calibre_awg", "energia_btu"},
+        )
+        self.assertEqual(SPECS_RENDIMIENTO_NUEVAS, {"presion_psi", "potencia_hp"})
 
 
 if __name__ == "__main__":
