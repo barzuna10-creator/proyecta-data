@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 from db import BASE_DATOS
-from api.routers import proyectos
+from api.routers import proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
 from busqueda import buscar_fts as _buscar_fts_motor
 from familias import analizar_nombre as _analizar_nombre_familia
@@ -31,6 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(proyectos.router)
+app.include_router(sistemas_constructivos.router)
 
 # Etapa 2 del motor de búsqueda (ver busqueda.py): alterna entre el buscador
 # actual (LIKE + precio) y FTS5. Cambiar a False vuelve al buscador anterior
