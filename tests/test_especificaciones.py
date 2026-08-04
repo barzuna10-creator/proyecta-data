@@ -11,6 +11,7 @@ durante el desarrollo (fracciones, "#", límites de palabra con "mm"/"m").
 import unittest
 
 from especificaciones import (
+    SPECS_COMPATIBILIDAD,
     SPECS_COMPATIBILIDAD_NUEVAS,
     SPECS_RENDIMIENTO_NUEVAS,
     TODAS_LAS_SPECS,
@@ -380,15 +381,17 @@ class PruebaBugSchConfundidoConFraccionMixta(unittest.TestCase):
 
 
 class PruebaSpecsNuevasFase2SoloExtraccion(unittest.TestCase):
-    """Las specs de la Fase 2 (ver MOTOR_ESPECIFICACIONES_ANALISIS.md) se
-    extraen pero deliberadamente NO se comparan todavía -- comparar_specs()
-    solo itera sobre TODAS_LAS_SPECS, así que agregarlas al dict de
-    extraer_specs() no puede cambiar ningún veredicto existente. Esta
-    clase prueba ambas mitades de esa garantía: que se extraen bien, y que
-    siguen fuera de TODAS_LAS_SPECS."""
+    """Specs de la Fase 2 (MOTOR_ESPECIFICACIONES_ANALISIS.md). Todas se
+    extraen; solo 4 (diametro_mm/angulo_grados/amperaje_a/calibre_awg) se
+    activaron en la Fase 4 (MOTOR_ESPECIFICACIONES_FASE3_MEDICION.md) tras
+    medir su impacto real -- las otras 4 (schedule/potencia_hp/
+    presion_psi/energia_btu) siguen extrayéndose sin compararse todavía,
+    por falta de evidencia suficiente (demasiado raras en el catálogo para
+    la muestra de la Fase 3), no por riesgo detectado."""
 
-    def test_ninguna_spec_nueva_esta_activa_todavia(self):
+    def test_specs_todavia_pendientes_siguen_fuera_de_todas_las_specs(self):
         self.assertFalse(TODAS_LAS_SPECS_NUEVAS & TODAS_LAS_SPECS)
+        self.assertEqual(TODAS_LAS_SPECS_NUEVAS, {"schedule", "energia_btu", "presion_psi", "potencia_hp"})
 
     def test_angulo_grados_simbolo_real(self):
         specs = extraer_specs("Codo 90° PVC")
@@ -511,21 +514,57 @@ class PruebaSpecsNuevasFase2SoloExtraccion(unittest.TestCase):
         self.assertEqual(specs["cantidad_unidades"], 1.0)
 
     def test_diametro_mm_se_extrae(self):
-        # diametro_mm ya se extraía desde antes de esta sesión (bug de
-        # Hallazgo #1: se extrae pero nunca se comparaba). Sigue
-        # extrayéndose igual; lo nuevo es que ahora está clasificado en
-        # SPECS_COMPATIBILIDAD_NUEVAS, listo para activarse cuando se mida
-        # el impacto.
         specs = extraer_specs("Broca Bisagra Invisible 35 mm Ingco")
         self.assertEqual(specs["diametro_mm"], 35.0)
-        self.assertIn("diametro_mm", SPECS_COMPATIBILIDAD_NUEVAS)
 
-    def test_clasificacion_completa_de_specs_nuevas(self):
-        self.assertEqual(
-            SPECS_COMPATIBILIDAD_NUEVAS,
-            {"diametro_mm", "angulo_grados", "schedule", "amperaje_a", "calibre_awg", "energia_btu"},
-        )
+    def test_clasificacion_completa_de_specs_pendientes(self):
+        self.assertEqual(SPECS_COMPATIBILIDAD_NUEVAS, {"schedule", "energia_btu"})
         self.assertEqual(SPECS_RENDIMIENTO_NUEVAS, {"presion_psi", "potencia_hp"})
+
+
+class PruebaSpecsActivadasEnFase4(unittest.TestCase):
+    """diametro_mm/angulo_grados/amperaje_a/calibre_awg -- activadas tras
+    medir su impacto real contra 8,492 pares candidato reales (ver
+    MOTOR_ESPECIFICACIONES_FASE3_MEDICION.md: 157 falsos positivos
+    evitados combinados, 5 falsos negativos corregidos, cero riesgo
+    detectado). A diferencia de la clase anterior, acá se prueba el
+    comportamiento real de comparar_specs() -- ya activo, no una
+    extracción aislada."""
+
+    def test_las_4_estan_en_specs_compatibilidad(self):
+        for clave in ("diametro_mm", "angulo_grados", "amperaje_a", "calibre_awg"):
+            self.assertIn(clave, SPECS_COMPATIBILIDAD)
+            self.assertIn(clave, TODAS_LAS_SPECS)
+
+    def test_diametro_mm_distinto_es_conflicto_real(self):
+        # Caso real de la medición: dos llaves corofija de tamaño distinto.
+        specs_a = extraer_specs("Llave Corofija Corona 6 - 22 mm Ingco")
+        specs_b = extraer_specs("Llave Corofija 10 mm Ingco")
+        resultado = comparar_specs(specs_a, specs_b)
+        self.assertTrue(resultado["conflicto"])
+        self.assertIn("diametro_mm", resultado["conflicto_en"])
+
+    def test_angulo_grados_distinto_es_conflicto_real(self):
+        # El ejemplo que motivó toda la Fase 3: codo de 45° vs 90°.
+        specs_a = extraer_specs('Codo 45° liso PVC SCH40 3/4"')
+        specs_b = extraer_specs('Codo 90° roscado PVC SCH40 3/4"')
+        resultado = comparar_specs(specs_a, specs_b)
+        self.assertTrue(resultado["conflicto"])
+        self.assertIn("angulo_grados", resultado["conflicto_en"])
+
+    def test_amperaje_distinto_es_conflicto_real(self):
+        specs_a = extraer_specs("Breaker 2 polos 100A con caja para intemperie pequeña de parche")
+        specs_b = extraer_specs("Breaker 2 polos 40A con caja para intemperie pequeña de parche")
+        resultado = comparar_specs(specs_a, specs_b)
+        self.assertTrue(resultado["conflicto"])
+        self.assertIn("amperaje_a", resultado["conflicto_en"])
+
+    def test_calibre_awg_distinto_es_conflicto_real(self):
+        specs_a = extraer_specs("Tubo termocontráctil negro 10-2 AWG 1,2 m")
+        specs_b = extraer_specs("Tubo termocontráctil negro 22-18 AWG 1,2 m")
+        resultado = comparar_specs(specs_a, specs_b)
+        self.assertTrue(resultado["conflicto"])
+        self.assertIn("calibre_awg", resultado["conflicto_en"])
 
 
 if __name__ == "__main__":

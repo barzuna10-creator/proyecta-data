@@ -30,7 +30,16 @@ from familias import analizar_nombre as _analizar_presentacion_pintura
 # detectado para esta clave y difieren, son incompatibles sin excepción
 # (un taladro de mandril 1/2" y uno de 3/8" no son sustitutos, sin importar
 # qué tan parecido sea el resto del nombre).
-SPECS_COMPATIBILIDAD = {"diametro_pulg", "calibre", "longitud_cm"}
+#
+# diametro_mm/angulo_grados/amperaje_a/calibre_awg activadas en la Fase 4
+# (ver MOTOR_ESPECIFICACIONES_FASE3_MEDICION.md) -- las 4 con evidencia
+# real y positiva medida contra 8,492 pares candidato reales (157 falsos
+# positivos evitados combinados, 5 falsos negativos corregidos, cero casos
+# de riesgo detectado en revisión manual completa de la más grande).
+SPECS_COMPATIBILIDAD = {
+    "diametro_pulg", "calibre", "longitud_cm",
+    "diametro_mm", "angulo_grados", "amperaje_a", "calibre_awg",
+}
 
 # Specs de "unidad de venta": si ambos las tienen y difieren, tampoco son
 # comparables (500 uds. no es lo mismo que 1000 uds.) -- pero si solo UNO
@@ -47,23 +56,18 @@ SPECS_RENDIMIENTO = {"potencia_w", "voltaje", "longitud_m"}
 TOLERANCIA_RENDIMIENTO = 0.20  # 20%, igual que el peso_similar de similares.py
 
 # ============================================================================
-# Motor de especificaciones -- Fase 2 (ver MOTOR_ESPECIFICACIONES_ANALISIS.md
-# para la Fase 1: análisis del catálogo completo, 60,421 productos, que
-# fundamenta cada patrón nuevo de acá abajo con frecuencia real y ejemplos
-# de falso positivo ya verificados).
+# Motor de especificaciones -- specs de la Fase 2
+# (MOTOR_ESPECIFICACIONES_ANALISIS.md) todavía sin activar.
 #
-# Estas specs YA se extraen (quedan en el dict que devuelve extraer_specs())
-# pero DELIBERADAMENTE no se agregan todavía a SPECS_COMPATIBILIDAD /
-# SPECS_UNIDAD_VENTA / SPECS_RENDIMIENTO ni a TODAS_LAS_SPECS -- eso
-# activaría un veto nuevo en comparar_specs(), y por lo tanto cambiaría qué
-# se confirma en Presupuestos Inteligentes, el comparador, similares y
-# equivalencias, antes de medir el impacto real (Fase 3). La clasificación
-# de abajo ya está decidida para cuando llegue esa activación -- no hay que
-# rediseñar nada, solo unir estos dos conjuntos a los de arriba.
-SPECS_COMPATIBILIDAD_NUEVAS = {
-    "diametro_mm", "angulo_grados", "schedule", "amperaje_a",
-    "calibre_awg", "energia_btu",
-}
+# schedule/potencia_hp/presion_psi/energia_btu YA se extraen (quedan en el
+# dict que devuelve extraer_specs()) pero DELIBERADAMENTE no se agregan
+# todavía a SPECS_COMPATIBILIDAD/SPECS_RENDIMIENTO ni a TODAS_LAS_SPECS --
+# no por riesgo medido (la Fase 3 no encontró ninguno), sino porque son
+# demasiado raras en el catálogo (0.07%-0.75%) para que la muestra
+# aleatoria de esa medición las haya podido evaluar con evidencia
+# suficiente. Necesitan una muestra dirigida a sus categorías de producto
+# antes de activarse -- ver MOTOR_ESPECIFICACIONES_FASE3_MEDICION.md.
+SPECS_COMPATIBILIDAD_NUEVAS = {"schedule", "energia_btu"}
 SPECS_RENDIMIENTO_NUEVAS = {"presion_psi", "potencia_hp"}
 TODAS_LAS_SPECS_NUEVAS = SPECS_COMPATIBILIDAD_NUEVAS | SPECS_RENDIMIENTO_NUEVAS
 
