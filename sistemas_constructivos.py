@@ -34,7 +34,7 @@ aplica una regla de rendimiento ya documentada.
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 
@@ -61,6 +61,20 @@ class UnidadCompra(Enum):
     KG = "kg"
     GALON = "galón"
     PAR = "par"
+
+
+class UnidadManoObra(Enum):
+    """Cómo se mide/cotiza la mano de obra -- deliberadamente NO reutiliza
+    UnidadCompra: la mano de obra no se "compra" del catálogo (no tiene
+    termino_busqueda, no la vende ningún proveedor de materiales), es una
+    magnitud distinta que necesita su propio vocabulario."""
+
+    JORNAL = "jornal"  # un día de trabajo de una cuadrilla/persona
+    HORA = "hora"
+    GLOBAL = "global"  # tarifa fija por todo el trabajo, sin importar cantidad
+    M2_INSTALADO = "m² instalado"
+    M_LINEAL_INSTALADO = "m instalado"
+    UNIDAD_INSTALADA = "unidad instalada"
 
 
 @dataclass(frozen=True)
@@ -101,6 +115,80 @@ class Material:
     derivado_de: str | None = None
     opcional: bool = False
     justificacion: str = ""
+
+    # Extensiones aditivas (ver SISTEMAS_CONSTRUCTIVOS_V1.md, sección
+    # "Ampliaciones futuras") -- todas con default vacío/None a propósito:
+    # ningún Material existente tuvo que cambiar para que estos campos
+    # existieran, y ninguno queda poblado con un valor inventado solo
+    # para "usar" el campo. Estructura lista, datos reales pendientes.
+
+    # {región: ReglaRendimiento} -- variante regional del rendimiento por
+    # defecto. calcular_materiales(region=...) la usa si existe para esa
+    # región; si no, cae al `rendimiento` de siempre. La clave "por
+    # defecto" (`rendimiento`) nunca deja de ser válida -- una región sin
+    # variante definida simplemente usa el valor nacional, nunca falla.
+    rendimientos_regionales: dict = field(default_factory=dict)
+
+    # ids de proveedor (mismos valores que productos.proveedor en la base
+    # real: "EPA", "El Lagar", etc.) en orden de preferencia -- todavía no
+    # hay ningún consumidor que los use (busqueda.buscar_fts() no expone
+    # hoy un filtro de proveedor), así que queda vacío en todos los
+    # materiales existentes. El campo existe para no tener que romper la
+    # forma de Material el día que sí se use.
+    proveedores_preferidos: tuple = ()
+
+    # ids de OTROS Material dentro del MISMO Sistema que cumplen el mismo
+    # rol y podrían usarse en su lugar (ej. dos calibres de un mismo
+    # material). Para sustituciones entre SISTEMAS enteros (ej. muro de
+    # block vs. muro de gypsum como alternativas para una partición) ver
+    # Sistema.alternativa_de más abajo -- son dos niveles distintos de la
+    # misma idea, no el mismo campo repetido.
+    alternativas: tuple = ()
+
+
+@dataclass(frozen=True)
+class ManoDeObra:
+    """Una línea de mano de obra dentro de un Sistema -- deliberadamente
+    NO es un Material: no se busca en el catálogo de productos (no tiene
+    termino_busqueda ni unidad_compra, esos conceptos son de "cosas que
+    se compran"), y por eso vive en su propia lista (Sistema.mano_obra),
+    nunca mezclada con Sistema.materiales. Esto es lo que le permite a
+    la prueba que verifica CADA término de búsqueda contra el catálogo
+    real (ver tests/test_sistemas_constructivos.py) seguir siendo válida
+    sin ningún caso especial: nunca hay un término de mano de obra que
+    revisar ahí, estructuralmente no puede haberlo.
+
+    Reutiliza ReglaRendimiento tal cual (misma mecánica de
+    cantidad_por_unidad/merma/fijo que ya existe para materiales) --
+    ej. "un albañil con ayudante levanta ~9 m² de muro de block por
+    jornada" es la misma forma de regla que "12.5 bloques por m²", solo
+    que el rendimiento es de TRABAJO, no de material.
+
+    `tarifa_referencia` es deliberadamente None en todos los sistemas de
+    esta versión -- no existe todavía una fuente de precios de mano de
+    obra verificada de la misma forma que busqueda.buscar_fts() verifica
+    precios de materiales; poner un número acá sería inventar un dato
+    que el resto del proyecto nunca inventaría para un material."""
+
+    id: str
+    nombre: str
+    unidad: UnidadManoObra
+    rendimiento: ReglaRendimiento
+    tarifa_referencia: float | None = None
+    justificacion: str = ""
+
+
+@dataclass(frozen=True)
+class LineaManoObra:
+    """Fila de mano de obra del resultado -- misma idea que LineaMaterial
+    pero para trabajo, no para productos comprables."""
+
+    sistema_origen: str
+    mano_obra_id: str
+    nombre: str
+    unidad: UnidadManoObra
+    cantidad: float
+    contexto: str = ""
 
 
 @dataclass(frozen=True)
@@ -154,6 +242,22 @@ class Sistema:
     materiales: tuple[Material, ...] = ()
     subsistemas: tuple[UsoSubsistema, ...] = ()
 
+    # Extensión aditiva: mano de obra propia de este sistema (no de sus
+    # subsistemas, esos ya aportan la suya al recorrerse recursivamente
+    # en calcular_mano_obra()). Vacío en todos los sistemas de esta
+    # versión salvo MURO_BLOCK, que lleva un ejemplo real para probar
+    # que el mecanismo funciona de punta a punta, no solo que el campo
+    # existe sin usarse (ver SISTEMAS_CONSTRUCTIVOS_V1.md).
+    mano_obra: tuple[ManoDeObra, ...] = ()
+
+    # ids de OTROS Sistema que cumplen el mismo rol funcional y podrían
+    # usarse en su lugar (ej. MURO_GYPSUM es alternativa de MURO_BLOCK
+    # para una partición interior sin carga). Puramente informativo en
+    # esta versión -- no cambia ningún cálculo, es la base para que un
+    # futuro "sugerir alternativas" lo lea sin tener que inventar la
+    # relación desde cero.
+    alternativa_de: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class LineaMaterial:
@@ -188,7 +292,21 @@ def registrar(sistema):
     return sistema
 
 
-def calcular_materiales(sistema_id, cantidad, overrides=None, _contexto=""):
+def _regla_efectiva(rendimiento, region, overrides_merma, clave_merma):
+    """Resuelve qué ReglaRendimiento usar de verdad: la variante
+    regional si existe para `region` (si no, la de siempre -- una región
+    sin variante definida nunca falla, cae al valor nacional), y encima
+    un override de merma puntual si se pidió uno para esta clave.
+    `dataclasses.replace()` sobre un frozen dataclass -- no hace falta
+    que ReglaRendimiento deje de ser inmutable para poder ajustarla por
+    llamada."""
+
+    if overrides_merma and clave_merma in overrides_merma:
+        rendimiento = replace(rendimiento, merma=overrides_merma[clave_merma])
+    return rendimiento
+
+
+def calcular_materiales(sistema_id, cantidad, overrides=None, region=None, overrides_merma=None, _contexto=""):
     """Expande un sistema (y, si es compuesto, sus subsistemas
     recursivamente) en una lista plana de LineaMaterial.
 
@@ -204,7 +322,20 @@ def calcular_materiales(sistema_id, cantidad, overrides=None, _contexto=""):
     enchapada de ESTE baño puntual, no la aproximación por defecto). Se
     identifica por `uso_id`, no por `sistema_id`, porque un mismo
     subsistema puede usarse más de una vez dentro del mismo sistema
-    compuesto (ver UsoSubsistema)."""
+    compuesto (ver UsoSubsistema).
+
+    `region`: clave opcional para usar la variante de
+    Material.rendimientos_regionales de esa región cuando exista, en vez
+    del rendimiento nacional por defecto (ej. densidad de tornillos de
+    techo más alta en zona de viento fuerte). Ningún Material de esta
+    versión tiene variantes regionales todavía -- pasar `region` a un
+    sistema sin ninguna definida simplemente no cambia nada, nunca falla.
+
+    `overrides_merma`: dict opcional {material_id: nueva_merma} para
+    ajustar el desperdicio de un material puntual sin tocar su
+    definición (ej. un ingeniero que sabe que en obra siempre pierde más
+    cerámica de lo normal). Se aplica DESPUÉS de resolver la variante
+    regional, sobre lo que sea que haya quedado."""
 
     overrides = overrides or {}
     sistema = REGISTRO[sistema_id]
@@ -212,11 +343,14 @@ def calcular_materiales(sistema_id, cantidad, overrides=None, _contexto=""):
     cantidades_calculadas = {}
 
     for material in sistema.materiales:
+        rendimiento = material.rendimientos_regionales.get(region, material.rendimiento) if region else material.rendimiento
+        rendimiento = _regla_efectiva(rendimiento, region, overrides_merma, material.id)
+
         if material.derivado_de:
             base = cantidades_calculadas[material.derivado_de]
         else:
             base = cantidad
-        valor = material.rendimiento.calcular(base)
+        valor = rendimiento.calcular(base)
         cantidades_calculadas[material.id] = valor
         lineas.append(
             LineaMaterial(
@@ -240,7 +374,50 @@ def calcular_materiales(sistema_id, cantidad, overrides=None, _contexto=""):
         else:
             cantidad_subsistema = uso.cantidad_fija
         lineas.extend(
-            calcular_materiales(uso.sistema_id, cantidad_subsistema, overrides, _contexto=uso.descripcion)
+            calcular_materiales(
+                uso.sistema_id, cantidad_subsistema, overrides,
+                region=region, overrides_merma=overrides_merma, _contexto=uso.descripcion,
+            )
+        )
+
+    return lineas
+
+
+def calcular_mano_obra(sistema_id, cantidad, overrides=None, _contexto=""):
+    """Mismo recorrido que calcular_materiales() (sistema + subsistemas
+    recursivamente, mismos `overrides` por uso_id para mantener
+    consistencia si se llaman los dos para el mismo cálculo), pero para
+    Sistema.mano_obra en vez de Sistema.materiales -- función aparte, no
+    una rama más dentro de calcular_materiales(), para no cambiar la
+    forma de lo que ya devuelve (una lista de LineaMaterial) ni obligar a
+    quien ya la usa a filtrar dos tipos de línea distintos del mismo
+    resultado."""
+
+    overrides = overrides or {}
+    sistema = REGISTRO[sistema_id]
+    lineas = []
+
+    for trabajo in sistema.mano_obra:
+        lineas.append(
+            LineaManoObra(
+                sistema_origen=sistema.id,
+                mano_obra_id=trabajo.id,
+                nombre=trabajo.nombre,
+                unidad=trabajo.unidad,
+                cantidad=trabajo.rendimiento.calcular(cantidad),
+                contexto=_contexto,
+            )
+        )
+
+    for uso in sistema.subsistemas:
+        if uso.uso_id in overrides:
+            cantidad_subsistema = overrides[uso.uso_id]
+        elif uso.factor is not None:
+            cantidad_subsistema = cantidad * uso.factor
+        else:
+            cantidad_subsistema = uso.cantidad_fija
+        lineas.extend(
+            calcular_mano_obra(uso.sistema_id, cantidad_subsistema, overrides, _contexto=uso.descripcion)
         )
 
     return lineas
@@ -303,6 +480,23 @@ MURO_BLOCK = registrar(
                 ),
             ),
         ),
+        mano_obra=(
+            ManoDeObra(
+                id="albanileria",
+                nombre="Albañilería -- levantado de block",
+                unidad=UnidadManoObra.JORNAL,
+                rendimiento=ReglaRendimiento(
+                    cantidad_por_unidad=1 / 9,
+                    redondear_entero=False,
+                    nota="Un albañil con ayudante levanta aproximadamente 9 m² de muro "
+                    "de block por jornada -- valor de referencia citado en manuales de "
+                    "rendimiento de mano de obra, no medido contra un proyecto real. "
+                    "tarifa_referencia queda sin poblar a propósito: no hay todavía una "
+                    "fuente de precios de mano de obra verificada de la misma forma que "
+                    "busqueda.buscar_fts() verifica precios de materiales.",
+                ),
+            ),
+        ),
     )
 )
 
@@ -312,6 +506,7 @@ MURO_GYPSUM = registrar(
         nombre="Muro de gypsum (drywall)",
         descripcion="Pared liviana de perfilería metálica y lámina de gypsum -- alternativa al block para particiones interiores que no llevan carga ni humedad directa.",
         dimension=Dimension.AREA_M2,
+        alternativa_de=("muro_block",),
         materiales=(
             Material(
                 id="lamina",
@@ -470,6 +665,22 @@ TECHO_LAMINA = registrar(
                     nota="~6 tornillos por m² -- patrón estándar de fijación cada "
                     "cierta distancia sobre la estructura.",
                 ),
+                # Ejemplo real de rendimiento regional (ver
+                # Material.rendimientos_regionales): zonas de viento
+                # fuerte (costa Pacífico/Guanacaste) suelen especificar
+                # mayor densidad de fijación por norma de viento -- una
+                # diferencia real y conocida en la práctica, no un
+                # relleno para "usar" el campo. Aproximación conservadora
+                # (+33%); verificar contra el código de viento aplicable
+                # al proyecto puntual antes de usarla para comprar.
+                rendimientos_regionales={
+                    "guanacaste": ReglaRendimiento(
+                        cantidad_por_unidad=8,
+                        nota="Densidad de fijación más alta por norma de viento en zona "
+                        "costera/Guanacaste -- aproximación conservadora, no un valor de "
+                        "código verificado.",
+                    ),
+                },
             ),
         ),
     )

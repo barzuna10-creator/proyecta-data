@@ -117,13 +117,45 @@ for linea in sc.calcular_materiales("bano", 4):
 sc.calcular_materiales("bano", 4, overrides={"pared_enchapada": 15.0})
 ```
 
+## Revisión de extensibilidad (antes de que más módulos dependan de este modelo)
+
+Se revisó si el modelo soporta 5 ampliaciones futuras sin romper nada de
+lo ya construido -- mano de obra, rendimientos regionales, desperdicio
+configurable, proveedores preferidos, sustituciones de materiales. Para
+cada una: qué se rompía si se agregaba tal cual estaba el modelo, y el
+cambio mínimo aplicado (todo aditivo -- ningún `Sistema`/`Material` de
+los 10 existentes tuvo que cambiar su forma de construcción).
+
+| Ampliación | Qué faltaba | Cambio mínimo aplicado |
+|---|---|---|
+| **Mano de obra** | `Material` conflaba "cosa comprable del catálogo" con "línea de costo del sistema" -- forzar mano de obra ahí habría intentado buscarla en `busqueda.buscar_fts()` y roto la prueba que exige que TODO término de búsqueda devuelva resultados reales. | Tipo nuevo y paralelo `ManoDeObra` (reutiliza `ReglaRendimiento` tal cual) en una lista aparte `Sistema.mano_obra`, con su propia `calcular_mano_obra()` -- nunca se mezcla con `materiales`, así que la garantía de "todo término de búsqueda es real" se mantiene sin ningún caso especial. Poblado con un ejemplo real (albañilería de `muro_block`, 1 jornal cada ~9 m²) para probar que el mecanismo funciona de punta a punta, no solo que el campo existe. |
+| **Rendimientos regionales** | Un `ReglaRendimiento` era un solo valor fijo por `Material`, sin ningún parámetro de dónde aplica. | `Material.rendimientos_regionales: dict` opcional (`{región: ReglaRendimiento}`), `calcular_materiales(..., region=...)` la usa si existe para esa región y cae al valor nacional si no -- una región sin variante definida nunca falla. Poblado con un ejemplo real (mayor densidad de tornillos de techo en zona de viento fuerte/Guanacaste). |
+| **Desperdicio configurable** | `merma` estaba fija dentro de cada `ReglaRendimiento`, sin forma de ajustarla sin redefinir el material entero. | `calcular_materiales(..., overrides_merma={material_id: nueva_merma})`, aplicado con `dataclasses.replace()` sobre la regla ya resuelta (regional u nacional) -- `ReglaRendimiento` sigue siendo inmutable, no hizo falta abrirla. |
+| **Proveedores preferidos** | No había ningún campo para expresarlo, y `busqueda.buscar_fts()` tampoco expone hoy un filtro por proveedor. | `Material.proveedores_preferidos: tuple` -- campo estructural listo, **deliberadamente vacío en los 10 sistemas**: poblarlo con proveedores inventados sería el mismo tipo de dato fabricado que el resto del proyecto evita. Queda documentado que activarlo de verdad necesita primero un cambio en `busqueda.py`, fuera del alcance de esta revisión. |
+| **Sustituciones de materiales** | Dos niveles distintos de la misma idea, ninguno modelado: (a) un material por otro dentro del mismo sistema, (b) un sistema entero por otro con el mismo rol (ej. `muro_gypsum` vs. `muro_block` -- ya se explicaba en prosa en la descripción de `muro_gypsum`, pero no como dato). | `Material.alternativas: tuple` (nivel a, sin poblar todavía -- ningún sistema actual tiene dos materiales que cumplan el mismo rol) y `Sistema.alternativa_de: tuple` (nivel b, poblado: `muro_gypsum.alternativa_de = ("muro_block",)`). Nota importante: esto es un nivel de sustitución DISTINTO del motor de equivalencias -- acá es "tipo de material/sistema A vs. tipo B para el mismo propósito", no "producto X vs. producto Y del catálogo", que ya resuelve `equivalencias.py`. |
+
+**Por qué estos cambios no rompen nada ya construido:** todos los campos
+nuevos son opcionales con default vacío (`()`, `{}`, `None`), y los dos
+parámetros nuevos de `calcular_materiales()` (`region`, `overrides_merma`)
+también son opcionales -- una llamada existente que no los use da
+exactamente el mismo resultado que antes (ver
+`PruebaCompatibilidadHaciaAtras` en la suite). `calcular_mano_obra()` es
+una función nueva y separada, no una rama dentro de la que ya existía --
+el tipo de retorno de `calcular_materiales()` no cambió.
+
 ## Verificación
 
-- 25 pruebas nuevas (`tests/test_sistemas_constructivos.py`): cálculo de
+- 39 pruebas (`tests/test_sistemas_constructivos.py`): cálculo de
   cada regla de rendimiento, la relación derivada arena↔cemento
   (confirmando que cambia si cambia el cemento calculado, no un número
   copiado), los dos bugs de diseño de arriba ya corregidos y con prueba
-  de regresión, composición de subsistemas, overrides.
+  de regresión, composición de subsistemas, overrides, y las 5
+  ampliaciones de la sección anterior (mano de obra recorriendo
+  subsistemas igual que los materiales, rendimiento regional cayendo al
+  nacional cuando no hay variante, merma sobreescrita propagándose
+  dentro de un compuesto, y una prueba explícita de que llamar
+  `calcular_materiales()` sin ninguno de los parámetros nuevos da
+  exactamente el mismo resultado que antes de esta revisión).
 - **Cada término de búsqueda de cada material se probó contra
   `busqueda.buscar_fts()` real** (no un mock) -- varios términos "obvios"
   fallaron con el mismo bug ya documentado en

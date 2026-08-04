@@ -215,5 +215,121 @@ class PruebaTerminosDeBusquedaContraElCatalogoReal(unittest.TestCase):
         )
 
 
+class PruebaManoDeObra(unittest.TestCase):
+    """Sistema.mano_obra / calcular_mano_obra() -- deliberadamente
+    aparte de Sistema.materiales / calcular_materiales(), ver el
+    docstring de ManoDeObra para el porqué."""
+
+    def test_no_aparece_mezclada_con_materiales(self):
+        lineas = sc.calcular_materiales("muro_block", 20)
+        ids = {l.material_id for l in lineas}
+        self.assertNotIn("albanileria", ids)
+
+    def test_rendimiento_directo(self):
+        lineas = sc.calcular_mano_obra("muro_block", 18)
+        albanileria = next(l for l in lineas if l.mano_obra_id == "albanileria")
+        self.assertAlmostEqual(albanileria.cantidad, 2.0)  # 18 / 9 m² por jornal
+        self.assertEqual(albanileria.unidad, sc.UnidadManoObra.JORNAL)
+
+    def test_recorre_subsistemas_igual_que_calcular_materiales(self):
+        # tapia reutiliza muro_block -- su mano de obra también debería
+        # aparecer, sin tener que declararla de nuevo en tapia.
+        lineas = sc.calcular_mano_obra("tapia", 27)
+        self.assertTrue(any(l.mano_obra_id == "albanileria" for l in lineas))
+
+    def test_tarifa_referencia_no_esta_poblada(self):
+        # A propósito: no hay fuente de precios de mano de obra
+        # verificada todavía -- inventar un número acá violaría el mismo
+        # principio que el resto del proyecto ya sigue para materiales.
+        trabajo = next(t for t in sc.REGISTRO["muro_block"].mano_obra if t.id == "albanileria")
+        self.assertIsNone(trabajo.tarifa_referencia)
+
+
+class PruebaRendimientosRegionales(unittest.TestCase):
+    def test_variante_regional_se_usa_cuando_existe(self):
+        con_region = sc.calcular_materiales("techo_lamina", 40, region="guanacaste")
+        tornillo = next(l.cantidad for l in con_region if l.material_id == "tornillo")
+        self.assertEqual(tornillo, 320)  # 8 * 40
+
+    def test_sin_region_usa_el_valor_nacional(self):
+        sin_region = sc.calcular_materiales("techo_lamina", 40)
+        tornillo = next(l.cantidad for l in sin_region if l.material_id == "tornillo")
+        self.assertEqual(tornillo, 240)  # 6 * 40
+
+    def test_region_sin_variante_definida_no_falla_cae_al_nacional(self):
+        # Ninguna región excepto "guanacaste" tiene una variante para
+        # este material -- pedir otra región no debe lanzar ni dar un
+        # resultado distinto del nacional.
+        otra_region = sc.calcular_materiales("techo_lamina", 40, region="limon")
+        tornillo = next(l.cantidad for l in otra_region if l.material_id == "tornillo")
+        self.assertEqual(tornillo, 240)
+
+    def test_region_no_afecta_materiales_sin_variante_propia(self):
+        # La lámina de techo_lamina no tiene variante regional -- pedir
+        # region="guanacaste" no debería inventarle una.
+        con_region = sc.calcular_materiales("techo_lamina", 40, region="guanacaste")
+        sin_region = sc.calcular_materiales("techo_lamina", 40)
+        lamina_con = next(l.cantidad for l in con_region if l.material_id == "lamina")
+        lamina_sin = next(l.cantidad for l in sin_region if l.material_id == "lamina")
+        self.assertEqual(lamina_con, lamina_sin)
+
+
+class PruebaMermaConfigurable(unittest.TestCase):
+    def test_override_de_merma_reemplaza_la_definida_en_el_sistema(self):
+        normal = sc.calcular_materiales("piso_ceramico", 10)
+        con_override = sc.calcular_materiales("piso_ceramico", 10, overrides_merma={"ceramica": 1.20})
+        ceramica_normal = next(l.cantidad for l in normal if l.material_id == "ceramica")
+        ceramica_override = next(l.cantidad for l in con_override if l.material_id == "ceramica")
+        self.assertAlmostEqual(ceramica_normal, 11.0)  # merma 10% de fábrica
+        self.assertAlmostEqual(ceramica_override, 12.0)  # merma 20% pedida
+
+    def test_override_de_merma_no_afecta_otros_materiales_del_sistema(self):
+        con_override = sc.calcular_materiales("piso_ceramico", 10, overrides_merma={"ceramica": 1.20})
+        pegamento = next(l.cantidad for l in con_override if l.material_id == "pegamento")
+        self.assertAlmostEqual(pegamento, 2.0)  # sin cambio, 10 * 0.2
+
+    def test_override_de_merma_funciona_dentro_de_un_subsistema(self):
+        # El override tiene que propagarse a través de la recursión de
+        # subsistemas, no solo aplicar al sistema de nivel superior.
+        base = sc.calcular_materiales("bano", 4)
+        con_override = sc.calcular_materiales("bano", 4, overrides_merma={"ceramica": 1.50})
+        ceramica_base = sorted(l.cantidad for l in base if l.material_id == "ceramica")
+        ceramica_override = sorted(l.cantidad for l in con_override if l.material_id == "ceramica")
+        self.assertGreater(ceramica_override[0], ceramica_base[0])
+        self.assertGreater(ceramica_override[1], ceramica_base[1])
+
+
+class PruebaSustituciones(unittest.TestCase):
+    def test_alternativa_de_sistema_a_sistema(self):
+        self.assertEqual(sc.REGISTRO["muro_gypsum"].alternativa_de, ("muro_block",))
+        self.assertIn("muro_gypsum", sc.REGISTRO)
+        self.assertIn("muro_block", sc.REGISTRO)
+
+    def test_campos_de_extension_existen_con_default_vacio(self):
+        # No poblados todavía en ningún material real -- el punto de
+        # esta prueba es que EXISTEN y tienen un default seguro, no que
+        # ya tengan datos (eso requeriría inventar proveedores/precios
+        # sin una fuente real, lo mismo que el proyecto evita en todos
+        # los demás módulos).
+        for sistema in sc.REGISTRO.values():
+            for material in sistema.materiales:
+                self.assertIsInstance(material.proveedores_preferidos, tuple)
+                self.assertIsInstance(material.alternativas, tuple)
+                self.assertIsInstance(material.rendimientos_regionales, dict)
+
+
+class PruebaCompatibilidadHaciaAtras(unittest.TestCase):
+    """Las 10 pruebas de la versión anterior de este archivo no deberían
+    haber necesitado cambiar ni una línea para que estas extensiones
+    funcionaran -- confirma que calcular_materiales() sigue devolviendo
+    exactamente lo mismo cuando no se usan los parámetros nuevos."""
+
+    def test_llamada_sin_parametros_nuevos_da_el_mismo_resultado_de_siempre(self):
+        lineas = sc.calcular_materiales("muro_block", 20)
+        por_id = {l.material_id: l.cantidad for l in lineas}
+        self.assertEqual(por_id["bloque"], 263)
+        self.assertEqual(por_id["cemento_pega"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
