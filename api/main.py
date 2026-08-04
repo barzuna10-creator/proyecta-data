@@ -12,6 +12,7 @@ from reranking import reordenar as _reordenar_resultados
 from capa_intencion import detectar_concepto, PALABRAS_CONTEXTO_NORMALIZADAS
 from similares import obtener_similares as _obtener_similares_motor, LIMITE_DEFECTO as _LIMITE_SIMILARES_DEFECTO
 from presupuestos import calcular_presupuesto as _calcular_presupuesto_motor
+from especificaciones import unidad_comercial as _unidad_comercial
 
 app = FastAPI(
     title="Proyecta CR API",
@@ -149,6 +150,14 @@ def _serializar_producto(r):
         item["familia_id"] = r["familia_id"]
         item["nombre_familia"] = r["nombre_familia"]
         item["presentacion"] = _analizar_nombre_familia(r["nombre"])[2]
+
+    # Unidad de venta legible (Galón, 25 kg, 2.08 m²...) para no depender
+    # de un "c/u" ambiguo en la interfaz -- ver PRUEBA_INGENIERO_BANO.md,
+    # hallazgo #2. None cuando no hay señal confiable en el nombre; el
+    # frontend cae a "c/u" en ese caso, nunca inventa una unidad.
+    unidad = _unidad_comercial(r["nombre"], r["categoria"])
+    if unidad is not None:
+        item["unidad_comercial"] = unidad
 
     return item
 

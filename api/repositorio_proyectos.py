@@ -3,6 +3,7 @@ from datetime import datetime
 
 from db import conectar
 from busqueda import normalizar_texto
+from especificaciones import unidad_comercial as _unidad_comercial
 
 ESTADOS_PROYECTO = {"activo", "completado", "archivado"}
 ESTADOS_ITEM = {"pendiente", "comprado", "descartado"}
@@ -181,6 +182,10 @@ def _obtener_items(conexion, proyecto_id):
     for fila in cursor.fetchall():
         item = dict(fila)
         item["disponible"] = bool(item["disponible"])
+        # Unidad de venta legible derivada del nombre (Galón, 25 kg,
+        # 2.08 m²...) -- ver PRUEBA_INGENIERO_BANO.md, hallazgo #2. None
+        # si no hay señal confiable; el frontend cae a "c/u" en ese caso.
+        item["unidad_comercial"] = _unidad_comercial(item["nombre"], item["categoria"])
         items.append(item)
 
     return items

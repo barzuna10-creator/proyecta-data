@@ -10,7 +10,7 @@ durante el desarrollo (fracciones, "#", límites de palabra con "mm"/"m").
 
 import unittest
 
-from especificaciones import comparar_specs, extraer_specs
+from especificaciones import comparar_specs, extraer_presentacion_pintura, extraer_specs, unidad_comercial
 
 
 class PruebaExtraccionDiametroPulgadas(unittest.TestCase):
@@ -296,6 +296,52 @@ class PruebaComparacionSpecs(unittest.TestCase):
         self.assertIn("peso_kg", resultado["conflicto_en"])
         self.assertIn("diametro_pulg", resultado["coincidencias"])
         self.assertIn("potencia_w", resultado["coincidencias"])
+
+
+class PruebaUnidadComercial(unittest.TestCase):
+    """unidad_comercial(): hallazgo #2 de PRUEBA_INGENIERO_BANO.md -- "c/u"
+    es ambiguo para cerámica/pegamento/pintura vendidos por caja/saco/
+    galón. Nunca debe inventar una unidad que no esté en el nombre."""
+
+    def test_galon_pintura(self):
+        self.assertEqual(unidad_comercial("Pintura satinada Goltex Sur blanca, galon", "Pinturas"), "Galón")
+
+    def test_area_ceramica(self):
+        self.assertEqual(unidad_comercial("Ceramica 51x51 cm Nevado blanca 2.08m2", "Pisos"), "2.08 m²")
+
+    def test_saco_pegamento(self):
+        self.assertEqual(
+            unidad_comercial("Pegamento Bondex Plus cerámica y porcelanato 25 kg", "Construccion"), "25 kg"
+        )
+
+    def test_sin_señal_confiable_devuelve_none(self):
+        self.assertIsNone(unidad_comercial("Grifo de ducha Karci negro mate", "Baños"))
+
+    def test_cantidad_unidades_no_se_usa_como_unidad_de_venta(self):
+        # "2 piezas" describe la construcción del inodoro (tanque + taza
+        # separados), no que la compra trae dos inodoros -- mostrarlo
+        # como unidad de venta sería inventar información engañosa.
+        self.assertIsNone(unidad_comercial("Inodoro Malibu 2 piezas blanco", "Baños"))
+
+    def test_nombre_vacio(self):
+        self.assertIsNone(unidad_comercial("", "Pinturas"))
+        self.assertIsNone(unidad_comercial(None, "Pinturas"))
+
+    def test_numero_de_linea_no_contamina_la_presentacion(self):
+        # Bug real encontrado verificando este cambio en vivo: "Latex
+        # 3000" (número de línea de producto) se colaba en la etiqueta de
+        # presentación ("3000 Cuarto" en vez de "Cuarto").
+        self.assertEqual(
+            unidad_comercial("Pintura Latex 3000 Mate Blanco Cuarto Sur", "Pinturas"), "Cuarto"
+        )
+
+
+class PruebaPresentacionPinturaSinContaminacion(unittest.TestCase):
+    def test_numero_de_linea_se_descarta_de_la_etiqueta(self):
+        self.assertEqual(extraer_presentacion_pintura("Pintura Latex 3000 Mate Blanco Cuarto Sur"), "Cuarto")
+
+    def test_presentacion_simple_sigue_funcionando(self):
+        self.assertEqual(extraer_presentacion_pintura("Barniz Poliuretano Mate Cuarto Lanco"), "Cuarto")
 
 
 if __name__ == "__main__":

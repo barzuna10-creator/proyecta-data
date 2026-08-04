@@ -171,6 +171,21 @@ def extraer_specs(nombre):
     return specs
 
 
+# familias.analizar_nombre() (no se toca -- validado y ya usado por la
+# agrupación de familias en producción) trata CUALQUIER número suelto del
+# nombre como tamaño de empaque (1, 5, 55 galones...). Correcto para su
+# uso original, pero un número de línea de producto ("Latex 3000") queda
+# mezclado en la misma etiqueta ("3000 Cuarto" en vez de "Cuarto").
+# Ningún tamaño de empaque real de este catálogo tiene 4+ dígitos, así que
+# se descarta ese token de la etiqueta (no la etiqueta completa -- "3000
+# Cuarto" y "3000 Galón" seguirían siendo presentaciones distintas una
+# vez quitado el "3000" de ambas). Mismo hallazgo y misma corrección que
+# ya existía en equivalencias.py para su propio uso; se aplica acá, en la
+# fuente, para que unidad_comercial() y presupuestos.py también queden
+# corregidos sin duplicar la lógica.
+_PATRON_NUMERO_LINEA = re.compile(r"\b\d{4,}\b")
+
+
 def extraer_presentacion_pintura(nombre):
     """Para Pinturas la 'presentación' (Galón/Cubeta/Cuarto) es una palabra,
     no un número -- los patrones de arriba no la detectan. Reutiliza
@@ -178,7 +193,56 @@ def extraer_presentacion_pintura(nombre):
     reinventar esa lista de sinónimos."""
 
     _, _, presentacion = _analizar_presentacion_pintura(nombre or "")
-    return presentacion or None
+    if not presentacion:
+        return None
+    limpia = _PATRON_NUMERO_LINEA.sub("", presentacion).strip()
+    return limpia or None
+
+
+# Área de cobertura (cerámica/porcelanato: "2.08m2", "2,08 m²") -- señal de
+# unidad de venta, no de compatibilidad física, así que vive aparte de
+# _PATRONES (esos alimentan comparar_specs(); esto solo alimenta
+# unidad_comercial(), nunca debe participar de una decisión de
+# equivalencia). Hallazgo real: PRUEBA_INGENIERO_BANO.md, "la interfaz no
+# explica inequívocamente si la unidad es caja, pieza o paquete" -- el
+# dato ya está en el nombre, solo no se mostraba de forma clara.
+_PATRON_AREA_M2 = re.compile(r'\b(\d+(?:[.,]\d+)?)\s*m(?:2|²)\b')
+
+
+def unidad_comercial(nombre, categoria=None):
+    """Etiqueta legible de la unidad en que se vende el producto (Galón,
+    25 kg, 2.08 m²...) para mostrarla en vez de un "c/u" ambiguo -- ver
+    PRUEBA_INGENIERO_BANO.md, hallazgo #2. Nunca inventa un dato que no
+    esté ya en el nombre: si no hay señal confiable, devuelve None (mejor
+    no mostrar nada que mostrar una unidad incorrecta).
+
+    Deliberadamente NO usa cantidad_unidades (especificaciones.py): esa
+    señal es ambigua para mostrar como "unidad de venta" -- "Inodoro
+    Malibú 2 piezas" trae cantidad_unidades=2, pero esas 2 piezas
+    describen la construcción del inodoro (tanque + taza por separado),
+    no que la compra trae dos inodoros. Mostrar "2 piezas" ahí sería
+    inventar información engañosa, exactamente lo que este módulo evita."""
+
+    if categoria == "Pinturas":
+        presentacion = extraer_presentacion_pintura(nombre)
+        if presentacion:
+            return presentacion
+
+    specs = extraer_specs(nombre)
+    if "volumen_l" in specs:
+        return f"{specs['volumen_l']:g} L"
+    if "peso_kg" in specs:
+        return f"{specs['peso_kg']:g} kg"
+    if "peso_lb" in specs:
+        return f"{specs['peso_lb']:g} lb"
+
+    coincidencia_area = _PATRON_AREA_M2.search(_preparar(nombre or ""))
+    if coincidencia_area:
+        valor = _texto_a_numero(coincidencia_area.group(1))
+        if valor is not None:
+            return f"{valor:g} m²"
+
+    return None
 
 
 def comparar_specs(specs_a, specs_b):
