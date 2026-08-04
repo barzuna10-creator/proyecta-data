@@ -28,142 +28,155 @@ from presupuestos import (
 )
 
 
-def _candidato(nombre, categoria="Ferretería", razones=None, **extra):
+def _candidato(nombre, categoria="Ferretería", marca=None, **extra):
     base = {
         "proveedor": "El Lagar",
         "id_proveedor": "9",
         "nombre": nombre,
         "categoria": categoria,
+        "marca": marca,
         "precio": 1000,
-        "_razones": razones or [],
     }
     base.update(extra)
     return base
 
 
-def _objetivo(nombre, categoria="Ferretería", **extra):
+def _objetivo(nombre, categoria="Ferretería", marca=None, **extra):
     base = {
         "proveedor": "EPA",
         "id_proveedor": "1",
         "nombre": nombre,
         "categoria": categoria,
+        "marca": marca,
         "precio": 1200,
     }
     base.update(extra)
     return base
 
 
-class PruebaClasificarEquivalenciaFamilia(unittest.TestCase):
-    def test_misma_familia_confirma_directo(self):
-        objetivo = _objetivo("Pintura Seal Block Blanco Galon Lanco", categoria="Pinturas")
-        candidato = _candidato(
-            "Pintura Seal Block Blanco Galon Sur", categoria="Pinturas",
-            razones=["misma_familia"],
-        )
+class PruebaClasificarEquivalenciaPintura(unittest.TestCase):
+    def test_misma_pintura_marcas_distintas_no_alcanza_confirmar(self):
+        # El motor de equivalencias.py no conoce familia_id (eso es solo
+        # una señal de similares.py para armar la lista de candidatos, ver
+        # ARQUITECTURA_PRESUPUESTOS_INTELIGENTES.md) -- reconstruye la
+        # confianza únicamente de nombre/marca/categoría/specs. Con marca
+        # distinta, este par se queda en 0.50: por debajo incluso del piso
+        # de "probable" (0.70), no solo del de "confirmada" (0.85).
+        objetivo = _objetivo("Pintura Seal Block Blanco Galon Lanco", categoria="Pinturas", marca="Lanco")
+        candidato = _candidato("Pintura Seal Block Blanco Galon Sur", categoria="Pinturas", marca="Sur")
         nivel, razon, _ = clasificar_equivalencia(objetivo, candidato)
-        self.assertEqual(nivel, CONFIRMADA)
+        self.assertEqual(nivel, NO_COMPARABLE)
 
-    def test_pintura_misma_familia_pero_presentacion_distinta_no_confirma(self):
-        # Regla más importante de todo el archivo: dentro de una misma
-        # familia de pintura, un Galón y un Cuarto son la MISMA familia
-        # (agrupados por familias.py para mostrarse juntos) pero NO cuestan
-        # lo mismo -- confirmarlos como sustitutos sería exactamente el
-        # "ahorro engañoso por presentación" que este módulo existe para
-        # evitar. La presentación distinta debe ganarle a "misma_familia".
-        objetivo = _objetivo("Pintura Seal Block Blanco Galon Lanco", categoria="Pinturas")
-        candidato = _candidato(
-            "Pintura Seal Block Blanco Cuarto Lanco", categoria="Pinturas",
-            razones=["misma_familia"],
-        )
+    def test_pintura_misma_marca_presentacion_distinta_no_confirma(self):
+        # Regla más importante de todo el archivo: un Galón y un Cuarto de
+        # la misma línea de pintura NO cuestan lo mismo -- confirmarlos
+        # como sustitutos sería exactamente el "ahorro engañoso por
+        # presentación" que este módulo existe para evitar.
+        objetivo = _objetivo("Pintura Seal Block Blanco Galon Lanco", categoria="Pinturas", marca="Lanco")
+        candidato = _candidato("Pintura Seal Block Blanco Cuarto Lanco", categoria="Pinturas", marca="Lanco")
         nivel, razon, detalle = clasificar_equivalencia(objetivo, candidato)
         self.assertEqual(nivel, NO_COMPARABLE)
-        self.assertIn("presentacion", detalle["conflicto_en"])
+        self.assertEqual(detalle["veto"], "presentacion")
+
+    def test_mismo_acabado_distinto_no_confirma(self):
+        # Bug real encontrado integrando esta función a la UI: dos
+        # pinturas del mismo color/marca/tamaño pero acabado distinto
+        # (mate vs satinado) confirmaban como sustitutas -- ver
+        # equivalencias.ACABADOS.
+        objetivo = _objetivo("Pintura Latex Satinado Blanco Galon Sur", categoria="Pinturas", marca="Sur")
+        candidato = _candidato("Pintura Latex 3000 Mate Blanco Galon Sur", categoria="Pinturas", marca="Sur")
+        nivel, razon, detalle = clasificar_equivalencia(objetivo, candidato)
+        self.assertEqual(nivel, NO_COMPARABLE)
+        self.assertEqual(detalle["veto"], "color")
 
 
 class PruebaClasificarEquivalenciaCompatibilidad(unittest.TestCase):
-    def test_diametro_distinto_nunca_confirma_ni_es_probable_como_confirmado(self):
-        objetivo = _objetivo('Taladro percutor mandril 1/2" 750W Daewoo')
-        candidato = _candidato(
-            'Taladro percutor mandril 3/8" 750W Daewoo',
-            razones=["misma_subcategoria", "misma_marca", "tokens_nombre:taladro,percutor,mandril"],
-        )
+    def test_diametro_distinto_nunca_confirma(self):
+        objetivo = _objetivo('Taladro percutor mandril 1/2" 750W Daewoo', marca="Daewoo", categoria="Herramientas")
+        candidato = _candidato('Taladro percutor mandril 3/8" 750W Daewoo', marca="Daewoo", categoria="Herramientas")
         nivel, razon, detalle = clasificar_equivalencia(objetivo, candidato)
         self.assertEqual(nivel, NO_COMPARABLE)
-        self.assertIn("diametro_pulg", detalle["conflicto_en"])
+        self.assertEqual(detalle["veto"], "dimensiones")
 
     def test_calibre_distinto_nunca_confirma(self):
-        objetivo = _objetivo("Varilla construcción nacional deformada #4")
-        candidato = _candidato(
-            "Varilla construcción nacional deformada #5",
-            razones=["misma_subcategoria", "tokens_nombre:varilla,construccion,nacional,deformada"],
-        )
+        objetivo = _objetivo("Varilla construcción nacional deformada #4", categoria="Construcción")
+        candidato = _candidato("Varilla construcción nacional deformada #5", categoria="Construcción")
         nivel, razon, detalle = clasificar_equivalencia(objetivo, candidato)
         self.assertEqual(nivel, NO_COMPARABLE)
-        self.assertIn("calibre", detalle["conflicto_en"])
+        self.assertEqual(detalle["veto"], "dimensiones")
 
-
-class PruebaClasificarEquivalenciaSubcategoria(unittest.TestCase):
-    def test_subcategoria_marca_y_un_token_confirma(self):
-        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg")
-        candidato = _candidato(
-            "Cemento Gris Especial 42.5 kg",
-            razones=["misma_subcategoria", "misma_marca", "tokens_nombre:cemento,gris"],
-        )
+    def test_grifo_no_es_lo_mismo_que_cabeza_de_ducha(self):
+        # Bug real encontrado probando el endpoint /proyectos/{id}/presupuesto
+        # contra un proyecto real: el clasificador anterior (basado en las
+        # razones de similares.py) confirmaba "Grifo para ducha negro
+        # ebano" como sustituto de "Cabeza para ducha redonda oslo negro
+        # mate" -- dos piezas de plomería distintas -- solo por compartir
+        # subcategoría, categoría "Baños" y la palabra "ducha", generando
+        # un ahorro fabricado de ₡20,200 (30.49%). Con el motor nuevo el
+        # puntaje es 0.27 (marca distinta pesa fuerte, solo 2 de 8 tokens
+        # compartidos) -- ni siquiera llega a PROBABLE.
+        objetivo = _objetivo("Grifo para ducha negro ebano", marca="HELVEX", categoria="Baños")
+        candidato = _candidato("Cabeza para ducha redonda oslo negro mate", marca="GENEBRE", categoria="Baños")
         nivel, razon, _ = clasificar_equivalencia(objetivo, candidato)
-        self.assertEqual(nivel, CONFIRMADA)
+        self.assertEqual(nivel, NO_COMPARABLE)
 
-    def test_sin_marca_un_solo_token_no_alcanza(self):
-        # Sin misma_marca, hace falta MINIMO_TOKENS_NOMBRE_SIN_MARCA (2).
-        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg")
-        candidato = _candidato(
-            "Cemento Blanco Especial 42.5 kg",
-            razones=["misma_subcategoria", "tokens_nombre:cemento"],
-        )
+
+class PruebaClasificarEquivalenciaTextoYMarca(unittest.TestCase):
+    def test_subcategoria_marca_y_tokens_da_probable_no_confirmada(self):
+        # Marca + categoría + 2 de 5 tokens compartidos puntúa 0.76 -- por
+        # encima del piso de "probable" (0.70) pero por debajo del de
+        # "confirmada" (0.85, el más exigente de todos los módulos porque
+        # acá se calcula dinero real). Correcto: es evidencia real pero no
+        # suficiente para calcular un ahorro con ese número.
+        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg", marca="Holcim", categoria="Construcción")
+        candidato = _candidato("Cemento Gris Especial 42.5 kg", marca="Holcim", categoria="Construcción")
         nivel, razon, _ = clasificar_equivalencia(objetivo, candidato)
         self.assertEqual(nivel, PROBABLE)
 
-    def test_sin_marca_dos_tokens_si_alcanza(self):
-        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg")
-        candidato = _candidato(
-            "Cemento Gris Especial 42.5 kg",
-            razones=["misma_subcategoria", "tokens_nombre:cemento,gris"],
-        )
+    def test_sin_marca_color_distinto_no_confirma(self):
+        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg", categoria="Construcción")
+        candidato = _candidato("Cemento Blanco Especial 42.5 kg", categoria="Construcción")
         nivel, razon, _ = clasificar_equivalencia(objetivo, candidato)
-        self.assertEqual(nivel, CONFIRMADA)
+        self.assertEqual(nivel, NO_COMPARABLE)
 
     def test_tokens_solo_genericos_no_alcanzan(self):
-        # Caso real encontrado en esta sesión: "Cemento Gris Por Kilo" y
-        # "Mortero Seco Por Kilo" comparten "por"/"kilo" -- palabras de
-        # estructura de precio, no de identidad del producto. Sin este
-        # filtro, el mortero se confirmaba como sustituto del cemento.
-        objetivo = _objetivo("Cemento Gris Por Kilo")
-        candidato = _candidato(
-            "Mortero Seco Por Kilo",
-            razones=["misma_subcategoria", "misma_marca", "tokens_nombre:por,kilo"],
-        )
+        # Caso real encontrado calibrando el clasificador anterior:
+        # "Cemento Gris Por Kilo" y "Mortero Seco Por Kilo" comparten
+        # "por"/"kilo" -- palabras de estructura de precio, no de
+        # identidad del producto. El motor nuevo ya no cuenta "por" como
+        # tokens de identidad reales (extraer_tokens_identidad de
+        # equivalencias.py filtra ese tipo de palabra en el origen), así
+        # que marca+categoría solas tampoco alcanzan (0.64, bajo el piso).
+        objetivo = _objetivo("Cemento Gris Por Kilo", marca="Holcim", categoria="Construcción")
+        candidato = _candidato("Mortero Seco Por Kilo", marca="Holcim", categoria="Construcción")
         nivel, razon, _ = clasificar_equivalencia(objetivo, candidato)
-        self.assertEqual(nivel, PROBABLE)
+        self.assertEqual(nivel, NO_COMPARABLE)
 
-    def test_asimetria_unidad_venta_bloquea_confirmacion(self):
-        # subcategoría + marca + tokens suficientes, pero el peso solo se
-        # detectó en uno de los dos nombres -- no hay evidencia suficiente
-        # para confirmar que es la MISMA presentación/cantidad.
-        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg")
-        candidato = _candidato(
-            "Cemento Gris Portland UG",
-            razones=["misma_subcategoria", "misma_marca", "tokens_nombre:cemento,gris,portland"],
-        )
-        nivel, razon, _ = clasificar_equivalencia(objetivo, candidato)
+    def test_asimetria_unidad_venta_baja_de_confirmada_a_probable(self):
+        # Segundo hallazgo de esta integración: mismo nombre salvo que al
+        # candidato no se le detectó el peso -- el puntaje da 1.0 (el
+        # motor general no penaliza ausencia de dato en un solo lado), pero
+        # acá eso es justo el riesgo que este módulo existe para evitar
+        # (dos bolsas de tamaño potencialmente distinto). Se exige además
+        # que no haya asimetría de unidad de venta para llegar a CONFIRMADA.
+        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg", marca="Holcim", categoria="Construcción")
+        candidato = _candidato("Cemento Gris Portland UG", marca="Holcim", categoria="Construcción")
+        nivel, razon, detalle = clasificar_equivalencia(objetivo, candidato)
         self.assertEqual(nivel, PROBABLE)
+        self.assertTrue(detalle["asimetria_unidad_venta"])
 
-    def test_sin_subcategoria_ni_familia_es_probable(self):
-        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg")
-        candidato = _candidato(
-            "Cemento Gris Especial 42.5 kg",
-            razones=["tokens_nombre:cemento,gris"],
-        )
+    def test_sin_asimetria_mismo_peso_confirma(self):
+        objetivo = _objetivo("Cemento Gris Portland UG 42.5 kg", marca="Holcim", categoria="Construcción")
+        candidato = _candidato("Cemento Gris Portland UG 42.5 kg", marca="Holcim", categoria="Construcción")
+        nivel, razon, detalle = clasificar_equivalencia(objetivo, candidato)
+        self.assertEqual(nivel, CONFIRMADA)
+        self.assertFalse(detalle["asimetria_unidad_venta"])
+
+    def test_sin_relacion_no_es_ni_probable(self):
+        objetivo = _objetivo("Llave francesa ajustable 10 pulgadas", categoria="Herramientas")
+        candidato = _candidato("Martillo de goma 450g", categoria="Herramientas")
         nivel, razon, _ = clasificar_equivalencia(objetivo, candidato)
-        self.assertEqual(nivel, PROBABLE)
+        self.assertEqual(nivel, NO_COMPARABLE)
 
 
 def _crear_db_temporal():

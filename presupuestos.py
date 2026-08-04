@@ -21,10 +21,12 @@ por renglón (lo que este módulo hace) ya es la solución óptima, no una
 aproximación.
 """
 
-from especificaciones import (
-    comparar_specs,
-    extraer_presentacion_pintura,
-    extraer_specs,
+from especificaciones import comparar_specs
+from equivalencias import (
+    UMBRALES_POR_MODULO,
+    calcular_puntaje_equivalencia,
+    es_equivalente_para,
+    extraer_atributos,
 )
 from similares import obtener_similares
 
@@ -32,35 +34,16 @@ CONFIRMADA = "equivalencia_confirmada"
 PROBABLE = "equivalencia_probable"
 NO_COMPARABLE = "no_comparable"
 
-MINIMO_TOKENS_NOMBRE_SIN_MARCA = 2
-
-# similares.py ya filtra unidades/números como "w", "pulg", "kg" de su
-# propio candidateo (TOKENS_GENERICOS ahí), pero deja pasar palabras que
-# describen la estructura de precio, no el producto -- "por", "kilo",
-# "metro", "unidad". Sin este filtro, "Cemento Gris Por Kilo" y "Mortero
-# Seco Por Kilo" comparten los tokens "por"/"kilo" y eso alcanzaba para
-# "confirmar" el mortero como sustituto del cemento (caso real encontrado
-# validando esto). Estas palabras no identifican el producto, así que no
-# cuentan para el requisito de identidad de este archivo.
-TOKENS_SIN_VALOR_IDENTIDAD = {
-    "por", "kilo", "kilos", "libra", "libras", "unidad", "unidades",
-    "metro", "metros", "litro", "litros", "saco", "sacos", "caja", "cajas",
-}
+# Piso de "probable": el mismo umbral que ya usa el comparador para decir
+# "esto es lo mismo" lado a lado (UMBRALES_POR_MODULO["comparador"]) --
+# suficiente para mostrarlo como relacionado, nunca para calcular con ese
+# número un ahorro en dinero real (eso exige el umbral más alto de
+# "presupuestos", ver es_equivalente_para más abajo).
+UMBRAL_PROBABLE = UMBRALES_POR_MODULO["comparador"]
 
 MENSAJE_SIN_ALTERNATIVA_SEGURA = (
     "No se encontraron alternativas comparables con suficiente confianza"
 )
-
-
-def _tiene_razon(razones, prefijo):
-    return any(r == prefijo or r.startswith(prefijo + ":") for r in razones)
-
-
-def _tokens_nombre_de_razon(razones):
-    for r in razones:
-        if r.startswith("tokens_nombre:"):
-            return set(r.split(":", 1)[1].split(","))
-    return set()
 
 
 def clasificar_equivalencia(objetivo, candidato):
@@ -70,64 +53,61 @@ def clasificar_equivalencia(objetivo, candidato):
     de esa función, así que "no calificó ni como candidato" no es un caso
     que este clasificador tenga que manejar; eso ya lo filtró similares.py.
 
+    Usa equivalencias.calcular_puntaje_equivalencia() -- el motor de
+    confianza auditado contra el catálogo real (ver EQUIVALENCIAS.md,
+    AUDITORIA_EQUIVALENCIAS.md, MOTOR_CONFIANZA.md) -- al umbral que
+    UMBRALES_POR_MODULO define para "presupuestos" (0.85, el más alto de
+    todos los módulos): acá se calcula un ahorro en dinero real, así que
+    el listón para "confirmado" es deliberadamente más exigente que en el
+    comparador o en similares.
+
+    Reemplaza al clasificador anterior (basado en las razones de
+    similares.py: misma_subcategoria/misma_marca/tokens_nombre), que no
+    tenía ningún chequeo de compatibilidad física ni categórico -- bug
+    real encontrado integrando esta función a la UI: "Grifo para ducha
+    negro ebano" confirmaba como sustituto de "Cabeza para ducha redonda
+    oslo negro mate" (dos partes de plomería distintas) solo por compartir
+    subcategoría, categoría "Baños" y la palabra "ducha", con un ahorro
+    fabricado de ₡20,200. El nuevo motor da 0.27 para ese mismo par
+    (categoria+color coinciden, pero marca distinta y solo 2 tokens de 8
+    compartidos) -- muy por debajo de ambos umbrales.
+
+    Un segundo hallazgo, encontrado calibrando este reemplazo con casos
+    reales: "Cemento Gris Portland UG 42.5 kg" vs "Cemento Gris Portland
+    UG" (mismo nombre, pero al candidato no se le detectó el peso) puntúa
+    1.0 -- el motor general no penaliza que el peso esté ausente de un
+    solo lado (ausencia no es lo mismo que desacuerdo, ver equivalencias.py),
+    correcto para búsqueda/comparador, pero acá sí importa: son dos bolsas
+    de tamaño posiblemente distinto y este módulo calcula dinero real. Por
+    eso, además del puntaje, se exige que no haya asimetría de unidad de
+    venta (peso/volumen/presentación detectado en un lado y no en el otro)
+    para llegar a CONFIRMADA -- si la hay, baja a PROBABLE aunque el
+    puntaje ya haya cruzado el umbral.
+
     Devuelve (nivel, razon_legible, detalle)."""
 
-    specs_objetivo = extraer_specs(objetivo["nombre"])
-    specs_candidato = extraer_specs(candidato["nombre"])
-
-    es_pintura = objetivo.get("categoria") == "Pinturas" or candidato.get("categoria") == "Pinturas"
-    if es_pintura:
-        pres_objetivo = extraer_presentacion_pintura(objetivo["nombre"])
-        pres_candidato = extraer_presentacion_pintura(candidato["nombre"])
-        if pres_objetivo and pres_candidato and pres_objetivo != pres_candidato:
-            return (
-                NO_COMPARABLE,
-                f"Presentación distinta ({pres_objetivo} vs. {pres_candidato})",
-                {"conflicto_en": ["presentacion"]},
-            )
-
-    comparacion = comparar_specs(specs_objetivo, specs_candidato)
-
-    if comparacion["conflicto"]:
-        campos = ", ".join(comparacion["conflicto_en"])
-        return (
-            NO_COMPARABLE,
-            f"Especificación distinta ({campos})",
-            comparacion,
-        )
-
-    razones = candidato.get("_razones", [])
-    misma_familia = _tiene_razon(razones, "misma_familia")
-    misma_subcategoria = _tiene_razon(razones, "misma_subcategoria")
-    misma_marca = _tiene_razon(razones, "misma_marca")
-    tokens_compartidos = _tokens_nombre_de_razon(razones) - TOKENS_SIN_VALOR_IDENTIDAD
-
-    hay_asimetria_unidad_venta = bool(comparacion["asimetrias"])
-
-    if misma_familia:
-        return (CONFIRMADA, "Misma familia de producto", comparacion)
-
-    # La marca nunca alcanza sola: un mismo proveedor/marca puede vender
-    # "Cemento Gris Por Kilo" y "Mortero Seco Por Kilo" bajo la misma
-    # subcategoría combinada ("Morteros, Cemento" en El Lagar) -- son
-    # materiales distintos, no una alternativa. Confirmado con un caso real
-    # durante la validación: sin exigir al menos 1 token real compartido,
-    # el mortero se confirmaba como "sustituto" del cemento por compartir
-    # marca y esa subcategoría combinada. Se exige token real siempre;
-    # la marca solo baja cuántos tokens hacen falta, nunca los reemplaza.
-    identidad_suficiente = len(tokens_compartidos) >= 1 and (
-        misma_marca or len(tokens_compartidos) >= MINIMO_TOKENS_NOMBRE_SIN_MARCA
+    atributos_objetivo = extraer_atributos(
+        objetivo["nombre"], objetivo.get("marca"), categoria=objetivo.get("categoria")
+    )
+    atributos_candidato = extraer_atributos(
+        candidato["nombre"], candidato.get("marca"), categoria=candidato.get("categoria")
     )
 
-    if misma_subcategoria and identidad_suficiente and not hay_asimetria_unidad_venta:
-        partes = ["misma subcategoría"]
-        if misma_marca:
-            partes.append("misma marca")
-        if comparacion["coincidencias"]:
-            partes.append("coincide " + ", ".join(comparacion["coincidencias"]))
-        return (CONFIRMADA, "Confirmado por " + ", ".join(partes), comparacion)
+    resultado = calcular_puntaje_equivalencia(atributos_objetivo, atributos_candidato)
+    puntaje = resultado["puntaje"]
 
-    return (PROBABLE, "Producto relacionado, sin confirmación completa", comparacion)
+    comparacion_specs = comparar_specs(atributos_objetivo["specs"], atributos_candidato["specs"])
+    hay_asimetria_unidad_venta = bool(comparacion_specs["asimetrias"])
+    resultado["asimetria_unidad_venta"] = hay_asimetria_unidad_venta
+
+    if es_equivalente_para("presupuestos", puntaje) and not hay_asimetria_unidad_venta:
+        nivel = CONFIRMADA
+    elif puntaje >= UMBRAL_PROBABLE:
+        nivel = PROBABLE
+    else:
+        nivel = NO_COMPARABLE
+
+    return nivel, resultado["explicacion"], resultado
 
 
 def _precio_utilizable(producto):
@@ -149,6 +129,7 @@ def _evaluar_renglon(item):
         "id_proveedor": item["id_proveedor"],
         "nombre": item["nombre"],
         "categoria": item["categoria"],
+        "marca": item.get("marca"),
         "precio": precio_item,
     }
 

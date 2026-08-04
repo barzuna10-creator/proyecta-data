@@ -219,9 +219,46 @@ COLORES = {
     "marfil", "champagne",
 }
 
+# Acabado de pintura (mate/satinado/brillante...) -- eje categórico
+# separado del color: dos productos pueden compartir color y diferir en
+# acabado ("Pintura Latex Satinado Blanco Galon Sur" vs "...Mate Blanco
+# Galon Sur"), así que no alcanza con meter estas palabras en COLORES
+# -- si comparten "blanco" el chequeo de intersección de conjuntos ya no
+# detecta el conflicto de acabado. Se trata como una señal categórica
+# más, exclusiva entre sí igual que el color, pero verificada aparte.
+# Hallazgo real verificando la integración de Presupuestos Inteligentes:
+# ese par confirmaba como "el mismo producto" con el motor viejo --
+# acabados distintos no importan si el precio es igual, pero el mismo
+# hueco sí puede inflar un "ahorro confirmado" falso entre dos SKUs con
+# precios distintos.
+ACABADOS = {
+    "mate", "satinado", "satinada", "brillante", "semibrillante", "semimate",
+}
+
+# Género de conexión (macho/hembra) -- otro eje categórico exclusivo entre
+# sí, mismo tratamiento que ACABADOS: un acople macho nunca es sustituto
+# de uno hembra, sin importar cuánto más coincida el resto del nombre
+# (diámetro, marca, rosca NPT...). Hallazgo real muestreando el catálogo
+# completo verificando esta integración: "Adaptador macho PVC SCH40 11/2""
+# puntuaba 1.0 (el mismo producto) contra "Adaptador hembra PVC SCH40
+# 11/2"" -- ninguna de las specs físicas existentes (diámetro, calibre)
+# distingue género de rosca, así que sin este chequeo el conflicto pasaba
+# invisible. Algunos productos listan ambos extremos en el mismo nombre
+# ("Acople Bronce Manguera Macho Hembra 1/2\"") -- eso no es un conflicto
+# consigo mismo, el chequeo de intersección de conjuntos ya lo maneja bien.
+TIPOS_CONEXION = {"macho", "hembra"}
+
 
 def extraer_colores(tokens_identidad):
     return tokens_identidad & COLORES
+
+
+def extraer_acabados(tokens_identidad):
+    return tokens_identidad & ACABADOS
+
+
+def extraer_tipos_conexion(tokens_identidad):
+    return tokens_identidad & TIPOS_CONEXION
 
 
 def es_parte_o_accesorio(tokens_identidad):
@@ -252,6 +289,8 @@ def extraer_atributos(nombre, marca, categoria=None):
             _detectar_presentacion_pintura(nombre) if categoria == "Pinturas" else None
         ),
         "colores": extraer_colores(tokens),
+        "acabados": extraer_acabados(tokens),
+        "tipos_conexion": extraer_tipos_conexion(tokens),
         "tokens": tokens,
         "es_parte": es_parte_o_accesorio(tokens),
     }
@@ -281,6 +320,16 @@ def comparar_atributos(atributos_a, atributos_b, codigos_genericos=frozenset()):
     colores_a, colores_b = atributos_a["colores"], atributos_b["colores"]
     if colores_a and colores_b and not (colores_a & colores_b):
         razon = f"color_distinto:{','.join(sorted(colores_a))}_vs_{','.join(sorted(colores_b))}"
+        return NO_EQUIVALENTE, [razon], specs_cmp
+
+    acabados_a, acabados_b = atributos_a["acabados"], atributos_b["acabados"]
+    if acabados_a and acabados_b and not (acabados_a & acabados_b):
+        razon = f"acabado_distinto:{','.join(sorted(acabados_a))}_vs_{','.join(sorted(acabados_b))}"
+        return NO_EQUIVALENTE, [razon], specs_cmp
+
+    conexion_a, conexion_b = atributos_a["tipos_conexion"], atributos_b["tipos_conexion"]
+    if conexion_a and conexion_b and not (conexion_a & conexion_b):
+        razon = f"conexion_distinta:{','.join(sorted(conexion_a))}_vs_{','.join(sorted(conexion_b))}"
         return NO_EQUIVALENTE, [razon], specs_cmp
 
     codigos_compartidos = (atributos_a["codigos"] & atributos_b["codigos"]) - codigos_genericos
@@ -635,12 +684,42 @@ def calcular_puntaje_equivalencia(atributos_a, atributos_b, codigos_genericos=fr
         detalle_coincide=f"presentación coincide: {pres_a}",
     )
 
+    # Color, acabado y tipo de conexión son tres ejes categóricos
+    # independientes (mismo color, distinto acabado o género de rosca
+    # sigue siendo un producto distinto -- ver ACABADOS/TIPOS_CONEXION más
+    # arriba), pero se reportan bajo una sola señal "color" para no sumar
+    # un onceavo/doceavo nombre a las diez señales ya establecidas.
     colores_a, colores_b = atributos_a["colores"], atributos_b["colores"]
+    acabados_a, acabados_b = atributos_a["acabados"], atributos_b["acabados"]
+    conexion_a, conexion_b = atributos_a["tipos_conexion"], atributos_b["tipos_conexion"]
+    color_conflicto = bool(colores_a and colores_b and not (colores_a & colores_b))
+    color_coincide = bool(colores_a and colores_b and (colores_a & colores_b))
+    acabado_conflicto = bool(acabados_a and acabados_b and not (acabados_a & acabados_b))
+    acabado_coincide = bool(acabados_a and acabados_b and (acabados_a & acabados_b))
+    conexion_conflicto = bool(conexion_a and conexion_b and not (conexion_a & conexion_b))
+    conexion_coincide = bool(conexion_a and conexion_b and (conexion_a & conexion_b))
+
+    detalles_conflicto = []
+    if color_conflicto:
+        detalles_conflicto.append(f"color distinto: {','.join(sorted(colores_a))} vs {','.join(sorted(colores_b))}")
+    if acabado_conflicto:
+        detalles_conflicto.append(f"acabado distinto: {','.join(sorted(acabados_a))} vs {','.join(sorted(acabados_b))}")
+    if conexion_conflicto:
+        detalles_conflicto.append(f"conexión distinta: {','.join(sorted(conexion_a))} vs {','.join(sorted(conexion_b))}")
+    detalles_coincide = []
+    if color_coincide:
+        detalles_coincide.append(f"color coincide: {','.join(sorted(colores_a & colores_b))}")
+    if acabado_coincide:
+        detalles_coincide.append(f"acabado coincide: {','.join(sorted(acabados_a & acabados_b))}")
+    if conexion_coincide:
+        detalles_coincide.append(f"conexión coincide: {','.join(sorted(conexion_a & conexion_b))}")
+
     señales["color"] = _señal_veto(
-        conflicto=bool(colores_a and colores_b and not (colores_a & colores_b)),
-        coincide=bool(colores_a and colores_b and (colores_a & colores_b)),
-        detalle_conflicto=f"color distinto: {','.join(sorted(colores_a))} vs {','.join(sorted(colores_b))}",
-        detalle_coincide=f"color coincide: {','.join(sorted(colores_a & colores_b))}",
+        conflicto=color_conflicto or acabado_conflicto or conexion_conflicto,
+        coincide=(color_coincide or acabado_coincide or conexion_coincide)
+        and not (color_conflicto or acabado_conflicto or conexion_conflicto),
+        detalle_conflicto="; ".join(detalles_conflicto),
+        detalle_coincide="; ".join(detalles_coincide),
     )
 
     veto = next((nombre for nombre in SEÑALES_VETO if señales[nombre]["conflicto"]), None)

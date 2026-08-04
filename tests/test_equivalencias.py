@@ -204,6 +204,67 @@ class PruebaCompararAtributos(unittest.TestCase):
         self.assertEqual(veredicto, NO_EQUIVALENTE)
         self.assertTrue(any("color_distinto" in r for r in razones))
 
+    def test_mismo_color_distinto_acabado_no_confirma(self):
+        # Bug real encontrado integrando Presupuestos Inteligentes:
+        # "Pintura Latex Satinado Blanco Galon Sur" confirmaba como el
+        # mismo producto que "Pintura Latex Mate Blanco Galon Sur" --
+        # comparten marca/línea/color/tamaño, la única diferencia es el
+        # acabado, pero como "colores" solo revisa intersección de
+        # conjuntos, compartir "blanco" bastaba para nunca detectar el
+        # conflicto. Acabado distinto es tan definitivo como color
+        # distinto: nunca es el mismo producto comprable.
+        satinado = extraer_atributos(
+            "Pintura Latex Satinado Blanco Galon Sur", "SUR", categoria="Pinturas"
+        )
+        mate = extraer_atributos(
+            "Pintura Latex 3000 Mate Blanco Galon Sur", "SUR", categoria="Pinturas"
+        )
+        veredicto, razones, _ = comparar_atributos(satinado, mate)
+        self.assertEqual(veredicto, NO_EQUIVALENTE)
+        self.assertTrue(any("acabado_distinto" in r for r in razones))
+
+        resultado = calcular_puntaje_equivalencia(satinado, mate)
+        self.assertEqual(resultado["veto"], "color")
+        self.assertLess(resultado["puntaje"], UMBRALES_POR_MODULO["presupuestos"])
+
+    def test_mismo_acabado_no_bloquea_equivalencia(self):
+        satinado_a = extraer_atributos(
+            "Pintura Latex Satinado Blanco Galon Sur", "SUR", categoria="Pinturas"
+        )
+        satinado_b = extraer_atributos(
+            "Pintura Latex Satinado Blanco Galon Sur", "SUR", categoria="Pinturas"
+        )
+        veredicto, _, _ = comparar_atributos(satinado_a, satinado_b)
+        self.assertEqual(veredicto, EQUIVALENCIA_CONFIRMADA)
+
+    def test_macho_y_hembra_no_son_el_mismo_acople(self):
+        # Bug real encontrado muestreando el catálogo completo integrando
+        # Presupuestos Inteligentes: "Adaptador macho PVC SCH40 11/2""
+        # puntuaba 1.0 -- el mismo producto -- contra "Adaptador hembra
+        # PVC SCH40 11/2"". Ninguna spec física existente (diámetro,
+        # calibre) distingue género de rosca; sin este chequeo categórico
+        # el conflicto pasaba invisible.
+        macho = extraer_atributos('Adaptador macho PVC SCH40 11/2"', None, categoria="Tubería")
+        hembra = extraer_atributos('Adaptador hembra PVC SCH40 11/2"', None, categoria="Tubería")
+        veredicto, razones, _ = comparar_atributos(macho, hembra)
+        self.assertEqual(veredicto, NO_EQUIVALENTE)
+        self.assertTrue(any("conexion_distinta" in r for r in razones))
+
+        resultado = calcular_puntaje_equivalencia(macho, hembra)
+        self.assertEqual(resultado["veto"], "color")
+        self.assertLess(resultado["puntaje"], UMBRALES_POR_MODULO["presupuestos"])
+
+    def test_acople_que_lista_ambos_generos_no_se_bloquea_a_si_mismo(self):
+        # Un acople "Macho Hembra" (rosca mixta en el mismo artículo) no es
+        # un conflicto consigo mismo -- la intersección de conjuntos ya lo
+        # resuelve bien (comparten tanto "macho" como "hembra"), así que el
+        # veto de conexión nunca debe ser lo que bloquee este par.
+        objetivo = extraer_atributos('Acople Bronce Manguera Macho Hembra 1/2"', None, categoria="Tubería")
+        candidato = extraer_atributos('Acople Bronce Manguera Macho Hembra 1/2"', None, categoria="Tubería")
+        veredicto, razones, _ = comparar_atributos(objetivo, candidato)
+        self.assertNotEqual(veredicto, NO_EQUIVALENTE)
+        self.assertFalse(any(r.startswith("conexion_distinta") for r in razones))
+
     def test_codigo_corto_de_familia_con_marca_igual_no_confirma_solo(self):
         # Bug real encontrado corriendo el motor completo: "N400" es el
         # prefijo de TODA la línea de bisagras National Hardware (decenas
