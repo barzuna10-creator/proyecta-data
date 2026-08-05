@@ -55,3 +55,53 @@ class Proyecto:
     indice: list[EntradaIndice] | None  # None = no se encontró un índice de planos en el PDF
     advertencias: list[str] = field(default_factory=list)  # todo lo que no se pudo determinar, nunca silenciado
     extras: dict = field(default_factory=dict)  # resultados de extractores de documento futuros, por nombre
+
+
+# ---------------------------------------------------------------------------
+# LECTURA_DE_PLANOS_V2_CUADROS -- ver LECTURA_DE_PLANOS_V2_CUADROS.md.
+# Tres tipos de cuadro, cada uno con su propio campo `confianza` ("alta" |
+# "media" | "baja") y `texto_original` (evidencia cruda, sin segmentar, de
+# la fila completa -- nunca se descarta aunque la segmentación en campos
+# falle o sea parcial). `cantidad` en puertas/ventanas queda casi siempre
+# None: ningún cuadro real auditado trae una columna de cantidad -- eso
+# requeriría contar símbolos en planta, explícitamente fuera de alcance.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CuadroAcabados:
+    codigo: str
+    descripcion: str | None
+    marca: str | None
+    formato: str | None
+    color: str | None
+    ubicacion: str  # "muros_y_paredes" | "pisos" | "cielos" -- de qué sub-cuadro salió
+    pagina_fuente: int
+    texto_original: str
+    confianza: str
+
+
+@dataclass(frozen=True)
+class CuadroPuertas:
+    codigo: str
+    ancho: float | None
+    alto: float | None
+    tipo: str | None
+    material: str | None
+    cantidad: int | None
+    pagina_fuente: int
+    texto_original: str
+    confianza: str
+
+
+@dataclass(frozen=True)
+class CuadroVentanas:
+    codigo: str
+    ancho: float | None
+    alto: float | None
+    tipo: str | None
+    material: str | None
+    cantidad: int | None
+    pagina_fuente: int
+    texto_original: str
+    confianza: str
