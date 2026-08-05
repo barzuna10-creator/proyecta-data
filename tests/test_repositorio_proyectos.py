@@ -16,6 +16,8 @@ import unittest
 from unittest import mock
 
 from api.repositorio_proyectos import (
+    ORIGENES_ITEM_VALIDOS,
+    PARTIDAS_SUGERIDAS,
     SIN_PARTIDA,
     _agrupar_por_partida,
     _calcular_cotizacion,
@@ -247,6 +249,20 @@ class PruebaSugerirPartida(unittest.TestCase):
         self.assertIsNone(_sugerir_partida(None))
         self.assertIsNone(_sugerir_partida(""))
 
+    def test_categoria_de_construplaza_que_antes_no_calzaba(self):
+        # Bug real (AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §2): la
+        # categoría real de Construplaza para piso es "Pisos y Enchapes",
+        # que no es igual a "pisos" -- con el dict de igualdad exacta
+        # original quedaba "Sin partida" aunque EPA/otros proveedores con
+        # "Pisos" a secas sí calzaban. Ahora, por palabra clave contenida,
+        # ambas caen en "Acabados".
+        self.assertEqual(_sugerir_partida("Pisos y Enchapes"), "Acabados")
+        self.assertEqual(_sugerir_partida("Pisos"), "Acabados")
+
+    def test_categoria_con_palabras_extra_alrededor_de_la_palabra_clave(self):
+        self.assertEqual(_sugerir_partida("Materiales de Construcción"), "Estructura")
+        self.assertEqual(_sugerir_partida("Griferías y Accesorios"), "Hidráulico")
+
 
 def _crear_db_temporal():
     archivo = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -306,6 +322,12 @@ def _crear_db_temporal():
             url_producto_al_agregar TEXT,
             fecha_agregado TEXT,
             partida TEXT,
+            origen TEXT,
+            pagina_fuente INTEGER,
+            lamina_fuente TEXT,
+            texto_original TEXT,
+            confianza TEXT,
+            regla_generadora TEXT,
             UNIQUE(proyecto_id, proveedor, id_proveedor)
         )
         """
@@ -510,6 +532,128 @@ class PruebaSugerenciaPartidaAlAgregar(BasePruebaIntegracion):
         item = proyecto["items"][0]
         self.assertEqual(item["estado"], "pendiente")
         self.assertEqual(item["partida"], "Otros")
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+
+class PruebaIdentificadoresEstablesDePartida(unittest.TestCase):
+    """AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §2: las partidas deben tener
+    un identificador estable independiente de su nombre visible."""
+
+    def test_cada_partida_tiene_id_estable_y_nombre_visible_distintos(self):
+        for partida in PARTIDAS_SUGERIDAS:
+            self.assertTrue(partida.id)
+            self.assertTrue(partida.nombre)
+            # El id es un slug interno (sin tildes, sin espacios) -- nunca
+            # el mismo texto que se muestra al usuario, para no volver a
+            # depender de comparar el nombre visible como si fuera clave.
+            self.assertNotEqual(partida.id, partida.nombre)
+
+    def test_ids_son_unicos(self):
+        ids = [p.id for p in PARTIDAS_SUGERIDAS]
+        self.assertEqual(len(ids), len(set(ids)))
+
+
+class PruebaTrazabilidadAlAgregarItem(BasePruebaIntegracion):
+    """AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §1: todo ítem debe conservar
+    permanentemente su origen, página/lámina fuente, texto original,
+    confianza y la regla/extractor que lo generó."""
+
+    def test_agregar_item_guarda_los_seis_campos_de_trazabilidad(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cerámica 60x60",
+             "categoria": "Pisos", "precio": 8000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto con plano")
+        pid = proyecto["id"]
+
+        proyecto = agregar_item(
+            pid, self.PROPIETARIO, "EPA", "1", 3,
+            origen="plano",
+            pagina_fuente=28,
+            lamina_fuente="A402",
+            texto_original="ENCHAPE DE PORCELANATO 60X60 GRIS",
+            confianza="alta",
+            regla_generadora="cuadro_acabados",
+        )
+        item = proyecto["items"][0]
+
+        self.assertEqual(item["origen"], "plano")
+        self.assertEqual(item["pagina_fuente"], 28)
+        self.assertEqual(item["lamina_fuente"], "A402")
+        self.assertEqual(item["texto_original"], "ENCHAPE DE PORCELANATO 60X60 GRIS")
+        self.assertEqual(item["confianza"], "alta")
+        self.assertEqual(item["regla_generadora"], "cuadro_acabados")
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_agregar_item_sin_trazabilidad_queda_en_none_no_inventado(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Martillo",
+             "categoria": "Herramientas", "precio": 3000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto manual")
+        pid = proyecto["id"]
+
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 1)
+        item = proyecto["items"][0]
+
+        self.assertIsNone(item["origen"])
+        self.assertIsNone(item["pagina_fuente"])
+        self.assertIsNone(item["lamina_fuente"])
+        self.assertIsNone(item["texto_original"])
+        self.assertIsNone(item["confianza"])
+        self.assertIsNone(item["regla_generadora"])
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_origen_invalido_lanza_error(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Martillo",
+             "categoria": "Herramientas", "precio": 3000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto origen invalido")
+        pid = proyecto["id"]
+
+        with self.assertRaises(ValueError):
+            agregar_item(pid, self.PROPIETARIO, "EPA", "1", 1, origen="inventado")
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_los_cuatro_origenes_documentados_son_validos(self):
+        self.assertEqual(
+            ORIGENES_ITEM_VALIDOS,
+            {"plano", "sistema_constructivo", "plantilla", "manual"},
+        )
+
+    def test_reagregar_desde_otro_origen_no_pisa_la_trazabilidad_original(self):
+        # Mismo producto, agregado primero desde el plano y luego -- por
+        # ejemplo, el usuario lo vuelve a buscar y agregar a mano -- la
+        # trazabilidad del primer origen nunca debe perderse ni
+        # sobrescribirse con la del segundo (AUDITORIA_INTEGRAL_PRODUCTO.md
+        # §1: "nunca debe perderse esa información").
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cerámica 60x60",
+             "categoria": "Pisos", "precio": 8000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto reagregado")
+        pid = proyecto["id"]
+
+        agregar_item(
+            pid, self.PROPIETARIO, "EPA", "1", 1,
+            origen="plano", pagina_fuente=28, lamina_fuente="A402",
+            texto_original="ENCHAPE 60X60", confianza="alta",
+            regla_generadora="cuadro_acabados",
+        )
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 2, origen="manual")
+
+        item = proyecto["items"][0]
+        self.assertEqual(item["origen"], "plano")
+        self.assertEqual(item["pagina_fuente"], 28)
+        self.assertEqual(item["lamina_fuente"], "A402")
+        self.assertEqual(item["regla_generadora"], "cuadro_acabados")
+        # La cantidad sí se acumula normalmente (comportamiento preexistente).
+        self.assertEqual(item["cantidad"], 3)
 
         eliminar_proyecto(pid, self.PROPIETARIO)
 

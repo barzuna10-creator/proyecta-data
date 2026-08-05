@@ -259,6 +259,12 @@ def _crear_db_temporal():
             url_producto_al_agregar TEXT,
             fecha_agregado TEXT,
             partida TEXT,
+            origen TEXT,
+            pagina_fuente INTEGER,
+            lamina_fuente TEXT,
+            texto_original TEXT,
+            confianza TEXT,
+            regla_generadora TEXT,
             UNIQUE(proyecto_id, proveedor, id_proveedor)
         )
         """

@@ -48,6 +48,16 @@ class AgregarItemRequest(BaseModel):
     proveedor: str
     id_proveedor: str
     cantidad: float = Field(default=1, gt=0)
+    # Trazabilidad (ver AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §1): todos
+    # opcionales porque no todo caller los conoce (un ítem agregado a mano
+    # desde el comparador no tiene página ni lámina fuente), pero cuando
+    # vienen se guardan tal cual y nunca se pierden ni se fusionan.
+    origen: str | None = None
+    pagina_fuente: int | None = None
+    lamina_fuente: str | None = None
+    texto_original: str | None = None
+    confianza: str | None = None
+    regla_generadora: str | None = None
 
 
 class ActualizarItemRequest(BaseModel):
@@ -146,6 +156,12 @@ def agregar_item(
             body.proveedor,
             body.id_proveedor,
             body.cantidad,
+            origen=body.origen,
+            pagina_fuente=body.pagina_fuente,
+            lamina_fuente=body.lamina_fuente,
+            texto_original=body.texto_original,
+            confianza=body.confianza,
+            regla_generadora=body.regla_generadora,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))

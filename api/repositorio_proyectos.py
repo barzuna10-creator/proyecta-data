@@ -1,5 +1,6 @@
 import json
 import secrets
+from dataclasses import dataclass
 from datetime import datetime
 
 from db import conectar
@@ -11,33 +12,82 @@ from api.adaptador_planos import construir_analisis_plano
 ESTADOS_PROYECTO = {"activo", "completado", "archivado"}
 ESTADOS_ITEM = {"pendiente", "comprado", "descartado"}
 
+# De dónde puede venir un ítem agregado a un proyecto (ver
+# AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §1: "nunca se guarda de dónde
+# salió un ítem"). "plantilla" es un origen real, no inventado para este
+# cambio -- ya existía el flujo de sugerencias de plantilla de proyecto
+# (SugerenciasMateriales.tsx / PLANTILLAS_PROYECTO_V1.md), solo no se
+# distinguía de un ítem agregado a mano.
+ORIGENES_ITEM_VALIDOS = {"plano", "sistema_constructivo", "plantilla", "manual"}
+
+# Cada partida tiene un identificador estable (`id`, nunca cambia, es lo
+# que debería usarse para reconocerla en código) y una representación
+# visible independiente (`nombre`, lo que se guarda en items_proyecto.partida
+# y lo que ve el usuario -- sigue siendo texto libre en la base de datos,
+# el usuario lo puede editar como siempre). Único lugar donde vive el
+# orden de construcción típico -- de cimentación hacia acabados, no
+# alfabético, porque así es como se lee una cotización real. "Demolición",
+# "Obra gris" y "Sanitarios" están acá por PLANTILLAS_PROYECTO_V1.md
+# (remodelaciones), en su posición relativa original.
+# (Ver también app/lib/partidas.ts en el frontend, misma lista y mismo
+# orden -- ese archivo sigue siendo la fuente de la lista para la UI de
+# selección manual, no se tocó en este cambio).
+@dataclass(frozen=True)
+class Partida:
+    id: str
+    nombre: str
+
+
+PARTIDAS_SUGERIDAS = [
+    Partida("demolicion", "Demolición"),
+    Partida("obra_gris", "Obra gris"),
+    Partida("cimentacion", "Cimentación"),
+    Partida("estructura", "Estructura"),
+    Partida("paredes", "Paredes"),
+    Partida("techo", "Techo"),
+    Partida("electrico", "Eléctrico"),
+    Partida("hidraulico", "Hidráulico"),
+    Partida("acabados", "Acabados"),
+    Partida("pintura", "Pintura"),
+    Partida("sanitarios", "Sanitarios"),
+    Partida("otros", "Otros"),
+]
+_NOMBRES_PARTIDAS_SUGERIDAS = [partida.nombre for partida in PARTIDAS_SUGERIDAS]
+_PARTIDA_POR_ID = {partida.id: partida for partida in PARTIDAS_SUGERIDAS}
+
 # Auditoría de UX (ver UX_COTIZACION_AUDITORIA.md): organizar en partidas un
 # proyecto de 30-80 ítems a mano, uno por uno, es el punto de fricción más
 # grande del flujo real de cotizar. La categoría del producto (ya capturada
-# en cada ítem) es una señal gratis para adelantar ese trabajo -- se
-# preasigna la partida solo en los casos donde la categoría real del
-# catálogo no deja ambigüedad (verificado contra las categorías reales de
-# los 4 proveedores, no adivinado). El resto se deja "Sin partida" -- igual
-# que hoy -- para no asignar mal por exceso de confianza. Es solo un valor
-# inicial: el usuario lo puede cambiar en cualquier momento, igual que
-# antes de este cambio.
-SUGERENCIA_PARTIDA_POR_CATEGORIA = {
-    "electricidad": "Eléctrico",
-    "electrico": "Eléctrico",
-    "plomeria": "Hidráulico",
-    "fontaneria": "Hidráulico",
-    "griferia": "Hidráulico",
-    "pinturas": "Pintura",
-    "construccion": "Estructura",
-    "pisos": "Acabados",
-    "maderas y puertas": "Acabados",
+# en cada ítem) es una señal gratis para adelantar ese trabajo.
+#
+# AUDITORIA_INTEGRAL_PRODUCTO.md (hallazgo §2) encontró que el emparejamiento
+# original exigía igualdad exacta de string contra la categoría real del
+# proveedor -- "pisos" no calzaba con la categoría real de Construplaza,
+# "Pisos y Enchapes", así que un material caía en "Sin partida" mientras un
+# material equivalente de otro proveedor sí se clasificaba. Ahora se
+# reconoce por palabra clave *contenida* en la categoría normalizada, no por
+# igualdad -- verificado contra las categorías reales de los 4 proveedores
+# integrados, no adivinado. Si ninguna palabra clave calza, queda "Sin
+# partida" -- igual que hoy -- para no asignar mal por exceso de confianza.
+# Es solo un valor inicial: el usuario lo puede cambiar en cualquier
+# momento, igual que antes de este cambio.
+PALABRAS_CLAVE_POR_PARTIDA_ID = {
+    "electrico": ("electricidad", "electrico"),
+    "hidraulico": ("plomeria", "fontaneria", "griferia", "hidraulico"),
+    "pintura": ("pinturas", "pintura"),
+    "estructura": ("construccion", "estructura"),
+    "acabados": ("pisos", "enchape", "maderas y puertas", "acabado"),
 }
 
 
 def _sugerir_partida(categoria):
     if not categoria:
         return None
-    return SUGERENCIA_PARTIDA_POR_CATEGORIA.get(normalizar_texto(categoria))
+    categoria_normalizada = normalizar_texto(categoria)
+    for partida_id, palabras_clave in PALABRAS_CLAVE_POR_PARTIDA_ID.items():
+        if any(palabra in categoria_normalizada for palabra in palabras_clave):
+            return _PARTIDA_POR_ID[partida_id].nombre
+    return None
 
 
 def _ahora():
@@ -67,28 +117,19 @@ def _calcular_totales(items):
     return round(total_pendiente), round(total_comprado)
 
 
-# Orden de construcción típico -- las partidas que coinciden con esta lista
-# (ver también app/lib/partidas.ts en el frontend, misma lista) se muestran
-# en este orden en vez de alfabético, porque así es como se lee una
-# cotización real: de cimentación hacia acabados, no A-Z. Cualquier otra
-# partida (texto libre del usuario) se ordena alfabéticamente después de
-# estas, y "Sin partida" siempre queda de último -- es la señal visual de
-# "esto todavía no lo he organizado".
-# "Demolición", "Obra gris" y "Sanitarios" agregados en
-# PLANTILLAS_PROYECTO_V1.md para remodelaciones -- insertados sin mover
-# ninguna partida existente de su posición relativa.
-ORDEN_PARTIDAS_SUGERIDAS = [
-    "Demolición", "Obra gris", "Cimentación", "Estructura", "Paredes", "Techo",
-    "Eléctrico", "Hidráulico", "Acabados", "Pintura", "Sanitarios", "Otros",
-]
+# Cualquier partida que no esté en PARTIDAS_SUGERIDAS (texto libre del
+# usuario) se ordena alfabéticamente después de estas, y "Sin partida"
+# siempre queda de último -- es la señal visual de "esto todavía no lo he
+# organizado". El orden en sí vive una sola vez, en PARTIDAS_SUGERIDAS
+# arriba -- ya no hay una segunda lista separada que se pueda desincronizar.
 SIN_PARTIDA = "Sin partida"
 
 
 def _clave_orden_partida(nombre_partida):
     if nombre_partida == SIN_PARTIDA:
         return (2, "")
-    if nombre_partida in ORDEN_PARTIDAS_SUGERIDAS:
-        return (0, ORDEN_PARTIDAS_SUGERIDAS.index(nombre_partida))
+    if nombre_partida in _NOMBRES_PARTIDAS_SUGERIDAS:
+        return (0, _NOMBRES_PARTIDAS_SUGERIDAS.index(nombre_partida))
     return (1, nombre_partida.lower())
 
 
@@ -176,6 +217,8 @@ def _obtener_items(conexion, proyecto_id):
             i.id, i.proveedor, i.id_proveedor, i.cantidad, i.unidad_medida,
             i.estado, i.prioridad, i.comentario, i.fecha_agregado, i.partida,
             i.precio_al_agregar,
+            i.origen, i.pagina_fuente, i.lamina_fuente, i.texto_original,
+            i.confianza, i.regla_generadora,
             COALESCE(pr.nombre, i.nombre_al_agregar) AS nombre,
             COALESCE(pr.marca, i.marca_al_agregar) AS marca,
             COALESCE(pr.categoria, i.categoria_al_agregar) AS categoria,
@@ -353,7 +396,14 @@ def eliminar_proyecto(proyecto_id, propietario_id):
     return True
 
 
-def agregar_item(proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=1):
+def agregar_item(
+    proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=1,
+    origen=None, pagina_fuente=None, lamina_fuente=None, texto_original=None,
+    confianza=None, regla_generadora=None,
+):
+    if origen is not None and origen not in ORIGENES_ITEM_VALIDOS:
+        raise ValueError(f"Origen inválido: {origen}")
+
     conexion = conectar()
 
     proyecto = conexion.execute(
@@ -387,8 +437,10 @@ def agregar_item(proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=
             proyecto_id, proveedor, id_proveedor, cantidad,
             nombre_al_agregar, marca_al_agregar, categoria_al_agregar,
             precio_al_agregar, url_imagen_al_agregar, url_producto_al_agregar,
-            fecha_agregado, partida
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            fecha_agregado, partida,
+            origen, pagina_fuente, lamina_fuente, texto_original,
+            confianza, regla_generadora
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(proyecto_id, proveedor, id_proveedor)
         DO UPDATE SET
             -- Si el ítem ya existía pendiente, sumar es lo esperado (agregar
@@ -406,12 +458,19 @@ def agregar_item(proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=
             -- partida NO se toca aquí a propósito: si el ítem ya existía
             -- (reactivado desde descartado, por ejemplo), el usuario pudo
             -- haberla organizado a mano -- reagregarlo no debe pisarla.
+            -- origen/pagina_fuente/lamina_fuente/texto_original/confianza/
+            -- regla_generadora TAMPOCO se tocan en conflicto, a propósito
+            -- (AUDITORIA_INTEGRAL_PRODUCTO.md §1: "nunca debe perderse esa
+            -- información") -- conservan el origen del primer agregado,
+            -- nunca se sobrescriben ni se fusionan con un segundo origen.
         """,
         (
             proyecto_id, proveedor, id_proveedor, cantidad,
             producto["nombre"], producto["marca"], producto["categoria"],
             producto["precio"], producto["url_imagen"], producto["url_producto"],
             ahora, partida_sugerida,
+            origen, pagina_fuente, lamina_fuente, texto_original,
+            confianza, regla_generadora,
         ),
     )
 
