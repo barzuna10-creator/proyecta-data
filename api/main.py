@@ -5,6 +5,7 @@ import os
 import sqlite3
 
 from db import BASE_DATOS
+from api.repositorio_proyectos import _EXECUTOR_PLANOS
 from api.routers import proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
 from busqueda import buscar_fts as _buscar_fts_motor
@@ -45,6 +46,16 @@ app.add_middleware(
 )
 app.include_router(proyectos.router)
 app.include_router(sistemas_constructivos.router)
+
+
+@app.on_event("shutdown")
+def _cerrar_executor_planos():
+    # Sin esto, el proceso worker que ProcessPoolExecutor deja abierto
+    # (ver api/repositorio_proyectos.py) sobrevive al proceso principal en
+    # un shutdown limpio -- inofensivo en producción (el orquestador mata
+    # el grupo de procesos entero), pero en desarrollo con --reload cada
+    # recarga dejaría un proceso huérfano más.
+    _EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
 
 # Etapa 2 del motor de búsqueda (ver busqueda.py): alterna entre el buscador
 # actual (LIKE + precio) y FTS5. Cambiar a False vuelve al buscador anterior

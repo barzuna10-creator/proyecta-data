@@ -1,5 +1,7 @@
 import json
+import multiprocessing
 import secrets
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -8,6 +10,54 @@ from busqueda import normalizar_texto
 from especificaciones import unidad_comercial as _unidad_comercial
 import lectura_planos as lp
 from api.adaptador_planos import construir_analisis_plano
+
+# INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md: leer un plano real (fitz +
+# pdfplumber) es 100% CPU-bound en un solo núcleo durante ~10s para un PDF
+# de 105MB -- medido en producción, esto congela TODA la app (crear
+# proyectos, buscar, navegar) para cualquier otro usuario, porque aunque
+# el endpoint ya corre en un hilo aparte (Starlette lo despacha solo), ese
+# hilo sigue compitiendo por el mismo GIL que el resto del proceso. Un
+# hilo no alcanza -- hace falta un PROCESO aparte, con su propio GIL.
+#
+# `spawn` explícito (no el default de la plataforma, que en Linux puede
+# ser `fork`): este proceso ya tiene varios hilos corriendo (el threadpool
+# de Starlette) para cuando se sube el primer plano -- hacer fork() de un
+# proceso con hilos activos es una fuente clásica de deadlocks (un lock
+# que otro hilo tenía tomado en el momento del fork queda tomado para
+# siempre en el hijo, que nunca tendrá ese hilo para soltarlo). `spawn`
+# arranca un intérprete de Python limpio en el hijo -- más lento de
+# arrancar, pero seguro en cualquier plataforma (localhost/macOS y
+# Render/Linux por igual).
+#
+# max_workers=1 a propósito: cada análisis mide ~380MB de RSS pico (ver
+# INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md) -- permitir varios en
+# paralelo multiplicaría ese pico en un entorno de memoria limitada. Con
+# 1 worker, un segundo plano subido mientras el primero se procesa
+# simplemente espera su turno (ProcessPoolExecutor ya encola eso solo) --
+# lo que nunca espera es el resto de la aplicación, que es el requisito
+# real.
+_CONTEXTO_PROCESOS = multiprocessing.get_context("spawn")
+_EXECUTOR_PLANOS = ProcessPoolExecutor(max_workers=1, mp_context=_CONTEXTO_PROCESOS)
+
+
+def _procesar_plano_pdf(ruta_pdf):
+    """Todo el trabajo CPU-intensivo de leer un plano -- exactamente la
+    misma secuencia de llamadas que antes corría inline dentro de
+    analizar_plano(), sin ningún cambio de comportamiento. Vive como
+    función de nivel de módulo (no un closure, no un método) porque
+    ProcessPoolExecutor necesita poder importar una referencia a ella por
+    nombre calificado en el proceso hijo -- una función anidada no se
+    puede *picklear* así.
+
+    Devuelve únicamente el dict plano de construir_analisis_plano() --
+    nunca un objeto de lectura_planos (Proyecto, Lamina, etc.) cruza la
+    frontera entre procesos, evita cualquier duda sobre si algo ahí es
+    picklable."""
+    proyecto_leido = lp.leer_proyecto(ruta_pdf)
+    modelo_edificio = lp.construir_modelo_edificio(proyecto_leido)
+    cuadros = lp.agregar_cuadros(proyecto_leido)
+    computo_estructural = lp.agregar_computo_estructural(proyecto_leido)
+    return construir_analisis_plano(proyecto_leido, modelo_edificio, cuadros, computo_estructural)
 
 ESTADOS_PROYECTO = {"activo", "completado", "archivado"}
 ESTADOS_ITEM = {"pendiente", "comprado", "descartado"}
@@ -579,11 +629,12 @@ def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
         conexion.close()
         return None
 
-    proyecto_leido = lp.leer_proyecto(ruta_pdf)
-    modelo_edificio = lp.construir_modelo_edificio(proyecto_leido)
-    cuadros = lp.agregar_cuadros(proyecto_leido)
-    computo_estructural = lp.agregar_computo_estructural(proyecto_leido)
-    analisis = construir_analisis_plano(proyecto_leido, modelo_edificio, cuadros, computo_estructural)
+    # .result() bloquea ESTE hilo hasta que el proceso hijo termine, pero
+    # bloquear un hilo esperando a otro proceso es una espera de I/O (un
+    # pipe), no trabajo de CPU -- libera el GIL mientras espera, que es
+    # justo lo que permite que el resto de la app siga respondiendo
+    # mientras tanto (ver INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md).
+    analisis = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf).result()
 
     ahora = _ahora()
     conexion.execute(
