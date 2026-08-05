@@ -1,10 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
+import os
+import tempfile
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
 from api.identidad import obtener_propietario_id
 from api import repositorio_proyectos as repo
 
 router = APIRouter(prefix="/proyectos", tags=["proyectos"])
+
+TAMANO_MAXIMO_PLANO_BYTES = 300 * 1024 * 1024  # generoso: planos reales de referencia pesan 48-110 MB
 
 
 def _no_vacio(valor):
@@ -178,6 +183,64 @@ def eliminar_item(
     propietario_id: str = Depends(obtener_propietario_id),
 ):
     proyecto = repo.eliminar_item(proyecto_id, propietario_id, item_id)
+
+    if not proyecto:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return proyecto
+
+
+@router.post("/{proyecto_id}/plano")
+def subir_plano(
+    proyecto_id: int,
+    archivo: UploadFile = File(...),
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    if archivo.content_type != "application/pdf":
+        raise HTTPException(status_code=422, detail="El archivo debe ser un PDF.")
+
+    # Sin streaming a propósito: lectura_planos necesita una ruta en disco
+    # (fitz.open(ruta)), y los dos planos de referencia usados para
+    # calibrar todo lectura_planos pesan 48-110 MB -- muy por debajo de
+    # cualquier límite razonable de memoria para un archivo temporal.
+    archivo_temporal = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    try:
+        try:
+            tamano = 0
+            while fragmento := archivo.file.read(1024 * 1024):
+                tamano += len(fragmento)
+                if tamano > TAMANO_MAXIMO_PLANO_BYTES:
+                    raise HTTPException(status_code=413, detail="El PDF es demasiado grande.")
+                archivo_temporal.write(fragmento)
+        finally:
+            archivo_temporal.close()
+
+        try:
+            proyecto = repo.analizar_plano(
+                proyecto_id, propietario_id, archivo_temporal.name, archivo.filename
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="No se pudo leer el PDF. Verificá que no esté dañado o protegido.",
+            )
+    finally:
+        os.unlink(archivo_temporal.name)
+
+    if not proyecto:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return proyecto
+
+
+@router.delete("/{proyecto_id}/plano")
+def eliminar_plano(
+    proyecto_id: int,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    proyecto = repo.eliminar_plano(proyecto_id, propietario_id)
 
     if not proyecto:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")

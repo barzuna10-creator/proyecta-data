@@ -1,9 +1,12 @@
+import json
 import secrets
 from datetime import datetime
 
 from db import conectar
 from busqueda import normalizar_texto
 from especificaciones import unidad_comercial as _unidad_comercial
+import lectura_planos as lp
+from api.adaptador_planos import construir_analisis_plano
 
 ESTADOS_PROYECTO = {"activo", "completado", "archivado"}
 ESTADOS_ITEM = {"pendiente", "comprado", "descartado"}
@@ -284,6 +287,14 @@ def obtener_proyecto(proyecto_id=None, propietario_id=None, token=None):
     proyecto["total_comprado"] = total_comprado
     proyecto["cotizacion"] = _calcular_cotizacion(proyecto, items)
 
+    # mismo patrón que productos.imagenes_adicionales (ver api/main.py):
+    # columna TEXT con JSON serializado a mano, no un tipo JSON nativo.
+    if proyecto.get("plano_analisis") is not None:
+        try:
+            proyecto["plano_analisis"] = json.loads(proyecto["plano_analisis"])
+        except ValueError:
+            proyecto["plano_analisis"] = None
+
     return proyecto
 
 
@@ -468,6 +479,67 @@ def eliminar_item(proyecto_id, propietario_id, item_id):
     )
     conexion.execute(
         "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?",
+        (_ahora(), proyecto_id),
+    )
+    conexion.commit()
+    conexion.close()
+
+    return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+
+
+def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
+    """Corre lectura_planos sobre un PDF ya guardado en disco (ver el
+    router: el archivo subido se escribe a un temporal antes de llamar
+    acá) y guarda el resultado -- niveles, espacios y las láminas que
+    referencian -- como JSON en la fila del proyecto. El PDF en sí no se
+    guarda, solo el análisis ya estructurado (ver
+    INTEGRACION_LECTURA_PLANOS_PROYECTO.md)."""
+    conexion = conectar()
+    fila = conexion.execute(
+        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+        (proyecto_id, propietario_id),
+    ).fetchone()
+
+    if not fila:
+        conexion.close()
+        return None
+
+    proyecto_leido = lp.leer_proyecto(ruta_pdf)
+    modelo_edificio = lp.construir_modelo_edificio(proyecto_leido)
+    analisis = construir_analisis_plano(proyecto_leido, modelo_edificio)
+
+    ahora = _ahora()
+    conexion.execute(
+        """
+        UPDATE proyectos
+        SET plano_nombre_archivo = ?, plano_analisis = ?, plano_fecha_analisis = ?, fecha_actualizacion = ?
+        WHERE id = ?
+        """,
+        (nombre_archivo, json.dumps(analisis), ahora, ahora, proyecto_id),
+    )
+    conexion.commit()
+    conexion.close()
+
+    return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+
+
+def eliminar_plano(proyecto_id, propietario_id):
+    conexion = conectar()
+    fila = conexion.execute(
+        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+        (proyecto_id, propietario_id),
+    ).fetchone()
+
+    if not fila:
+        conexion.close()
+        return None
+
+    conexion.execute(
+        """
+        UPDATE proyectos
+        SET plano_nombre_archivo = NULL, plano_analisis = NULL, plano_fecha_analisis = NULL, fecha_actualizacion = ?
+        WHERE id = ?
+        """,
         (_ahora(), proyecto_id),
     )
     conexion.commit()
