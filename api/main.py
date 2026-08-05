@@ -1,6 +1,7 @@
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
+import os
 import sqlite3
 
 from db import BASE_DATOS
@@ -19,13 +20,25 @@ app = FastAPI(
     version="1.0"
 )
 
+# PRODUCTION_READINESS_REVIEW.md, hallazgo A7/H1: orígenes por defecto
+# iguales a los de siempre -- CORS_ORIGINS solo los reemplaza si está
+# seteada (coma-separados), para no tener que editar código y redesplegar
+# cada vez que se agrega un origen nuevo (ej. una nueva URL de preview).
+_ORIGENES_CORS_DEFECTO = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://proyecta-beta.vercel.app",
+]
+_origenes_cors_env = os.environ.get("CORS_ORIGINS")
+ORIGENES_CORS = (
+    [origen.strip() for origen in _origenes_cors_env.split(",") if origen.strip()]
+    if _origenes_cors_env
+    else _ORIGENES_CORS_DEFECTO
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://proyecta-beta.vercel.app",
-    ],
+    allow_origins=ORIGENES_CORS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

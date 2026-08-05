@@ -399,7 +399,7 @@ def eliminar_proyecto(proyecto_id, propietario_id):
 def agregar_item(
     proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=1,
     origen=None, pagina_fuente=None, lamina_fuente=None, texto_original=None,
-    confianza=None, regla_generadora=None,
+    confianza=None, regla_generadora=None, unidad_medida=None,
 ):
     if origen is not None and origen not in ORIGENES_ITEM_VALIDOS:
         raise ValueError(f"Origen inválido: {origen}")
@@ -439,8 +439,8 @@ def agregar_item(
             precio_al_agregar, url_imagen_al_agregar, url_producto_al_agregar,
             fecha_agregado, partida,
             origen, pagina_fuente, lamina_fuente, texto_original,
-            confianza, regla_generadora
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            confianza, regla_generadora, unidad_medida
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(proyecto_id, proveedor, id_proveedor)
         DO UPDATE SET
             -- Si el ítem ya existía pendiente, sumar es lo esperado (agregar
@@ -459,10 +459,11 @@ def agregar_item(
             -- (reactivado desde descartado, por ejemplo), el usuario pudo
             -- haberla organizado a mano -- reagregarlo no debe pisarla.
             -- origen/pagina_fuente/lamina_fuente/texto_original/confianza/
-            -- regla_generadora TAMPOCO se tocan en conflicto, a propósito
-            -- (AUDITORIA_INTEGRAL_PRODUCTO.md §1: "nunca debe perderse esa
-            -- información") -- conservan el origen del primer agregado,
-            -- nunca se sobrescriben ni se fusionan con un segundo origen.
+            -- regla_generadora/unidad_medida TAMPOCO se tocan en conflicto,
+            -- a propósito (AUDITORIA_INTEGRAL_PRODUCTO.md §1: "nunca debe
+            -- perderse esa información") -- conservan el origen del primer
+            -- agregado, nunca se sobrescriben ni se fusionan con un
+            -- segundo origen.
         """,
         (
             proyecto_id, proveedor, id_proveedor, cantidad,
@@ -470,7 +471,7 @@ def agregar_item(
             producto["precio"], producto["url_imagen"], producto["url_producto"],
             ahora, partida_sugerida,
             origen, pagina_fuente, lamina_fuente, texto_original,
-            confianza, regla_generadora,
+            confianza, regla_generadora, unidad_medida,
         ),
     )
 
@@ -505,10 +506,18 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
 
     if cambios:
         asignaciones = ", ".join(f"{campo} = ?" for campo in cambios)
-        conexion.execute(
+        cursor = conexion.execute(
             f"UPDATE items_proyecto SET {asignaciones} WHERE id = ? AND proyecto_id = ?",
             (*cambios.values(), item_id, proyecto_id),
         )
+        # PRODUCTION_READINESS_REVIEW.md, hallazgo F3: si el ítem ya no
+        # existe (otra pestaña ya lo borró, por ejemplo), el UPDATE de
+        # arriba no toca ninguna fila -- sin este chequeo, la función
+        # igual devolvía 200 con el proyecto tal cual, dando a entender
+        # falsamente que el cambio se aplicó.
+        if cursor.rowcount == 0:
+            conexion.close()
+            return None
         conexion.execute(
             "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?",
             (_ahora(), proyecto_id),
@@ -532,10 +541,16 @@ def eliminar_item(proyecto_id, propietario_id, item_id):
         conexion.close()
         return None
 
-    conexion.execute(
+    cursor = conexion.execute(
         "DELETE FROM items_proyecto WHERE id = ? AND proyecto_id = ?",
         (item_id, proyecto_id),
     )
+    # PRODUCTION_READINESS_REVIEW.md, hallazgo F3: mismo chequeo que
+    # actualizar_item -- un DELETE que no borró nada (ítem ya no existía)
+    # no debe reportarse como éxito.
+    if cursor.rowcount == 0:
+        conexion.close()
+        return None
     conexion.execute(
         "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?",
         (_ahora(), proyecto_id),

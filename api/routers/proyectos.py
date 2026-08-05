@@ -36,10 +36,15 @@ class ActualizarProyectoRequest(BaseModel):
     fecha_objetivo: str | None = None
     cliente: str | None = None
     direccion: str | None = None
-    area_m2: float | None = Field(default=None, gt=0)
-    indirectos_porcentaje: float | None = Field(default=None, ge=0)
-    imprevistos_porcentaje: float | None = Field(default=None, ge=0)
-    margen_porcentaje: float | None = Field(default=None, ge=0)
+    # Los techos son deliberadamente generosos -- no son una regla de
+    # negocio ("ningún margen supera X"), son una red contra un error de
+    # dedo (un cero de más) que de otra forma llega sin aviso a un total
+    # que se le cotiza a un cliente real (ver PRODUCTION_READINESS_REVIEW.md,
+    # hallazgo E7).
+    area_m2: float | None = Field(default=None, gt=0, le=100_000)
+    indirectos_porcentaje: float | None = Field(default=None, ge=0, le=1000)
+    imprevistos_porcentaje: float | None = Field(default=None, ge=0, le=1000)
+    margen_porcentaje: float | None = Field(default=None, ge=0, le=1000)
 
     _validar_nombre = field_validator("nombre")(_no_vacio)
 
@@ -47,7 +52,9 @@ class ActualizarProyectoRequest(BaseModel):
 class AgregarItemRequest(BaseModel):
     proveedor: str
     id_proveedor: str
-    cantidad: float = Field(default=1, gt=0)
+    # Techo generoso, no una regla de negocio -- ver el comentario en
+    # ActualizarProyectoRequest más arriba.
+    cantidad: float = Field(default=1, gt=0, le=1_000_000)
     # Trazabilidad (ver AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §1): todos
     # opcionales porque no todo caller los conoce (un ítem agregado a mano
     # desde el comparador no tiene página ni lámina fuente), pero cuando
@@ -58,14 +65,25 @@ class AgregarItemRequest(BaseModel):
     texto_original: str | None = None
     confianza: str | None = None
     regla_generadora: str | None = None
+    # PRODUCTION_READINESS_REVIEW.md, hallazgo E1: la columna existía desde
+    # antes pero nunca se escribía -- sin ella, "4.4" en la lista del
+    # proyecto no dice si son 4.4 m², 4.4 sacos o 4.4 unidades.
+    unidad_medida: str | None = None
 
 
 class ActualizarItemRequest(BaseModel):
-    cantidad: float | None = Field(default=None, gt=0)
+    cantidad: float | None = Field(default=None, gt=0, le=1_000_000)
     estado: str | None = None
     prioridad: str | None = None
     comentario: str | None = None
     partida: str | None = None
+
+
+CAMPOS_INTERNOS_PROYECTO = {"propietario_id", "indirectos_porcentaje", "imprevistos_porcentaje", "margen_porcentaje"}
+CAMPOS_INTERNOS_ITEM = {
+    "comentario", "origen", "pagina_fuente", "lamina_fuente",
+    "texto_original", "confianza", "regla_generadora",
+}
 
 
 @router.get("/compartido/{token}")
@@ -75,9 +93,22 @@ def obtener_proyecto_compartido(token: str):
     if not proyecto:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
 
-    # propietario_id es la credencial que autoriza todas las demás operaciones
-    # (ver api/identidad.py) -- nunca debe salir por un endpoint público.
-    proyecto.pop("propietario_id", None)
+    # PRODUCTION_READINESS_REVIEW.md, hallazgo F2: este endpoint es público
+    # y sin autenticación (cualquiera con el link lo puede ver) -- antes
+    # solo se quitaba propietario_id (la credencial que autoriza todas las
+    # demás operaciones, ver api/identidad.py), pero se dejaba pasar el
+    # margen/indirectos/imprevistos internos del ingeniero y, por ítem, el
+    # comentario interno y la metadata de trazabilidad (de dónde salió
+    # cada ítem, con qué confianza) -- nada de eso es información para un
+    # cliente que solo debería ver la cotización final.
+    for campo in CAMPOS_INTERNOS_PROYECTO:
+        proyecto.pop(campo, None)
+    # cotizacion.partidas[].items reutiliza los MISMOS dicts de items (ver
+    # _agrupar_por_partida en repositorio_proyectos.py) -- filtrar acá
+    # también los filtra ahí, no hace falta recorrer ambos.
+    for item in proyecto.get("items", []):
+        for campo in CAMPOS_INTERNOS_ITEM:
+            item.pop(campo, None)
 
     return proyecto
 
@@ -162,6 +193,7 @@ def agregar_item(
             texto_original=body.texto_original,
             confianza=body.confianza,
             regla_generadora=body.regla_generadora,
+            unidad_medida=body.unidad_medida,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))

@@ -89,6 +89,12 @@ class PruebaAgregarComputoEstructural(unittest.TestCase):
         resultado = agregar_computo_estructural(proyecto)
         self.assertEqual(resultado["piezas"], [])
         self.assertEqual(resultado["cantidad_total_piezas"], 0)
+        # PRODUCTION_READINESS_REVIEW.md, hallazgo D1: 0 piezas nunca debe
+        # verse igual que "todo salió bien" -- siempre trae una advertencia
+        # explícita, para que no se confunda con un plano que genuinamente
+        # no tiene cómputo estructural.
+        self.assertEqual(len(resultado["advertencias"]), 1)
+        self.assertIn("no se encontraron piezas", resultado["advertencias"][0])
 
     def test_hojas_con_contenido_distinto_se_senalan_no_se_fusionan(self):
         lamina_1 = _lamina(4)
@@ -144,9 +150,12 @@ class PruebaIntegracionComputoEstructuralReal(unittest.TestCase):
 
     def test_plano_arquitectonico_no_tiene_este_cuadro(self):
         # Disciplina/firma distinta -- confirma que el extractor no
-        # inventa un cómputo donde no existe.
+        # inventa un cómputo donde no existe, y que lo dice explícitamente
+        # (ver PRODUCTION_READINESS_REVIEW.md, hallazgo D1).
         self.assertEqual(self.arquitectonico["piezas"], [])
         self.assertEqual(self.arquitectonico["cantidad_total_piezas"], 0)
+        self.assertEqual(len(self.arquitectonico["advertencias"]), 1)
+        self.assertIn("no se encontraron piezas", self.arquitectonico["advertencias"][0])
 
 
 if __name__ == "__main__":

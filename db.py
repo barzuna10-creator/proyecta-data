@@ -1,6 +1,12 @@
+import os
 import sqlite3
 
-BASE_DATOS = "database/proyecta.db"
+# PRODUCTION_READINESS_REVIEW.md, hallazgo A7/H1: antes hardcodeado sin
+# ninguna forma de apuntar un despliegue distinto (staging, un disco
+# persistente en otra ruta) a otra base de datos sin editar código. El
+# valor por defecto es el mismo de siempre -- esto no cambia ningún
+# comportamiento existente si DATABASE_PATH no está seteada.
+BASE_DATOS = os.environ.get("DATABASE_PATH", "database/proyecta.db")
 
 
 def conectar():

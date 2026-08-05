@@ -21,3 +21,9 @@ database/proyecta.db-wal
 # versionado en git (35 MB) y sacarlo del tracking podría romper un despliegue
 # que dependa de que el archivo exista al clonar. Ver AUDITORIA_TECNICA.md,
 # hallazgo #25, para la decisión pendiente antes de tocar esto.
+
+# Respaldos locales de la base de datos (ver database/respaldar_db.py y
+# PRODUCTION_READINESS_REVIEW.md, hallazgo B1) -- nunca versionados:
+# meterlos a git repetiría el mismo problema que tiene proyecta.db, solo
+# que multiplicado por cada respaldo.
+database/respaldos/

@@ -132,6 +132,23 @@ def agregar_computo_estructural(proyecto):
         )
 
     piezas = next(iter(grupos.values()), [])
+
+    # PRODUCTION_READINESS_REVIEW.md, hallazgo D1: "0 piezas" es
+    # indistinguible de "este plano no tiene detalle de vigas y columnas"
+    # a menos que se diga explícitamente. La técnica de este extractor
+    # está calibrada contra un solo plano de referencia (ver el docstring
+    # del módulo) -- un plano de otra firma/software con el título
+    # redactado distinto produce el mismo 0 silencioso que un plano que
+    # genuinamente no trae cómputo estructural. Nunca dejar que 0 piezas
+    # se vea igual que "todo salió bien".
+    if not piezas:
+        advertencias.append(
+            f"no se encontraron piezas de cómputo estructural -- puede ser que este plano "
+            f"no traiga una lámina de \"{TITULO_CUADRO}\", o que el título esté redactado "
+            "distinto al esperado. Verificar manualmente antes de asumir que la estructura "
+            "no requiere piezas."
+        )
+
     return {
         "piezas": piezas,
         "cantidad_total_piezas": sum(p.cantidad for p in piezas),
