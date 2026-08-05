@@ -105,3 +105,51 @@ class CuadroVentanas:
     pagina_fuente: int
     texto_original: str
     confianza: str
+
+
+# ---------------------------------------------------------------------------
+# LECTURA_DE_PLANOS_V3_MODELO_EDIFICIO -- ver
+# LECTURA_DE_PLANOS_V3_MODELO_EDIFICIO.md. Deliberadamente NO incluye
+# acabados-por-espacio ni puertas/ventanas-asociadas-a-espacio: la
+# auditoría de esa fase midió que esas relaciones no tienen evidencia
+# textual inequívoca en los planos reales (requerirían distancia
+# geométrica o contención de polígono para resolver la ambigüedad,
+# ambas explícitamente excluidas). Solo se modela lo que sí es una
+# relación explícita y sin ambigüedad: niveles, catálogo de espacios por
+# nivel, y referencias entre láminas (callouts de sección/detalle, que ya
+# traen su propio destino en el mismo bloque de texto).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Nivel:
+    nombre: str  # tal como aparece en los nombres de lámina, ej. "N 0.0 M"
+    elevacion: float | None  # valor numérico parseado, ej. 0.0, -3.5 -- None si el formato no fue el esperado
+    laminas: tuple  # códigos de lámina que declaran pertenecer a este nivel
+
+
+@dataclass(frozen=True)
+class Espacio:
+    nombre: str  # ej. "COCINA", tal como aparece en la lámina de distribución
+    nivel: str | None  # nombre del Nivel al que pertenece -- None si no se pudo determinar
+    pagina_fuente: int
+    texto_original: str
+
+
+@dataclass(frozen=True)
+class ReferenciaLamina:
+    tipo: str  # "seccion" | "detalle"
+    identificador: str  # letra de sección (ej. "A") o número de detalle (ej. "1")
+    lamina_origen: str | None  # código de la lámina donde aparece el callout
+    lamina_destino: str  # código de la lámina referenciada
+    pagina_fuente: int
+    destino_existe: bool  # True si lamina_destino aparece en el índice de este documento
+
+
+@dataclass
+class ModeloEdificio:
+    proyecto_nombre: str
+    niveles: list
+    espacios: list
+    referencias_laminas: list
+    advertencias: list = field(default_factory=list)

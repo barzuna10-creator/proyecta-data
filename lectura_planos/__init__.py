@@ -20,18 +20,25 @@ from .modelo import (
     CuadroPuertas,
     CuadroVentanas,
     EntradaIndice,
+    Espacio,
     Lamina,
+    ModeloEdificio,
+    Nivel,
     Proyecto,
+    ReferenciaLamina,
     TipoPdf,
 )
 from .nucleo import leer_proyecto
 
 # Import por efecto secundario: registra cuadro_puertas/cuadro_ventanas/
-# cuadro_acabados en el registro de extractores de lámina (ver
-# LECTURA_DE_PLANOS_V2_CUADROS.md). nucleo.leer_proyecto() los corre de
-# forma genérica sin conocer este módulo.
+# cuadro_acabados (LECTURA_DE_PLANOS_V2_CUADROS.md) y espacios/
+# referencias_laminas (LECTURA_DE_PLANOS_V3_MODELO_EDIFICIO.md) en el
+# registro de extractores de lámina. nucleo.leer_proyecto() los corre de
+# forma genérica sin conocer estos módulos.
 from . import cuadros  # noqa: F401,E402
+from . import modelo_edificio  # noqa: F401,E402
 from .cuadros import agregar_cuadros  # noqa: E402
+from .modelo_edificio import construir_modelo_edificio  # noqa: E402
 
 __all__ = [
     "TipoPdf",
@@ -41,8 +48,13 @@ __all__ = [
     "CuadroAcabados",
     "CuadroPuertas",
     "CuadroVentanas",
+    "Nivel",
+    "Espacio",
+    "ReferenciaLamina",
+    "ModeloEdificio",
     "leer_proyecto",
     "agregar_cuadros",
+    "construir_modelo_edificio",
     "buscar_lamina",
     "lamina_por_pagina",
     "laminas_por_disciplina",
