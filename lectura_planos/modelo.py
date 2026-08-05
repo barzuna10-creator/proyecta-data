@@ -153,3 +153,26 @@ class ModeloEdificio:
     espacios: list
     referencias_laminas: list
     advertencias: list = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# EXTRACTOR_COMPUTO_ESTRUCTURAL_V1 -- ver
+# EXTRACTOR_COMPUTO_ESTRUCTURAL_V1.md. Un solo cuadro real medido
+# ("Detalle de vigas y columnas", plano de Atelier Ingeniería) -- sin
+# código por línea (a diferencia de CuadroPuertas/CuadroVentanas, este
+# cuadro no numera sus filas, solo cantidad + dimensiones + descripción).
+# Calibrado contra UNA sola firma -- ver limitaciones en el .md, no
+# asumir que generaliza a otro plano estructural sin volver a medir.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PiezaEstructural:
+    cantidad: int
+    ancho_mm: float
+    alto_mm: float
+    largo_m: float
+    descripcion: str
+    pagina_fuente: int
+    texto_original: str
+    confianza: str
