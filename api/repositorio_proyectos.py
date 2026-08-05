@@ -490,10 +490,11 @@ def eliminar_item(proyecto_id, propietario_id, item_id):
 def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
     """Corre lectura_planos sobre un PDF ya guardado en disco (ver el
     router: el archivo subido se escribe a un temporal antes de llamar
-    acá) y guarda el resultado -- niveles, espacios y las láminas que
-    referencian -- como JSON en la fila del proyecto. El PDF en sí no se
-    guarda, solo el análisis ya estructurado (ver
-    INTEGRACION_LECTURA_PLANOS_PROYECTO.md)."""
+    acá) y guarda el resultado -- niveles, espacios, cuadros de
+    puertas/ventanas/acabados, cómputo estructural y las láminas que
+    todos ellos referencian -- como JSON en la fila del proyecto (ver
+    FLUJO_PRESUPUESTO_DESDE_PLANO_V1.md). El PDF en sí no se guarda, solo
+    el análisis ya estructurado."""
     conexion = conectar()
     fila = conexion.execute(
         "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
@@ -506,7 +507,9 @@ def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
 
     proyecto_leido = lp.leer_proyecto(ruta_pdf)
     modelo_edificio = lp.construir_modelo_edificio(proyecto_leido)
-    analisis = construir_analisis_plano(proyecto_leido, modelo_edificio)
+    cuadros = lp.agregar_cuadros(proyecto_leido)
+    computo_estructural = lp.agregar_computo_estructural(proyecto_leido)
+    analisis = construir_analisis_plano(proyecto_leido, modelo_edificio, cuadros, computo_estructural)
 
     ahora = _ahora()
     conexion.execute(
