@@ -60,6 +60,22 @@ completa. Eso sigue siendo trabajo manual/de infraestructura, no algo
 que el proceso de la API pueda hacer por sí mismo sin credenciales de
 almacenamiento externo.
 
+### Migraciones de base de datos
+
+**Ya corren solas.** Causa raíz de un incidente real: el código nuevo se
+desplegaba, pero ninguna migración de `database/agregar_*.py` se ejecutaba
+contra la base real -- siempre se corrieron a mano, en local. Un
+`registro` de usuario fallaba en producción con
+`sqlite3.OperationalError: no such table: usuarios` porque
+`agregar_autenticacion.py` nunca había corrido ahí.
+
+Ahora `api/main.py` agenda `database/migraciones.py` desde un hilo en
+segundo plano al arrancar (mismo patrón que el respaldo automático, arriba)
+-- cada migración se aplica una sola vez, con seguimiento en la tabla
+`migraciones_aplicadas`, sin importar cuántos `--workers` corran en
+paralelo. No hace falta correr nada a mano tras un deploy. Ver
+`database/migraciones.py` para el diseño completo y la causa raíz.
+
 ### Aplicar `render.yaml`
 
 El archivo ya existe, versionado, en la raíz del repo -- pero **tenerlo

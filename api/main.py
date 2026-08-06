@@ -19,6 +19,7 @@ from similares import obtener_similares as _obtener_similares_motor, LIMITE_DEFE
 from presupuestos import calcular_presupuesto as _calcular_presupuesto_motor
 from especificaciones import unidad_comercial as _unidad_comercial
 from database.respaldar_db import respaldar as _respaldar_db
+from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migraciones_pendientes
 
 app = FastAPI(
     title="Proyecta CR API",
@@ -68,6 +69,18 @@ def _cerrar_executor_planos():
     # el grupo de procesos entero), pero en desarrollo con --reload cada
     # recarga dejaría un proceso huérfano más.
     _EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
+
+
+# Investigación "no such table: usuarios" en producción: nada, en ningún
+# punto del despliegue, ejecutaba las migraciones de database/agregar_*.py
+# contra la base real (ver database/migraciones.py para el diseño
+# completo -- registro explícito, reclamo atómico entre los --workers 4,
+# libera el reclamo si una migración falla). Mismo patrón que el respaldo
+# automático de abajo: un hilo de fondo en el arranque, para no bloquear
+# que el proceso empiece a responder mientras corre.
+@app.on_event("startup")
+def _iniciar_migraciones_pendientes():
+    threading.Thread(target=_aplicar_migraciones_pendientes, daemon=True).start()
 
 
 # BETA_1.0_CHECKLIST.md, hallazgo 1.4/5.1: el script de respaldo
