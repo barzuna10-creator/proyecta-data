@@ -14,6 +14,7 @@ from seleccion_automatica import (
     seleccionar_para_pieza_estructural as _seleccionar_para_pieza_estructural,
     seleccionar_para_puerta_ventana as _seleccionar_para_puerta_ventana,
 )
+import eventos as _eventos
 
 # INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md: leer un plano real (fitz +
 # pdfplumber) es 100% CPU-bound en un solo núcleo durante ~10s para un PDF
@@ -550,6 +551,26 @@ def agregar_item(
         (ahora, proyecto_id),
     )
 
+    # Un evento por cada llamada real a agregar_item(), sin importar el
+    # origen -- si origen='plano' y confianza_match no es None, ESTE
+    # evento ES la "sugerencia automática" que seleccion_automatica.py
+    # acaba de generar (ver eventos.py, no hay un tipo de evento aparte
+    # para eso). item_id se busca aparte porque el INSERT de arriba usa
+    # ON CONFLICT DO UPDATE -- (proyecto_id, proveedor, id_proveedor) es
+    # UNIQUE, así que esta lectura siempre identifica la fila correcta,
+    # haya sido inserción o actualización.
+    item_id = conexion.execute(
+        "SELECT id FROM items_proyecto WHERE proyecto_id = ? AND proveedor = ? AND id_proveedor = ?",
+        (proyecto_id, proveedor, id_proveedor),
+    ).fetchone()["id"]
+    _eventos.registrar_evento(
+        conexion, _eventos.TIPO_ITEM_AGREGADO,
+        usuario_id=propietario_id, proyecto_id=proyecto_id, item_id=item_id,
+        proveedor=proveedor, id_proveedor=id_proveedor,
+        categoria=producto["categoria"], origen=origen,
+        confianza_match=confianza_match, texto_material=texto_original,
+    )
+
     conexion.commit()
     conexion.close()
 
@@ -574,6 +595,22 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
         conexion.close()
         return None
 
+    # Leído ANTES del UPDATE, y solo cuando de verdad podría ser una
+    # aceptación (revisado pasando a True) -- es la única forma de saber
+    # si esto es una transición real de 0 a 1 (una "aceptación" de
+    # verdad) o un PATCH redundante sobre un ítem que ya estaba
+    # revisado=1 (nunca debe registrar un segundo evento por lo mismo).
+    item_previo = None
+    if cambios.get("revisado"):
+        item_previo = conexion.execute(
+            """
+            SELECT revisado, origen, confianza_match, proveedor, id_proveedor,
+                   categoria_al_agregar, texto_original, fecha_agregado
+            FROM items_proyecto WHERE id = ? AND proyecto_id = ?
+            """,
+            (item_id, proyecto_id),
+        ).fetchone()
+
     if cambios:
         asignaciones = ", ".join(f"{campo} = ?" for campo in cambios)
         cursor = conexion.execute(
@@ -588,6 +625,22 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
         if cursor.rowcount == 0:
             conexion.close()
             return None
+
+        if (
+            item_previo is not None
+            and not item_previo["revisado"]
+            and item_previo["origen"] == "plano"
+            and item_previo["confianza_match"]
+        ):
+            _eventos.registrar_evento(
+                conexion, _eventos.TIPO_SELECCION_ACEPTADA,
+                usuario_id=propietario_id, proyecto_id=proyecto_id, item_id=item_id,
+                proveedor=item_previo["proveedor"], id_proveedor=item_previo["id_proveedor"],
+                categoria=item_previo["categoria_al_agregar"], origen=item_previo["origen"],
+                confianza_match=item_previo["confianza_match"], texto_material=item_previo["texto_original"],
+                tiempo_hasta_decision_segundos=_eventos.segundos_desde(item_previo["fecha_agregado"]),
+            )
+
         conexion.execute(
             "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?",
             (_ahora(), proyecto_id),
@@ -611,6 +664,19 @@ def eliminar_item(proyecto_id, propietario_id, item_id):
         conexion.close()
         return None
 
+    # Leído ANTES del DELETE -- después de borrar la fila ya no hay de
+    # dónde sacar esta información (ver database/agregar_eventos.py:
+    # eventos.py guarda todo lo necesario denormalizado justamente para
+    # no depender de que items_proyecto siga existiendo).
+    item_previo = conexion.execute(
+        """
+        SELECT revisado, origen, confianza_match, proveedor, id_proveedor,
+               categoria_al_agregar, texto_original, fecha_agregado
+        FROM items_proyecto WHERE id = ? AND proyecto_id = ?
+        """,
+        (item_id, proyecto_id),
+    ).fetchone()
+
     cursor = conexion.execute(
         "DELETE FROM items_proyecto WHERE id = ? AND proyecto_id = ?",
         (item_id, proyecto_id),
@@ -621,6 +687,31 @@ def eliminar_item(proyecto_id, propietario_id, item_id):
     if cursor.rowcount == 0:
         conexion.close()
         return None
+
+    if item_previo is not None:
+        # Un ítem sugerido por el motor que todavía estaba pendiente de
+        # revisión y se descarta SIN reemplazo es una señal real de
+        # "el motor se equivocó" (seleccion_eliminada) -- cualquier otro
+        # borrado (ya revisado, o de origen manual) es solo un borrado
+        # común (item_eliminado), no dice nada sobre la calidad de una
+        # sugerencia automática.
+        es_rechazo_de_sugerencia = (
+            not item_previo["revisado"]
+            and item_previo["origen"] == "plano"
+            and bool(item_previo["confianza_match"])
+        )
+        _eventos.registrar_evento(
+            conexion,
+            _eventos.TIPO_SELECCION_ELIMINADA if es_rechazo_de_sugerencia else _eventos.TIPO_ITEM_ELIMINADO,
+            usuario_id=propietario_id, proyecto_id=proyecto_id, item_id=item_id,
+            proveedor=item_previo["proveedor"], id_proveedor=item_previo["id_proveedor"],
+            categoria=item_previo["categoria_al_agregar"], origen=item_previo["origen"],
+            confianza_match=item_previo["confianza_match"], texto_material=item_previo["texto_original"],
+            tiempo_hasta_decision_segundos=(
+                _eventos.segundos_desde(item_previo["fecha_agregado"]) if es_rechazo_de_sugerencia else None
+            ),
+        )
+
     conexion.execute(
         "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?",
         (_ahora(), proyecto_id),
@@ -629,6 +720,92 @@ def eliminar_item(proyecto_id, propietario_id, item_id):
     conexion.close()
 
     return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+
+
+def reemplazar_item(proyecto_id, propietario_id, item_id, proveedor_nuevo, id_proveedor_nuevo, cantidad=None):
+    """Reemplaza un ítem por otro elegido a mano -- combina eliminar +
+    agregar_item(origen='manual') en una sola operación, para poder
+    registrar UN evento 'seleccion_reemplazada' con el producto ANTERIOR
+    (lo que sugirió el motor) y el NUEVO (lo que eligió el usuario) en la
+    misma fila. Dos llamadas separadas (eliminar_item + agregar_item, que
+    es como funcionaba el frontend antes de esto) no permiten reconstruir
+    esa relación de forma confiable si hay varias decisiones pendientes
+    al mismo tiempo -- no hay ninguna clave que diga "este alta reemplaza
+    a esa baja en particular".
+
+    `cantidad`, si no se da, conserva la cantidad del ítem reemplazado."""
+
+    conexion = conectar()
+
+    proyecto = conexion.execute(
+        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+        (proyecto_id, propietario_id),
+    ).fetchone()
+    if not proyecto:
+        conexion.close()
+        return None
+
+    item_previo = conexion.execute(
+        """
+        SELECT cantidad, revisado, origen, confianza_match, proveedor, id_proveedor,
+               categoria_al_agregar, texto_original, fecha_agregado
+        FROM items_proyecto WHERE id = ? AND proyecto_id = ?
+        """,
+        (item_id, proyecto_id),
+    ).fetchone()
+    if item_previo is None:
+        conexion.close()
+        return None
+
+    cantidad_final = cantidad if cantidad is not None else item_previo["cantidad"]
+
+    cursor = conexion.execute(
+        "DELETE FROM items_proyecto WHERE id = ? AND proyecto_id = ?", (item_id, proyecto_id)
+    )
+    if cursor.rowcount == 0:
+        conexion.close()
+        return None
+
+    conexion.execute(
+        "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?", (_ahora(), proyecto_id)
+    )
+    conexion.commit()
+    conexion.close()
+
+    # Reutiliza agregar_item() en vez de duplicar su lógica de guardado
+    # (mismo criterio que ya usa generar_cotizacion_automatica) -- esto
+    # también registra su propio evento item_agregado (origen='manual'),
+    # que es correcto y esperado: es un alta real, independiente del
+    # evento de reemplazo que se registra abajo.
+    proyecto_actualizado = agregar_item(
+        proyecto_id, propietario_id, proveedor_nuevo, id_proveedor_nuevo,
+        cantidad=cantidad_final, origen="manual",
+    )
+    if proyecto_actualizado is None:
+        return None
+
+    es_reemplazo_de_sugerencia = (
+        not item_previo["revisado"]
+        and item_previo["origen"] == "plano"
+        and bool(item_previo["confianza_match"])
+    )
+
+    conexion = conectar()
+    _eventos.registrar_evento(
+        conexion, _eventos.TIPO_SELECCION_REEMPLAZADA,
+        usuario_id=propietario_id, proyecto_id=proyecto_id, item_id=item_id,
+        proveedor=proveedor_nuevo, id_proveedor=id_proveedor_nuevo,
+        proveedor_anterior=item_previo["proveedor"], id_proveedor_anterior=item_previo["id_proveedor"],
+        categoria=item_previo["categoria_al_agregar"], origen=item_previo["origen"],
+        confianza_match=item_previo["confianza_match"], texto_material=item_previo["texto_original"],
+        tiempo_hasta_decision_segundos=(
+            _eventos.segundos_desde(item_previo["fecha_agregado"]) if es_reemplazo_de_sugerencia else None
+        ),
+    )
+    conexion.commit()
+    conexion.close()
+
+    return proyecto_actualizado
 
 
 def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):

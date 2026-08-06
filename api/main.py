@@ -7,7 +7,7 @@ import time
 
 from db import conectar
 from api.repositorio_proyectos import _EXECUTOR_PLANOS
-from api.routers import auth as auth_router, feedback as feedback_router, proyectos, sistemas_constructivos
+from api.routers import auth as auth_router, feedback as feedback_router, metricas as metricas_router, proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
 from api.observabilidad import logger as _logger, middleware_logging as _middleware_logging
 from busqueda import buscar_fts as _buscar_fts_motor
@@ -58,6 +58,7 @@ app.include_router(auth_router.router)
 app.include_router(feedback_router.router)
 app.include_router(proyectos.router)
 app.include_router(sistemas_constructivos.router)
+app.include_router(metricas_router.router)
 
 
 @app.on_event("shutdown")

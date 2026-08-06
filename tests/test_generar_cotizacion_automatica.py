@@ -102,6 +102,28 @@ def _crear_db_temporal():
         )
         """
     )
+    conexion.execute(
+        """
+        CREATE TABLE eventos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo TEXT NOT NULL,
+            usuario_id TEXT,
+            proyecto_id INTEGER,
+            item_id INTEGER,
+            proveedor TEXT,
+            id_proveedor TEXT,
+            proveedor_anterior TEXT,
+            id_proveedor_anterior TEXT,
+            categoria TEXT,
+            origen TEXT,
+            confianza_match TEXT,
+            texto_material TEXT,
+            tiempo_hasta_decision_segundos REAL,
+            datos_extra TEXT,
+            fecha_creacion TEXT NOT NULL
+        )
+        """
+    )
     conexion.commit()
     conexion.close()
     return archivo.name
@@ -235,6 +257,49 @@ class PruebaGenerarCotizacionAutomatica(unittest.TestCase):
         generar_cotizacion_automatica(self.proyecto["id"], self.PROPIETARIO)
         resultado = generar_cotizacion_automatica(self.proyecto["id"], self.PROPIETARIO)
         self.assertEqual(len(resultado["items"]), 1)
+
+    def _eventos(self):
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.row_factory = sqlite3.Row
+        filas = conexion.execute("SELECT * FROM eventos ORDER BY id").fetchall()
+        conexion.close()
+        return [dict(fila) for fila in filas]
+
+    def test_generar_la_cotizacion_registra_un_evento_de_sugerencia_automatica(self):
+        generar_cotizacion_automatica(self.proyecto["id"], self.PROPIETARIO)
+        eventos = self._eventos()
+        sugerencias = [e for e in eventos if e["tipo"] == "item_agregado" and e["origen"] == "plano"]
+        self.assertEqual(len(sugerencias), 1)
+        evento = sugerencias[0]
+        self.assertEqual(evento["proyecto_id"], self.proyecto["id"])
+        self.assertEqual(evento["usuario_id"], self.PROPIETARIO)
+        self.assertEqual(evento["categoria"], "Maderas y puertas")
+        self.assertIn(evento["confianza_match"], ("alta", "media", "baja"))
+        self.assertEqual(evento["texto_material"], "puerta corrediza madera laurel")
+
+    def test_aceptar_un_item_sugerido_registra_seleccion_aceptada_con_tiempo(self):
+        resultado = generar_cotizacion_automatica(self.proyecto["id"], self.PROPIETARIO)
+        item_id = resultado["items"][0]["id"]
+
+        actualizar_item(self.proyecto["id"], self.PROPIETARIO, item_id, {"revisado": True})
+
+        aceptadas = [e for e in self._eventos() if e["tipo"] == "seleccion_aceptada"]
+        self.assertEqual(len(aceptadas), 1)
+        self.assertEqual(aceptadas[0]["item_id"], item_id)
+        self.assertIsNotNone(aceptadas[0]["tiempo_hasta_decision_segundos"])
+        self.assertGreaterEqual(aceptadas[0]["tiempo_hasta_decision_segundos"], 0)
+
+    def test_aceptar_dos_veces_el_mismo_item_no_duplica_el_evento(self):
+        resultado = generar_cotizacion_automatica(self.proyecto["id"], self.PROPIETARIO)
+        item_id = resultado["items"][0]["id"]
+
+        actualizar_item(self.proyecto["id"], self.PROPIETARIO, item_id, {"revisado": True})
+        # Segundo PATCH redundante (el usuario recarga la página, por
+        # ejemplo) -- no debe generar un segundo evento de "aceptación".
+        actualizar_item(self.proyecto["id"], self.PROPIETARIO, item_id, {"revisado": True})
+
+        aceptadas = [e for e in self._eventos() if e["tipo"] == "seleccion_aceptada"]
+        self.assertEqual(len(aceptadas), 1)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,14 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from api.repositorio_proyectos import actualizar_item, agregar_item, crear_proyecto, eliminar_item
-from api.routers.proyectos import AgregarItemRequest, ActualizarItemRequest, ActualizarProyectoRequest, obtener_proyecto_compartido
+from api.routers.proyectos import (
+    AgregarItemRequest,
+    ActualizarItemRequest,
+    ActualizarProyectoRequest,
+    ReemplazarItemRequest,
+    obtener_proyecto_compartido,
+    reemplazar_item as reemplazar_item_router,
+)
 from tests.test_repositorio_proyectos import BasePruebaIntegracion
 
 
@@ -164,6 +171,44 @@ class PruebaUnidadMedidaSePersiste(BasePruebaIntegracion):
         proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto sin unidad")
         proyecto = agregar_item(proyecto["id"], self.PROPIETARIO, "EPA", "1", 1)
         self.assertIsNone(proyecto["items"][0]["unidad_medida"])
+
+
+class PruebaEndpointReemplazarItem(BasePruebaIntegracion):
+    """Endpoint nuevo (ver eventos.py, ARQUITECTURA_RECOMENDACION_V2.md
+    Fase 0): POST /proyectos/{id}/items/{item_id}/reemplazar."""
+
+    def test_reemplazar_devuelve_404_si_el_item_no_existe(self):
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto reemplazo fantasma")
+        with self.assertRaises(HTTPException) as contexto:
+            reemplazar_item_router(
+                proyecto["id"], 999999,
+                ReemplazarItemRequest(proveedor="EPA", id_proveedor="1"),
+                propietario_id=self.PROPIETARIO,
+            )
+        self.assertEqual(contexto.exception.status_code, 404)
+
+    def test_reemplazar_un_item_real_devuelve_el_proyecto_actualizado(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Puerta laurel",
+             "categoria": "Maderas y puertas", "precio": 20000},
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Puerta pino",
+             "categoria": "Maderas y puertas", "precio": 18000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto reemplazo real")
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "1", 1,
+            origen="plano", confianza_match="media",
+        )
+        item_id = proyecto["items"][0]["id"]
+
+        resultado = reemplazar_item_router(
+            proyecto["id"], item_id,
+            ReemplazarItemRequest(proveedor="EPA", id_proveedor="2"),
+            propietario_id=self.PROPIETARIO,
+        )
+
+        self.assertEqual(len(resultado["items"]), 1)
+        self.assertEqual(resultado["items"][0]["id_proveedor"], "2")
 
 
 if __name__ == "__main__":

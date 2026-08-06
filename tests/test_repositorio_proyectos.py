@@ -26,9 +26,11 @@ from api.repositorio_proyectos import (
     actualizar_proyecto,
     agregar_item,
     crear_proyecto,
+    eliminar_item,
     eliminar_proyecto,
     listar_proyectos,
     obtener_proyecto,
+    reemplazar_item,
 )
 
 
@@ -331,6 +333,28 @@ def _crear_db_temporal():
             confianza_match TEXT,
             revisado INTEGER NOT NULL DEFAULT 1,
             UNIQUE(proyecto_id, proveedor, id_proveedor)
+        )
+        """
+    )
+    conexion.execute(
+        """
+        CREATE TABLE eventos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo TEXT NOT NULL,
+            usuario_id TEXT,
+            proyecto_id INTEGER,
+            item_id INTEGER,
+            proveedor TEXT,
+            id_proveedor TEXT,
+            proveedor_anterior TEXT,
+            id_proveedor_anterior TEXT,
+            categoria TEXT,
+            origen TEXT,
+            confianza_match TEXT,
+            texto_material TEXT,
+            tiempo_hasta_decision_segundos REAL,
+            datos_extra TEXT,
+            fecha_creacion TEXT NOT NULL
         )
         """
     )
@@ -658,6 +682,170 @@ class PruebaTrazabilidadAlAgregarItem(BasePruebaIntegracion):
         self.assertEqual(item["cantidad"], 3)
 
         eliminar_proyecto(pid, self.PROPIETARIO)
+
+
+class PruebaInstrumentacionDeEventos(BasePruebaIntegracion):
+    """eventos.py -- el ciclo de vida completo de una selección
+    (sugerida -> aceptada / reemplazada / eliminada) tiene que quedar
+    registrado, con confianza, categoría, proyecto, usuario y tiempo
+    hasta la decisión (ver ARQUITECTURA_RECOMENDACION_V2.md, Fase 0)."""
+
+    def _eventos(self):
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.row_factory = sqlite3.Row
+        filas = conexion.execute("SELECT * FROM eventos ORDER BY id").fetchall()
+        conexion.close()
+        return [dict(fila) for fila in filas]
+
+    def test_agregar_item_manual_registra_item_agregado_sin_confianza(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Martillo",
+             "categoria": "Herramientas", "precio": 3000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        agregar_item(proyecto["id"], self.PROPIETARIO, "EPA", "1", 2, origen="manual")
+
+        eventos = self._eventos()
+        self.assertEqual(len(eventos), 1)
+        evento = eventos[0]
+        self.assertEqual(evento["tipo"], "item_agregado")
+        self.assertEqual(evento["origen"], "manual")
+        self.assertIsNone(evento["confianza_match"])
+        self.assertEqual(evento["proveedor"], "EPA")
+        self.assertEqual(evento["id_proveedor"], "1")
+        self.assertEqual(evento["categoria"], "Herramientas")
+        self.assertEqual(evento["usuario_id"], self.PROPIETARIO)
+        self.assertEqual(evento["proyecto_id"], proyecto["id"])
+
+    def test_agregar_item_de_plano_con_confianza_es_la_sugerencia_automatica(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Puerta laurel",
+             "categoria": "Maderas y puertas", "precio": 20000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "1", 1,
+            origen="plano", confianza_match="alta", texto_original="PUERTA LAUREL 90X210",
+            revisado=0,
+        )
+
+        evento = self._eventos()[0]
+        self.assertEqual(evento["origen"], "plano")
+        self.assertEqual(evento["confianza_match"], "alta")
+        self.assertEqual(evento["texto_material"], "PUERTA LAUREL 90X210")
+
+    def test_eliminar_un_item_ya_revisado_registra_item_eliminado_no_seleccion_eliminada(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Martillo",
+             "categoria": "Herramientas", "precio": 3000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        proyecto = agregar_item(proyecto["id"], self.PROPIETARIO, "EPA", "1", 1, origen="manual")
+        item_id = proyecto["items"][0]["id"]
+
+        eliminar_item(proyecto["id"], self.PROPIETARIO, item_id)
+
+        tipos = [e["tipo"] for e in self._eventos()]
+        self.assertEqual(tipos, ["item_agregado", "item_eliminado"])
+
+    def test_eliminar_una_sugerencia_pendiente_registra_seleccion_eliminada_con_tiempo(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Puerta laurel",
+             "categoria": "Maderas y puertas", "precio": 20000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "1", 1,
+            origen="plano", confianza_match="baja", revisado=0,
+        )
+        item_id = proyecto["items"][0]["id"]
+
+        eliminar_item(proyecto["id"], self.PROPIETARIO, item_id)
+
+        eventos = self._eventos()
+        eliminados = [e for e in eventos if e["tipo"] == "seleccion_eliminada"]
+        self.assertEqual(len(eliminados), 1)
+        self.assertEqual(eliminados[0]["confianza_match"], "baja")
+        self.assertIsNotNone(eliminados[0]["tiempo_hasta_decision_segundos"])
+        # item_eliminado NO debe aparecer también -- es uno u otro, nunca los dos.
+        self.assertNotIn("item_eliminado", [e["tipo"] for e in eventos])
+
+    def test_reemplazar_una_sugerencia_registra_producto_anterior_y_nuevo(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Puerta laurel",
+             "categoria": "Maderas y puertas", "precio": 20000},
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Puerta pino",
+             "categoria": "Maderas y puertas", "precio": 18000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "1", 1,
+            origen="plano", confianza_match="media", revisado=0,
+        )
+        item_id = proyecto["items"][0]["id"]
+
+        proyecto = reemplazar_item(proyecto["id"], self.PROPIETARIO, item_id, "EPA", "2")
+
+        # El ítem final es el nuevo, no el sugerido.
+        self.assertEqual(len(proyecto["items"]), 1)
+        self.assertEqual(proyecto["items"][0]["id_proveedor"], "2")
+        self.assertEqual(proyecto["items"][0]["origen"], "manual")
+
+        eventos = self._eventos()
+        reemplazos = [e for e in eventos if e["tipo"] == "seleccion_reemplazada"]
+        self.assertEqual(len(reemplazos), 1)
+        evento = reemplazos[0]
+        self.assertEqual(evento["proveedor_anterior"], "EPA")
+        self.assertEqual(evento["id_proveedor_anterior"], "1")
+        self.assertEqual(evento["proveedor"], "EPA")
+        self.assertEqual(evento["id_proveedor"], "2")
+        self.assertEqual(evento["confianza_match"], "media")
+        self.assertIsNotNone(evento["tiempo_hasta_decision_segundos"])
+        # También debe existir el alta del producto nuevo (agregar_item
+        # normal, origen='manual') -- el reemplazo no lo reemplaza a él.
+        self.assertIn("item_agregado", [e["tipo"] for e in eventos])
+
+    def test_reemplazar_conserva_la_cantidad_original_si_no_se_da_una_nueva(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Puerta laurel",
+             "categoria": "Maderas y puertas", "precio": 20000},
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Puerta pino",
+             "categoria": "Maderas y puertas", "precio": 18000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "1", 4,
+            origen="plano", confianza_match="media", revisado=0,
+        )
+        item_id = proyecto["items"][0]["id"]
+
+        proyecto = reemplazar_item(proyecto["id"], self.PROPIETARIO, item_id, "EPA", "2")
+
+        self.assertEqual(proyecto["items"][0]["cantidad"], 4)
+
+    def test_reemplazar_item_inexistente_devuelve_none(self):
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        self.assertIsNone(
+            reemplazar_item(proyecto["id"], self.PROPIETARIO, 999999, "EPA", "1")
+        )
+
+    def test_reemplazar_de_otro_propietario_devuelve_none(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Puerta laurel",
+             "categoria": "Maderas y puertas", "precio": 20000},
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Puerta pino",
+             "categoria": "Maderas y puertas", "precio": 18000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto eventos")
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "1", 1,
+            origen="plano", confianza_match="media", revisado=0,
+        )
+        item_id = proyecto["items"][0]["id"]
+
+        self.assertIsNone(
+            reemplazar_item(proyecto["id"], "otro-propietario", item_id, "EPA", "2")
+        )
 
 
 if __name__ == "__main__":

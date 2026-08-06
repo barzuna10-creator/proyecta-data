@@ -78,6 +78,7 @@ import database.agregar_plano_proyecto as _m_plano_proyecto
 import database.agregar_trazabilidad_items as _m_trazabilidad_items
 import database.agregar_autenticacion as _m_autenticacion
 import database.agregar_seleccion_automatica as _m_seleccion_automatica
+import database.agregar_eventos as _m_eventos
 
 # agregar_autenticacion primero, a propósito, fuera del orden histórico
 # real de introducción: no depende de proyectos/productos/nada de las
@@ -104,6 +105,10 @@ MIGRACIONES = [
     # Depende de items_proyecto (agregar_proyectos) -- va al final, mismo
     # criterio que el resto de las ALTER TABLE sin urgencia de arranque.
     ("agregar_seleccion_automatica", _m_seleccion_automatica.main),
+    # Tabla nueva, sin llaves foráneas (ver database/agregar_eventos.py) --
+    # no depende de ninguna de las anteriores, va al final solo por orden
+    # histórico de introducción, igual que el resto.
+    ("agregar_eventos", _m_eventos.main),
 ]
 
 

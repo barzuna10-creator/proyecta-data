@@ -71,6 +71,12 @@ class AgregarItemRequest(BaseModel):
     unidad_medida: str | None = None
 
 
+class ReemplazarItemRequest(BaseModel):
+    proveedor: str
+    id_proveedor: str
+    cantidad: float | None = Field(default=None, gt=0, le=1_000_000)
+
+
 class ActualizarItemRequest(BaseModel):
     cantidad: float | None = Field(default=None, gt=0, le=1_000_000)
     estado: str | None = None
@@ -240,6 +246,34 @@ def eliminar_item(
 
     if not proyecto:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return proyecto
+
+
+@router.post("/{proyecto_id}/items/{item_id}/reemplazar")
+def reemplazar_item(
+    proyecto_id: int,
+    item_id: int,
+    body: ReemplazarItemRequest,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    """Endpoint nuevo -- reemplaza equivale a DELETE + POST /items, pero
+    en una sola llamada (ver repo.reemplazar_item) para poder registrar
+    el evento 'seleccion_reemplazada' con el producto anterior y el
+    nuevo juntos. No reemplaza los endpoints existentes de eliminar/
+    agregar (siguen funcionando igual, cualquier otro caller no se ve
+    afectado) -- el frontend de revisión de cotización automática es el
+    único que se movió a usar este."""
+
+    try:
+        proyecto = repo.reemplazar_item(
+            proyecto_id, propietario_id, item_id, body.proveedor, body.id_proveedor, body.cantidad
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+
+    if not proyecto:
+        raise HTTPException(status_code=404, detail="Proyecto o ítem no encontrado")
 
     return proyecto
 
