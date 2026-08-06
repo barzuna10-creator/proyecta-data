@@ -8,7 +8,6 @@ from datetime import datetime
 from db import conectar
 from busqueda import normalizar_texto
 from especificaciones import unidad_comercial as _unidad_comercial
-import lectura_planos as lp
 from api.adaptador_planos import construir_analisis_plano
 
 # INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md: leer un plano real (fitz +
@@ -52,7 +51,16 @@ def _procesar_plano_pdf(ruta_pdf):
     Devuelve únicamente el dict plano de construir_analisis_plano() --
     nunca un objeto de lectura_planos (Proyecto, Lamina, etc.) cruza la
     frontera entre procesos, evita cualquier duda sobre si algo ahí es
-    picklable."""
+    picklable.
+
+    Import diferido a propósito (investigación de memoria en el arranque
+    en producción): lectura_planos carga fitz/pdfplumber/pdfminer, ~76MB
+    -- si estuviera a nivel de módulo, se pagaría en CADA worker de
+    uvicorn al arrancar, aunque nunca procese un plano. Acá solo se paga
+    en el proceso hijo de ProcessPoolExecutor, y solo cuando de verdad
+    hay un plano que leer -- nunca en el proceso principal de la API."""
+    import lectura_planos as lp
+
     proyecto_leido = lp.leer_proyecto(ruta_pdf)
     modelo_edificio = lp.construir_modelo_edificio(proyecto_leido)
     cuadros = lp.agregar_cuadros(proyecto_leido)

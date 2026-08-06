@@ -5,12 +5,23 @@
 # ciegas").
 #
 # Esto declara, en código versionado, exactamente el comando y las
-# variables que DEPLOYMENT.md ya recomendaba a mano: nunca --reload,
-# varios workers, y -- lo más importante para BETA_1.0_CHECKLIST.md,
-# hallazgo 5.2 -- un disco persistente real montado en /data, con
-# DATABASE_PATH apuntando ahí. Sin esto, database/proyecta.db vive en el
-# filesystem efímero del contenedor y CUALQUIER redeploy borra los datos
-# de los usuarios de la beta sin ningún aviso.
+# variables que DEPLOYMENT.md ya recomendaba a mano: nunca --reload, y --
+# lo más importante para BETA_1.0_CHECKLIST.md, hallazgo 5.2 -- un disco
+# persistente real montado en /data, con DATABASE_PATH apuntando ahí. Sin
+# esto, database/proyecta.db vive en el filesystem efímero del contenedor
+# y CUALQUIER redeploy borra los datos de los usuarios de la beta sin
+# ningún aviso.
+#
+# --workers 1 (no varios): medido en vivo, el primer arranque en un disco
+# nuevo hace correr database/migraciones.py, y agregar_equivalencias.py
+# por sí solo deja el proceso en ~390MB de RSS pico (import de la app +
+# cargar el catálogo completo + calcular equivalencias -- ya con el
+# import diferido de lectura_planos, ver api/repositorio_proyectos.py).
+# Con --workers 4, hasta 4 procesos de ese tamaño (o combinaciones de
+# varias migraciones pesadas corriendo en paralelo en distintos workers)
+# pueden coexistir en el mismo contenedor al mismo tiempo, muy por encima
+# de los 512MB de Render Free. Con 1 solo worker, ese pico medido queda
+# debajo del límite con margen (~120MB).
 #
 # Importante, con la misma honestidad que el resto de esta sesión: tener
 # este archivo en el repo no significa por sí solo que el servicio real
@@ -25,7 +36,7 @@ services:
     runtime: python
     plan: starter
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn api.main:app --host 0.0.0.0 --port $PORT --workers 4"
+    startCommand: "uvicorn api.main:app --host 0.0.0.0 --port $PORT --workers 1"
     envVars:
       - key: PYTHONPATH
         value: .
