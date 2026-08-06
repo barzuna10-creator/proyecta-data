@@ -1,0 +1,39 @@
+# Configuración de despliegue versionada (ver BETA_1.0_CHECKLIST.md,
+# hallazgo 6.1: "la configuración real de producción nunca se confirmó
+# contra las recomendaciones de DEPLOYMENT.md -- no existe render.yaml ni
+# Procfile en ningún repo, así que lanzar sin saberlo es lanzar a
+# ciegas").
+#
+# Esto declara, en código versionado, exactamente el comando y las
+# variables que DEPLOYMENT.md ya recomendaba a mano: nunca --reload,
+# varios workers, y -- lo más importante para BETA_1.0_CHECKLIST.md,
+# hallazgo 5.2 -- un disco persistente real montado en /data, con
+# DATABASE_PATH apuntando ahí. Sin esto, database/proyecta.db vive en el
+# filesystem efímero del contenedor y CUALQUIER redeploy borra los datos
+# de los usuarios de la beta sin ningún aviso.
+#
+# Importante, con la misma honestidad que el resto de esta sesión: tener
+# este archivo en el repo no significa por sí solo que el servicio real
+# de Render ya lo esté usando -- alguien con acceso al dashboard de
+# Render tiene que aplicarlo (Render → New → Blueprint, apuntando a este
+# repo) o migrar el servicio existente para que lo use. Ver DEPLOYMENT.md
+# para el paso a paso.
+
+services:
+  - type: web
+    name: proyecta-api
+    runtime: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn api.main:app --host 0.0.0.0 --port $PORT --workers 4"
+    envVars:
+      - key: PYTHONPATH
+        value: .
+      - key: DATABASE_PATH
+        value: /data/proyecta.db
+      - key: CORS_ORIGINS
+        value: https://proyecta-beta.vercel.app
+    disk:
+      name: proyecta-datos
+      mountPath: /data
+      sizeGB: 1

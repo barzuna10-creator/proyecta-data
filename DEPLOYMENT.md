@@ -8,6 +8,12 @@ No agrega contenedores ni infraestructura nueva -- solo el comando real y
 las variables de entorno que ya existen en el código pero antes solo
 tenían un valor hardcodeado.
 
+**Actualizado en RELEASE_CANDIDATE_1.md** (ver BETA_1.0_CHECKLIST.md,
+hallazgo 6.1): ahora existe `render.yaml` en la raíz del repo con esta
+misma configuración, versionada -- ver la sección "Aplicar render.yaml"
+más abajo para el paso que todavía requiere acción humana (aplicarlo en
+el dashboard real de Render).
+
 ## Backend (`proyecta-data`)
 
 **Nunca usar `--reload` en producción** -- recarga el proceso ante
@@ -44,20 +50,30 @@ PYTHONPATH=. .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers
 
 ### Respaldo de la base de datos
 
-No hay ningún respaldo automático corriendo hoy (`PRODUCTION_READINESS_REVIEW.md`,
-hallazgo B1). `database/respaldar_db.py` existe y funciona (`sqlite3
-.backup`, seguro para copiar la base mientras la API sigue corriendo), pero
-**alguien tiene que programarlo** -- este repo no configura ningún cron por
-sí mismo. En la plataforma de despliegue real, agregar un job periódico
-(diario como mínimo) que corra:
+**Ya corre solo.** `api/main.py` agenda `database/respaldar_db.py` desde
+un hilo en segundo plano al arrancar el proceso (cada 6 horas, y una vez
+al iniciar) -- no depende de que alguien configure un cron aparte en la
+plataforma. Sigue siendo crítico **sacar esos respaldos del propio
+servidor** (a un bucket, a otro disco) -- un respaldo que vive en el
+mismo disco que la base original no protege contra una falla de disco
+completa. Eso sigue siendo trabajo manual/de infraestructura, no algo
+que el proceso de la API pueda hacer por sí mismo sin credenciales de
+almacenamiento externo.
 
-```bash
-PYTHONPATH=. .venv/bin/python3 database/respaldar_db.py
-```
+### Aplicar `render.yaml`
 
-Y, crítico, **sacar esos respaldos del propio servidor** (a un bucket, a
-otro disco) -- un respaldo que vive en el mismo disco que la base original
-no protege contra una falla de disco.
+El archivo ya existe, versionado, en la raíz del repo -- pero **tenerlo
+en git no alcanza por sí solo**: alguien con acceso al dashboard de
+Render tiene que aplicarlo (Render → New → Blueprint, apuntando a este
+repo) o migrar el servicio ya existente para que use el disco persistente
+declarado ahí (`/data`, con `DATABASE_PATH=/data/proyecta.db`).
+
+**Si el servicio de Render ya existe y corre hoy sin un disco
+persistente**, migrar requiere un paso manual antes de cambiar
+`DATABASE_PATH`: copiar el `database/proyecta.db` actual al nuevo disco
+una sola vez (por ejemplo, por SSH shell de Render, o incluyendo la copia
+en el primer deploy), para no arrancar con una base vacía y perder el
+historial ya acumulado.
 
 ### Dependencias
 
@@ -86,16 +102,13 @@ nunca debe usarse fuera de desarrollo local.
 
 ## Lo que este documento NO resuelve
 
-Documentado en detalle en `PRODUCTION_READINESS_REVIEW.md` -- no se
-resuelve acá porque cada uno requiere una decisión de producto o de
-infraestructura real, no un comando:
-
-- **Dónde correr esto de verdad** (qué proveedor, qué disco persistente,
-  qué dominio). El fallback de `NEXT_PUBLIC_API_URL` sugiere Render, pero
-  eso nunca se documentó como una decisión explícita en ningún lado del
-  repo -- confirmarlo antes de asumirlo.
-- **Autenticación real de usuarios** (hallazgo P0 #1 del PRR) -- ningún
-  comando de despliegue lo arregla, es trabajo de producto.
-- **Que el disco de producción sobreviva un redeploy** -- depende
-  enteramente de la plataforma elegida y de cómo esté configurada; no
-  verificado en esta pasada.
+- **Que alguien aplique `render.yaml` de verdad contra el servicio real**
+  -- ver "Aplicar render.yaml" arriba. El archivo versionado reduce el
+  riesgo de "nadie sabe cómo está configurado" a "hay una receta
+  concreta que aplicar", pero no reemplaza confirmar que se aplicó.
+- **Backups fuera del propio servidor** (a un bucket externo, por
+  ejemplo) -- el respaldo automático (ver arriba) protege contra un error
+  de la aplicación o una migración mala, no contra una falla del disco
+  completo de Render.
+- Autenticación real **ya existe** (`api/auth.py`, `POST /auth/registro`,
+  `POST /auth/login`) -- ver `RELEASE_CANDIDATE_1.md`.

@@ -3,11 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
 import sqlite3
+import threading
+import time
 
 from db import BASE_DATOS
 from api.repositorio_proyectos import _EXECUTOR_PLANOS
-from api.routers import proyectos, sistemas_constructivos
+from api.routers import auth as auth_router, feedback as feedback_router, proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
+from api.observabilidad import logger as _logger, middleware_logging as _middleware_logging
 from busqueda import buscar_fts as _buscar_fts_motor
 from familias import analizar_nombre as _analizar_nombre_familia
 from reranking import reordenar as _reordenar_resultados
@@ -15,6 +18,7 @@ from capa_intencion import detectar_concepto, PALABRAS_CONTEXTO_NORMALIZADAS
 from similares import obtener_similares as _obtener_similares_motor, LIMITE_DEFECTO as _LIMITE_SIMILARES_DEFECTO
 from presupuestos import calcular_presupuesto as _calcular_presupuesto_motor
 from especificaciones import unidad_comercial as _unidad_comercial
+from database.respaldar_db import respaldar as _respaldar_db
 
 app = FastAPI(
     title="Proyecta CR API",
@@ -44,6 +48,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# BETA_1.0_CHECKLIST.md, hallazgos 1.1/8.2 (logging estructurado) y 8.1
+# (analítica mínima) -- ver api/observabilidad.py para por qué un solo
+# mecanismo resuelve ambos.
+app.middleware("http")(_middleware_logging)
+
+app.include_router(auth_router.router)
+app.include_router(feedback_router.router)
 app.include_router(proyectos.router)
 app.include_router(sistemas_constructivos.router)
 
@@ -56,6 +68,32 @@ def _cerrar_executor_planos():
     # el grupo de procesos entero), pero en desarrollo con --reload cada
     # recarga dejaría un proceso huérfano más.
     _EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
+
+
+# BETA_1.0_CHECKLIST.md, hallazgo 1.4/5.1: el script de respaldo
+# (database/respaldar_db.py) ya existía y funcionaba, pero nada lo
+# ejecutaba -- "una promesa sin cumplir". En vez de depender de que
+# alguien configure un cron en la plataforma de despliegue (algo que este
+# repo no puede hacer por sí mismo), el respaldo se agenda desde DENTRO
+# del propio proceso: un hilo en segundo plano (daemon=True, no bloquea
+# el apagado del proceso) que respalda al arrancar y después cada
+# INTERVALO_RESPALDO_SEGUNDOS. Corre en un hilo aparte, no en el loop de
+# asyncio -- .backup() de sqlite3 es una llamada bloqueante.
+INTERVALO_RESPALDO_SEGUNDOS = 6 * 60 * 60  # cada 6 horas
+
+
+def _bucle_respaldo_automatico():
+    while True:
+        try:
+            _respaldar_db()
+        except Exception:
+            _logger.exception("Falló el respaldo automático de la base de datos.")
+        time.sleep(INTERVALO_RESPALDO_SEGUNDOS)
+
+
+@app.on_event("startup")
+def _iniciar_respaldo_automatico():
+    threading.Thread(target=_bucle_respaldo_automatico, daemon=True).start()
 
 # Etapa 2 del motor de búsqueda (ver busqueda.py): alterna entre el buscador
 # actual (LIKE + precio) y FTS5. Cambiar a False vuelve al buscador anterior
