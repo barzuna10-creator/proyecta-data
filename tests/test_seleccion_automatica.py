@@ -315,5 +315,132 @@ class PruebaSeleccionarParaTipoDeMaterial(BasePruebaSeleccion):
         self.assertEqual(resultado["confianza"], "alta")
 
 
+class PruebaAncla(BasePruebaSeleccion):
+    """ancla (agregado tras medir cobertura contra el catálogo real): sin
+    ella, el veto de concepto acepta un candidato que empiece por
+    CUALQUIER token de la búsqueda, incluido el material en vez del
+    objeto. Caso real: "puerta lamina de hn" no encuentra ninguna puerta,
+    se relaja a "puerta lamina", y sin ancla una lámina plana (no una
+    puerta) pasa porque su categoría "Maderas y puertas" hace que el
+    token "puerta" también calce ahí -- FTS5 indexa categoría además del
+    nombre (ver el docstring del módulo)."""
+
+    def test_sin_ancla_un_candidato_que_solo_comparte_categoria_pasa(self):
+        self._cargar_catalogo([
+            {"nombre": "Lamina melamina MDP 4 pies 16 mm negra", "categoria": "Maderas y puertas"},
+        ])
+        resultado = self._seleccionar("puerta lamina de hn")
+        self.assertIsNotNone(resultado["producto"])  # documenta el riesgo real sin ancla
+
+    def test_con_ancla_el_mismo_candidato_se_veta(self):
+        self._cargar_catalogo([
+            {"nombre": "Lamina melamina MDP 4 pies 16 mm negra", "categoria": "Maderas y puertas"},
+        ])
+        resultado = self._seleccionar("puerta lamina de hn", ancla="puerta")
+        self.assertIsNone(resultado["producto"])
+
+    def test_con_ancla_una_puerta_real_si_pasa(self):
+        self._cargar_catalogo([
+            {"nombre": "Puerta lamina de hn con acabado pintura", "categoria": "Maderas y puertas"},
+        ])
+        resultado = self._seleccionar("puerta lamina de hn", ancla="puerta")
+        self.assertIsNotNone(resultado["producto"])
+
+
+class PruebaRelajacionProgresiva(BasePruebaSeleccion):
+    """_buscar_con_relajacion: si la consulta completa no encuentra nada,
+    recorta tokens desde el final -- pero nunca por debajo de
+    MINIMO_TOKENS_RELAJACION=2. Caso real: relajar "national cielo gypsum
+    mr" hasta la sola palabra "national" encontraba una bisagra de esa
+    marca -- coincidencia de marca, no de tipo de producto."""
+
+    def test_relaja_la_consulta_hasta_dos_tokens_y_encuentra_el_producto(self):
+        self._cargar_catalogo([
+            {"nombre": "Repello Fino gris REPEMAX 90 40Kg", "categoria": "Construccion"},
+        ])
+        # La descripción completa del plano casi nunca calza literal.
+        resultado = self._seleccionar(
+            "REPELLO FINO ENMASILLADO CON PINTURA COLOR BLANCO", depurar=True
+        )
+        self.assertIsNotNone(resultado["producto"])
+        self.assertIn("consulta_relajada", resultado["razones"])
+
+    def test_nunca_relaja_hasta_un_solo_token(self):
+        self._cargar_catalogo([
+            {"nombre": "National Bisagra 3x3 CTE dorada", "categoria": "Bisagras"},
+        ])
+        # "national cielo gypsum mr" no debe relajarse hasta la sola
+        # palabra "national" -- coincidencia de marca, no de producto.
+        resultado = self._seleccionar("national cielo gypsum mr")
+        self.assertIsNone(resultado["producto"])
+
+
+class PruebaCategoriaProhibida(BasePruebaSeleccion):
+    """categoria_prohibida: veto duro por dominio inequívocamente ajeno --
+    reservado para casos donde NINGÚN candidato de esa categoría puede ser
+    el producto real buscado. Caso real: "columna" (pieza estructural de
+    madera/acero) encuentra, en el catálogo real, únicamente columnas de
+    ducha, topes de estacionamiento y repuestos de góndola -- ninguna
+    columna estructural."""
+
+    def test_veta_un_candidato_de_la_categoria_prohibida(self):
+        self._cargar_catalogo([
+            {"nombre": "Columna de ducha acero inoxidable negro mate", "categoria": "Baños"},
+        ])
+        resultado = self._seleccionar("columna", categoria_prohibida={"banos"})
+        self.assertIsNone(resultado["producto"])
+
+    def test_sin_categoria_prohibida_el_mismo_candidato_pasa(self):
+        self._cargar_catalogo([
+            {"nombre": "Columna de ducha acero inoxidable negro mate", "categoria": "Baños"},
+        ])
+        resultado = self._seleccionar("columna")
+        self.assertIsNotNone(resultado["producto"])
+
+    def test_una_columna_de_categoria_permitida_no_se_veta(self):
+        self._cargar_catalogo([
+            {"nombre": "Columna de madera tratada 20 x 20 cm", "categoria": "Maderas"},
+        ])
+        resultado = self._seleccionar("columna", categoria_prohibida={"banos"})
+        self.assertIsNotNone(resultado["producto"])
+
+
+class PruebaVetoDeNegacion(BasePruebaSeleccion):
+    """Caso real: la fila "Sin cielo" de un cuadro de acabados (significa
+    que ESE ambiente no lleva cielo raso) buscaba "cielo" y encontraba,
+    con confianza alta, un cielo suspendido real -- exactamente lo
+    opuesto de lo que dice el plano."""
+
+    def test_un_termino_que_empieza_en_negacion_nunca_matchea(self):
+        self._cargar_catalogo([
+            {"nombre": "Cielo suspendido radar 2 x 2 x 5/8 pulg sin bisel", "categoria": "Cielos"},
+        ])
+        resultado = self._seleccionar("Sin cielo", depurar=True)
+        self.assertIsNone(resultado["producto"])
+        self.assertEqual(resultado["razones"], ["termino_de_negacion"])
+
+    def test_un_termino_normal_con_sin_en_medio_si_matchea(self):
+        self._cargar_catalogo([
+            {"nombre": "Cielo suspendido radar 2 x 2 x 5/8 pulg sin bisel", "categoria": "Cielos"},
+        ])
+        resultado = self._seleccionar("cielo suspendido")
+        self.assertIsNotNone(resultado["producto"])
+
+
+class PruebaMedidaEnPulgadas(unittest.TestCase):
+    """_medidas_en_nombre: "8" X 8"" (con comilla pegada a AMBOS números,
+    no solo al segundo) no lo reconocía el patrón cm/mm/m -- un candidato
+    así quedaba sin ninguna medida detectada y el veto de conflicto no
+    tenía nada que comparar. Caso real: "Viga Estructural En Forma De H
+    8\" X 8\". ... Alto 203.2 Mm"."""
+
+    def test_reconoce_medida_en_pulgadas_y_la_convierte_a_cm(self):
+        from seleccion_automatica import _medidas_en_nombre
+
+        nombre = 'Viga Estructural En Forma De H 8" X 8". Alto 203.2 Mm'
+        medidas = _medidas_en_nombre(nombre)
+        self.assertIn((20.32, 20.32), medidas)
+
+
 if __name__ == "__main__":
     unittest.main()
