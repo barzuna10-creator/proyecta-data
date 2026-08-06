@@ -150,36 +150,43 @@ def reconstruir_indice():
     después de cada scraping (medido: ~180ms para todo el catálogo)."""
 
     conexion = conectar()
+    try:
+        # `productos_fts` es una tabla FTS5 "contentless" (content='') --
+        # no soporta DELETE normal (SQLite lo rechaza: "cannot DELETE
+        # from contentless fts5 table"). El comando especial 'delete-all'
+        # es la forma correcta de vaciarla antes de reinsertar todo.
+        conexion.execute("INSERT INTO productos_fts(productos_fts) VALUES ('delete-all')")
 
-    # `productos_fts` es una tabla FTS5 "contentless" (content='') -- no
-    # soporta DELETE normal (SQLite lo rechaza: "cannot DELETE from
-    # contentless fts5 table"). El comando especial 'delete-all' es la
-    # forma correcta de vaciarla antes de reinsertar todo.
-    conexion.execute("INSERT INTO productos_fts(productos_fts) VALUES ('delete-all')")
+        filas = conexion.execute(
+            "SELECT id, nombre, categoria, subcategoria FROM productos"
+        ).fetchall()
 
-    filas = conexion.execute(
-        "SELECT id, nombre, categoria, subcategoria FROM productos"
-    ).fetchall()
+        datos = [
+            (
+                fila["id"],
+                normalizar_texto(fila["nombre"]),
+                normalizar_texto(fila["categoria"]),
+                normalizar_texto(fila["subcategoria"]),
+            )
+            for fila in filas
+        ]
 
-    datos = [
-        (
-            fila["id"],
-            normalizar_texto(fila["nombre"]),
-            normalizar_texto(fila["categoria"]),
-            normalizar_texto(fila["subcategoria"]),
+        conexion.executemany(
+            "INSERT INTO productos_fts (rowid, nombre, categoria, subcategoria) VALUES (?, ?, ?, ?)",
+            datos,
         )
-        for fila in filas
-    ]
 
-    conexion.executemany(
-        "INSERT INTO productos_fts (rowid, nombre, categoria, subcategoria) VALUES (?, ?, ?, ?)",
-        datos,
-    )
-
-    conexion.commit()
-    conexion.close()
-
-    return len(datos)
+        conexion.commit()
+        return len(datos)
+    finally:
+        # Investigación "database is locked" en el arranque: si algo entre
+        # el INSERT de arriba y el commit lanzaba una excepción (ej. la
+        # tabla productos no existía todavía), esta conexión quedaba sin
+        # cerrar, con la transacción del 'delete-all' abierta -- un
+        # candado de escritura pegado por el resto de la vida del proceso.
+        # Cerrar acá, siempre, haya pasado lo que haya pasado, descarta
+        # cualquier transacción sin confirmar y libera el candado.
+        conexion.close()
 
 
 def _condicion_fts(token):

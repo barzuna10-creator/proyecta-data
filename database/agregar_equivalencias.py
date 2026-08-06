@@ -1,12 +1,11 @@
-import sqlite3
 import time
 
-from db import BASE_DATOS, conectar
+from db import conectar
 from equivalencias import calcular_equivalencias
 
 
 def main():
-    conexion = sqlite3.connect(BASE_DATOS)
+    conexion = conectar()
 
     conexion.execute(
         """
@@ -56,7 +55,7 @@ def main():
     print(f"{total_productos_agrupados} productos quedaron en algún grupo.")
 
     print("\nGuardando en la base de datos...")
-    conexion = sqlite3.connect(BASE_DATOS)
+    conexion = conectar()
     conexion.execute("UPDATE productos SET equivalencia_id = NULL")
     conexion.execute("DELETE FROM grupos_equivalencia")
 

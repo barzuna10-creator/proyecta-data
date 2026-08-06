@@ -1,11 +1,9 @@
-import sqlite3
-
-from db import BASE_DATOS
+from db import conectar
 from busqueda import reconstruir_indice
 
 
 def main():
-    conexion = sqlite3.connect(BASE_DATOS)
+    conexion = conectar()
 
     conexion.execute(
         """

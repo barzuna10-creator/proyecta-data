@@ -14,9 +14,7 @@ No se toca ninguna columna existente. Reejecutar este script no debe
 fallar ni duplicar nada.
 """
 
-import sqlite3
-
-from db import BASE_DATOS
+from db import conectar
 
 COLUMNAS_ITEMS_PROYECTO = [
     ("origen", "TEXT"),
@@ -43,8 +41,7 @@ def _agregar_columnas_faltantes(cursor, tabla, columnas):
 
 
 def main():
-    conexion = sqlite3.connect(BASE_DATOS)
-    conexion.execute("PRAGMA foreign_keys = ON")
+    conexion = conectar()
     cursor = conexion.cursor()
 
     print("Columnas agregadas:")

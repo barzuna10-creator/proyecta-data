@@ -182,5 +182,42 @@ class PruebaRegresionSinonimosVocabulario(BasePruebaBuscarFts):
         self.assertEqual(fila[0], 0)
 
 
+class PruebaReconstruirIndiceLiberaElCandadoSiFalla(BasePruebaBuscarFts):
+    """Regresión de un bug real encontrado investigando "database is
+    locked" en producción: si algo entre el INSERT ('delete-all') y el
+    SELECT de reconstruir_indice() lanzaba una excepción, la conexión
+    quedaba sin cerrar -- la transacción del 'delete-all' seguía abierta,
+    con el candado de escritura pegado por el resto de la vida del
+    proceso. Ahora un try/finally garantiza el close() siempre, haya
+    pasado lo que haya pasado."""
+
+    def test_conexion_queda_cerrada_y_sin_candado_aunque_falle_a_mitad_de_camino(self):
+        conexion_setup = sqlite3.connect(self.ruta_db)
+        _insertar(conexion_setup, proveedor="EPA", id_proveedor="1", nombre="Cemento")
+        conexion_setup.commit()
+        # Elimina `productos` a propósito -- el INSERT sobre productos_fts
+        # ('delete-all') va a pasar, pero el SELECT FROM productos que
+        # sigue va a fallar con "no such table: productos", exactamente
+        # el escenario real que expuso el bug.
+        conexion_setup.execute("DROP TABLE productos")
+        conexion_setup.commit()
+        conexion_setup.close()
+
+        import db
+        with mock.patch.object(db, "BASE_DATOS", self.ruta_db):
+            import busqueda
+            with self.assertRaises(sqlite3.OperationalError):
+                busqueda.reconstruir_indice()
+
+        # Si la conexión de reconstruir_indice() hubiera quedado abierta
+        # con una transacción sin confirmar, esta escritura -- sin
+        # busy_timeout, igual que como corre en producción -- fallaría al
+        # instante con "database is locked".
+        conexion_de_prueba = sqlite3.connect(self.ruta_db)
+        conexion_de_prueba.execute("CREATE TABLE prueba_sin_candado (id INTEGER)")
+        conexion_de_prueba.commit()
+        conexion_de_prueba.close()
+
+
 if __name__ == "__main__":
     unittest.main()

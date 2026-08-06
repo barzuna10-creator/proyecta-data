@@ -2,11 +2,10 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
-import sqlite3
 import threading
 import time
 
-from db import BASE_DATOS
+from db import conectar
 from api.repositorio_proyectos import _EXECUTOR_PLANOS
 from api.routers import auth as auth_router, feedback as feedback_router, proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
@@ -74,28 +73,38 @@ def _cerrar_executor_planos():
 # Investigación "no such table: usuarios" en producción: nada, en ningún
 # punto del despliegue, ejecutaba las migraciones de database/agregar_*.py
 # contra la base real (ver database/migraciones.py para el diseño
-# completo -- registro explícito, reclamo atómico entre los --workers 4,
-# libera el reclamo si una migración falla). Mismo patrón que el respaldo
-# automático de abajo: un hilo de fondo en el arranque, para no bloquear
-# que el proceso empiece a responder mientras corre.
-@app.on_event("startup")
-def _iniciar_migraciones_pendientes():
-    threading.Thread(target=_aplicar_migraciones_pendientes, daemon=True).start()
-
-
+# completo -- registro explícito, reclamo atómico entre los --workers,
+# libera el reclamo si una migración falla).
+#
+# Investigación posterior, "database is locked" durante el arranque:
+# antes, este hilo de migraciones y el hilo de respaldo (más abajo)
+# arrancaban EN PARALELO, los dos desde su propio on_event("startup") --
+# dos escritores concurrentes contra la misma base real, justo en el
+# momento de más escrituras de todo el ciclo de vida del proceso. Ahora
+# es un solo hilo de fondo: primero terminan las migraciones, RECIÉN
+# DESPUÉS arranca el bucle de respaldo -- nunca compiten por la base al
+# mismo tiempo. (El otro cambio de esa misma investigación fue que las 8
+# migraciones y el respaldo pasaron de sqlite3.connect() crudo a
+# db.conectar(), que ya trae busy_timeout -- ver database/migraciones.py
+# y database/respaldar_db.py. Ese es el fix real contra el bloqueo en sí;
+# esta secuencia es una reducción adicional de cuándo puede competir por
+# el lock, no un reemplazo del busy_timeout.)
+#
 # BETA_1.0_CHECKLIST.md, hallazgo 1.4/5.1: el script de respaldo
 # (database/respaldar_db.py) ya existía y funcionaba, pero nada lo
 # ejecutaba -- "una promesa sin cumplir". En vez de depender de que
 # alguien configure un cron en la plataforma de despliegue (algo que este
 # repo no puede hacer por sí mismo), el respaldo se agenda desde DENTRO
-# del propio proceso: un hilo en segundo plano (daemon=True, no bloquea
-# el apagado del proceso) que respalda al arrancar y después cada
-# INTERVALO_RESPALDO_SEGUNDOS. Corre en un hilo aparte, no en el loop de
-# asyncio -- .backup() de sqlite3 es una llamada bloqueante.
+# del propio proceso -- respalda apenas terminan las migraciones, y
+# después cada INTERVALO_RESPALDO_SEGUNDOS. Un solo hilo en segundo plano
+# (daemon=True, no bloquea el apagado del proceso), no el loop de asyncio
+# -- tanto las migraciones como .backup() de sqlite3 son llamadas
+# bloqueantes.
 INTERVALO_RESPALDO_SEGUNDOS = 6 * 60 * 60  # cada 6 horas
 
 
-def _bucle_respaldo_automatico():
+def _bucle_arranque_en_segundo_plano():
+    _aplicar_migraciones_pendientes()
     while True:
         try:
             _respaldar_db()
@@ -105,8 +114,8 @@ def _bucle_respaldo_automatico():
 
 
 @app.on_event("startup")
-def _iniciar_respaldo_automatico():
-    threading.Thread(target=_bucle_respaldo_automatico, daemon=True).start()
+def _iniciar_tareas_en_segundo_plano():
+    threading.Thread(target=_bucle_arranque_en_segundo_plano, daemon=True).start()
 
 # Etapa 2 del motor de búsqueda (ver busqueda.py): alterna entre el buscador
 # actual (LIKE + precio) y FTS5. Cambiar a False vuelve al buscador anterior
@@ -147,7 +156,7 @@ def inicio():
 
 
 def _buscar_like(q):
-    conexion = sqlite3.connect(BASE_DATOS)
+    conexion = conectar()
     cursor = conexion.cursor()
 
     cursor.execute(

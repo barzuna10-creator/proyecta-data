@@ -62,7 +62,17 @@ def respaldar(mantener=20):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     destino = directorio_respaldos / f"proyecta_{timestamp}.db"
 
+    # No se usa db.conectar() acá a propósito -- conectar() siempre abre
+    # db.BASE_DATOS, y origen ya se resolvió arriba desde la BASE_DATOS de
+    # ESTE módulo (permite, ej., apuntar un respaldo a un archivo distinto
+    # sin depender del global de db.py). Se configura busy_timeout a mano
+    # -- si el respaldo arranca justo cuando otra conexión tiene una
+    # escritura en curso contra la misma base real, espera en vez de
+    # fallar al instante (ver el incidente "database is locked" durante
+    # el arranque). destino es un archivo nuevo que nadie más toca -- no
+    # necesita busy_timeout.
     conexion_origen = sqlite3.connect(str(origen))
+    conexion_origen.execute("PRAGMA busy_timeout = 10000")
     conexion_destino = sqlite3.connect(str(destino))
     with conexion_destino:
         conexion_origen.backup(conexion_destino)
