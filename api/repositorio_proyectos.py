@@ -9,6 +9,11 @@ from db import conectar
 from busqueda import normalizar_texto
 from especificaciones import unidad_comercial as _unidad_comercial
 from api.adaptador_planos import construir_analisis_plano
+from seleccion_automatica import (
+    seleccionar_para_acabado as _seleccionar_para_acabado,
+    seleccionar_para_pieza_estructural as _seleccionar_para_pieza_estructural,
+    seleccionar_para_puerta_ventana as _seleccionar_para_puerta_ventana,
+)
 
 # INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md: leer un plano real (fitz +
 # pdfplumber) es 100% CPU-bound en un solo núcleo durante ~10s para un PDF
@@ -277,6 +282,7 @@ def _obtener_items(conexion, proyecto_id):
             i.precio_al_agregar,
             i.origen, i.pagina_fuente, i.lamina_fuente, i.texto_original,
             i.confianza, i.regla_generadora,
+            i.confianza_match, i.revisado,
             COALESCE(pr.nombre, i.nombre_al_agregar) AS nombre,
             COALESCE(pr.marca, i.marca_al_agregar) AS marca,
             COALESCE(pr.categoria, i.categoria_al_agregar) AS categoria,
@@ -297,6 +303,7 @@ def _obtener_items(conexion, proyecto_id):
     for fila in cursor.fetchall():
         item = dict(fila)
         item["disponible"] = bool(item["disponible"])
+        item["revisado"] = bool(item["revisado"])
         # Unidad de venta legible derivada del nombre (Galón, 25 kg,
         # 2.08 m²...) -- ver PRUEBA_INGENIERO_BANO.md, hallazgo #2. None
         # si no hay señal confiable; el frontend cae a "c/u" en ese caso.
@@ -458,6 +465,7 @@ def agregar_item(
     proyecto_id, propietario_id, proveedor, id_proveedor, cantidad=1,
     origen=None, pagina_fuente=None, lamina_fuente=None, texto_original=None,
     confianza=None, regla_generadora=None, unidad_medida=None,
+    confianza_match=None, revisado=1,
 ):
     if origen is not None and origen not in ORIGENES_ITEM_VALIDOS:
         raise ValueError(f"Origen inválido: {origen}")
@@ -497,8 +505,9 @@ def agregar_item(
             precio_al_agregar, url_imagen_al_agregar, url_producto_al_agregar,
             fecha_agregado, partida,
             origen, pagina_fuente, lamina_fuente, texto_original,
-            confianza, regla_generadora, unidad_medida
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            confianza, regla_generadora, unidad_medida,
+            confianza_match, revisado
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(proyecto_id, proveedor, id_proveedor)
         DO UPDATE SET
             -- Si el ítem ya existía pendiente, sumar es lo esperado (agregar
@@ -521,7 +530,9 @@ def agregar_item(
             -- a propósito (AUDITORIA_INTEGRAL_PRODUCTO.md §1: "nunca debe
             -- perderse esa información") -- conservan el origen del primer
             -- agregado, nunca se sobrescriben ni se fusionan con un
-            -- segundo origen.
+            -- segundo origen. confianza_match/revisado: mismo criterio --
+            -- no se tocan en conflicto, conservan lo que dejó el primer
+            -- agregado (ver seleccion_automatica.py).
         """,
         (
             proyecto_id, proveedor, id_proveedor, cantidad,
@@ -530,6 +541,7 @@ def agregar_item(
             ahora, partida_sugerida,
             origen, pagina_fuente, lamina_fuente, texto_original,
             confianza, regla_generadora, unidad_medida,
+            confianza_match, revisado,
         ),
     )
 
@@ -545,7 +557,7 @@ def agregar_item(
 
 
 def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
-    campos_validos = {"cantidad", "estado", "prioridad", "comentario", "partida"}
+    campos_validos = {"cantidad", "estado", "prioridad", "comentario", "partida", "revisado"}
     cambios = {k: v for k, v in cambios.items() if k in campos_validos and v is not None}
 
     if "estado" in cambios and cambios["estado"] not in ESTADOS_ITEM:
@@ -682,3 +694,99 @@ def eliminar_plano(proyecto_id, propietario_id):
     conexion.close()
 
     return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+
+
+def generar_cotizacion_automatica(proyecto_id, propietario_id):
+    """Corre seleccion_automatica.py sobre cada material del plano ya
+    analizado (puertas, ventanas, acabados, piezas estructurales) y agrega
+    al proyecto -- vía agregar_item(), sin duplicar su lógica de guardado
+    -- los que el motor logró emparejar con un producto real del catálogo,
+    con confianza alta/media/baja. Los que no logró emparejar quedan
+    exactamente como hoy: disponibles para agregar a mano desde "Materiales
+    encontrados" (MaterialesDelPlano.tsx) -- este flujo nunca los toca ni
+    los oculta.
+
+    Cada ítem que sí se agrega nace con revisado=0 -- pendiente de que un
+    humano lo apruebe, reemplace o elimine antes de dar la cotización por
+    buena (ver items_proyecto.revisado, agregar_seleccion_automatica.py).
+
+    No intenta evitar volver a intentar un material ya cubierto en una
+    corrida anterior -- agregar_item() ya es idempotente por (proyecto_id,
+    proveedor, id_proveedor) vía ON CONFLICT, así que reintentar un
+    material que ya resultó en el mismo producto no duplica nada; si el
+    motor eligiera un producto DISTINTO en una corrida posterior (el
+    catálogo cambió, por ejemplo), sí podría dejar dos ítems similares --
+    aceptado como límite conocido de esta primera versión."""
+
+    conexion = conectar()
+    fila = conexion.execute(
+        "SELECT plano_analisis FROM proyectos WHERE id = ? AND propietario_id = ?",
+        (proyecto_id, propietario_id),
+    ).fetchone()
+    conexion.close()
+
+    if not fila:
+        return None
+
+    if not fila["plano_analisis"]:
+        raise ValueError("Este proyecto todavía no tiene un plano analizado.")
+
+    analisis = json.loads(fila["plano_analisis"])
+
+    resumen = {"agregados": 0, "sin_seleccion": 0}
+
+    for puerta in analisis.get("puertas", []):
+        _procesar_material_plano(
+            proyecto_id, propietario_id, puerta,
+            _seleccionar_para_puerta_ventana(puerta, es_ventana=False),
+            regla_generadora="cuadro_puertas", cantidad=puerta.get("cantidad") or 1,
+            resumen=resumen,
+        )
+
+    for ventana in analisis.get("ventanas", []):
+        _procesar_material_plano(
+            proyecto_id, propietario_id, ventana,
+            _seleccionar_para_puerta_ventana(ventana, es_ventana=True),
+            regla_generadora="cuadro_ventanas", cantidad=ventana.get("cantidad") or 1,
+            resumen=resumen,
+        )
+
+    for acabado in analisis.get("acabados", []):
+        _procesar_material_plano(
+            proyecto_id, propietario_id, acabado,
+            _seleccionar_para_acabado(acabado),
+            regla_generadora="cuadro_acabados", cantidad=1,
+            resumen=resumen,
+        )
+
+    for pieza in analisis.get("piezas_estructurales", []):
+        _procesar_material_plano(
+            proyecto_id, propietario_id, pieza,
+            _seleccionar_para_pieza_estructural(pieza),
+            regla_generadora="computo_estructural", cantidad=pieza.get("cantidad") or 1,
+            resumen=resumen,
+        )
+
+    proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+    proyecto["cotizacion_automatica_resumen"] = resumen
+    return proyecto
+
+
+def _procesar_material_plano(proyecto_id, propietario_id, material, seleccion, regla_generadora, cantidad, resumen):
+    if seleccion["producto"] is None:
+        resumen["sin_seleccion"] += 1
+        return
+
+    producto = seleccion["producto"]
+    agregar_item(
+        proyecto_id, propietario_id, producto["proveedor"], producto["id_proveedor"],
+        cantidad=cantidad,
+        origen="plano",
+        pagina_fuente=material.get("pagina_fuente"),
+        texto_original=material.get("texto_original"),
+        confianza=material.get("confianza"),
+        regla_generadora=regla_generadora,
+        confianza_match=seleccion["confianza"],
+        revisado=0,
+    )
+    resumen["agregados"] += 1

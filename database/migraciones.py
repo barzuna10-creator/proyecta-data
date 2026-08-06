@@ -53,9 +53,9 @@ a funcionar de inmediato; correrlo una segunda vez saltó las 8 en 0.18s.
 
 Costo conocido, sin resolver a propósito (fuera del alcance pedido): la
 tabla de seguimiento empieza vacía, así que el primer arranque con este
-runner intenta aplicar las 8. Para las 6 basadas en `CREATE ... IF NOT
-EXISTS` / `ALTER TABLE` con guard por columna, reintentar contra una base
-que ya las tiene es gratis. Pero `agregar_equivalencias.py` y
+runner intenta aplicar todas las registradas. Para las basadas en
+`CREATE ... IF NOT EXISTS` / `ALTER TABLE` con guard por columna,
+reintentar contra una base que ya las tiene es gratis. Pero `agregar_equivalencias.py` y
 `agregar_indice_busqueda.py` recalculan sin condición, sin importar si el
 resultado ya existe -- así están escritas, y no se les cambió la lógica.
 Ese primer arranque puede tardar varios minutos en el único worker que
@@ -77,6 +77,7 @@ import database.agregar_equivalencias as _m_equivalencias
 import database.agregar_plano_proyecto as _m_plano_proyecto
 import database.agregar_trazabilidad_items as _m_trazabilidad_items
 import database.agregar_autenticacion as _m_autenticacion
+import database.agregar_seleccion_automatica as _m_seleccion_automatica
 
 # agregar_autenticacion primero, a propósito, fuera del orden histórico
 # real de introducción: no depende de proyectos/productos/nada de las
@@ -100,6 +101,9 @@ MIGRACIONES = [
     ("agregar_equivalencias", _m_equivalencias.main),
     ("agregar_plano_proyecto", _m_plano_proyecto.main),
     ("agregar_trazabilidad_items", _m_trazabilidad_items.main),
+    # Depende de items_proyecto (agregar_proyectos) -- va al final, mismo
+    # criterio que el resto de las ALTER TABLE sin urgencia de arranque.
+    ("agregar_seleccion_automatica", _m_seleccion_automatica.main),
 ]
 
 
@@ -136,8 +140,9 @@ def _liberar(conexion, nombre):
 def migraciones_completadas():
     """Nombres ya registrados en migraciones_aplicadas -- para diagnóstico
     (ver api/routers/auth.py: si /auth/registro se topa con "no such
-    table: usuarios", esto dice exactamente cuáles de las 8 sí llegaron a
-    correr). Nunca lanza: si la tabla de seguimiento todavía ni existe
+    table: usuarios", esto dice exactamente cuáles de las registradas en
+    MIGRACIONES sí llegaron a correr). Nunca lanza: si la tabla de
+    seguimiento todavía ni existe
     (el propio arranque no llegó a asegurarla), devuelve una lista vacía
     en vez de fallar -- es información de diagnóstico, no debe agregar un
     segundo punto de falla."""

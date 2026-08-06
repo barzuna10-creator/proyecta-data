@@ -5,11 +5,14 @@ el índice FTS5, pero nada en api/main.py lo usa todavía. Sirve para comparar
 contra el buscador actual antes de decidir si reemplazarlo.
 """
 
+import logging
 import re
 import sqlite3
 import unicodedata
 
 from db import conectar
+
+_logger = logging.getLogger(__name__)
 
 # Abreviaturas y variantes que el catálogo y los usuarios escriben distinto
 # para la misma unidad. Se aplica tanto al indexar como al consultar.
@@ -275,7 +278,16 @@ def buscar_fts(
             (consulta_fts, *parametros_extra, limite),
         ).fetchall()
     except sqlite3.OperationalError:
-        # consulta con sintaxis FTS5 inválida (ej. token con caracteres reservados) -> sin resultados
+        # consulta con sintaxis FTS5 inválida (ej. token con caracteres
+        # reservados) -> sin resultados, nunca un 500 por un input de
+        # búsqueda raro. Pero esto también atrapa CUALQUIER otro
+        # OperationalError de la misma consulta (ej. familias_producto
+        # ausente) -- encontrado escribiendo tests/test_seleccion_
+        # automatica.py: sin esta línea, ese caso quedaba indistinguible
+        # de "no hay resultados", en vez de un error real y visible. El
+        # comportamiento (devolver []) no cambia -- solo deja de ser
+        # completamente silencioso.
+        _logger.warning("buscar_fts devolvió [] por OperationalError", exc_info=True)
         filas = []
     finally:
         conexion.close()

@@ -328,6 +328,8 @@ def _crear_db_temporal():
             texto_original TEXT,
             confianza TEXT,
             regla_generadora TEXT,
+            confianza_match TEXT,
+            revisado INTEGER NOT NULL DEFAULT 1,
             UNIQUE(proyecto_id, proveedor, id_proveedor)
         )
         """

@@ -77,12 +77,18 @@ class ActualizarItemRequest(BaseModel):
     prioridad: str | None = None
     comentario: str | None = None
     partida: str | None = None
+    # seleccion_automatica.py: "revisado" marca que un humano ya aprobó,
+    # reemplazó o descartó un ítem que el motor automático agregó -- None
+    # por defecto (no se manda) para que ningún caller existente (agregar/
+    # actualizar a mano) se vea afectado.
+    revisado: bool | None = None
 
 
 CAMPOS_INTERNOS_PROYECTO = {"propietario_id", "indirectos_porcentaje", "imprevistos_porcentaje", "margen_porcentaje"}
 CAMPOS_INTERNOS_ITEM = {
     "comentario", "origen", "pagina_fuente", "lamina_fuente",
     "texto_original", "confianza", "regla_generadora",
+    "confianza_match", "revisado",
 }
 
 
@@ -289,6 +295,28 @@ def eliminar_plano(
     propietario_id: str = Depends(obtener_propietario_id),
 ):
     proyecto = repo.eliminar_plano(proyecto_id, propietario_id)
+
+    if not proyecto:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return proyecto
+
+
+@router.post("/{proyecto_id}/plano/cotizacion-automatica")
+def generar_cotizacion_automatica(
+    proyecto_id: int,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    """Endpoint nuevo, separado de POST /plano a propósito -- subir y
+    analizar un plano sigue funcionando exactamente igual que antes, sin
+    seleccionar nada automáticamente; este es un paso EXTRA y explícito
+    que el usuario dispara aparte, después de ver "Materiales encontrados"
+    (ver seleccion_automatica.py)."""
+
+    try:
+        proyecto = repo.generar_cotizacion_automatica(proyecto_id, propietario_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
 
     if not proyecto:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
