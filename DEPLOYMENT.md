@@ -53,12 +53,15 @@ PYTHONPATH=. .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers
 **Ya corre solo.** `api/main.py` agenda `database/respaldar_db.py` desde
 un hilo en segundo plano al arrancar el proceso (cada 6 horas, y una vez
 al iniciar) -- no depende de que alguien configure un cron aparte en la
-plataforma. Sigue siendo crítico **sacar esos respaldos del propio
-servidor** (a un bucket, a otro disco) -- un respaldo que vive en el
-mismo disco que la base original no protege contra una falla de disco
-completa. Eso sigue siendo trabajo manual/de infraestructura, no algo
-que el proceso de la API pueda hacer por sí mismo sin credenciales de
-almacenamiento externo.
+plataforma. Los respaldos se guardan junto a la base real (mismo
+directorio que `DATABASE_PATH`, subcarpeta `respaldos/`) -- si
+`DATABASE_PATH=/data/proyecta.db`, quedan en `/data/respaldos/`, en el
+mismo disco persistente, no en el checkout efímero del repo. Sigue siendo
+crítico **sacar esos respaldos del propio servidor** (a un bucket, a otro
+disco) -- un respaldo que vive en el mismo disco que la base original no
+protege contra una falla de disco completa. Eso sigue siendo trabajo
+manual/de infraestructura, no algo que el proceso de la API pueda hacer
+por sí mismo sin credenciales de almacenamiento externo.
 
 ### Migraciones de base de datos
 

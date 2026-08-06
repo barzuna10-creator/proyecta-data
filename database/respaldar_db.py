@@ -18,8 +18,17 @@ proceso de la API sigue corriendo (los archivos -wal/-shm no se copian con
 ella); `.backup()` es seguro para copiar una base "en caliente", sin
 detener nada.
 
-Los respaldos se guardan en `database/respaldos/`, con timestamp en el
-nombre, y NUNCA se versionan en git (ver .gitignore) -- versionar los
+Los respaldos se guardan junto a la propia base (mismo directorio que
+BASE_DATOS, en una subcarpeta `respaldos/`) -- nunca hardcodeado a
+`database/respaldos/`. Importa en producción: si BASE_DATOS apunta al
+disco persistente (`/data/proyecta.db`), los respaldos quedan en
+`/data/respaldos/`, en el mismo disco durable -- guardarlos en el
+checkout efímero del repo (como hacía la versión anterior de este
+script) los habría vuelto inútiles apenas se aplicara la migración a
+`/data`: un redeploy los habría borrado a todos junto con el resto del
+filesystem efímero. En local, sigue siendo `database/respaldos/` porque
+ahí vive `database/proyecta.db` por defecto -- mismo comportamiento de
+siempre. Nunca se versionan en git (ver .gitignore) -- versionar los
 respaldos ahí sería repetir exactamente el mismo problema que tiene
 database/proyecta.db (hallazgo B3), solo que multiplicado por cada
 respaldo.
@@ -41,8 +50,6 @@ from pathlib import Path
 
 from db import BASE_DATOS
 
-DIRECTORIO_RESPALDOS = Path("database/respaldos")
-
 
 def respaldar(mantener=20):
     origen = Path(BASE_DATOS)
@@ -50,9 +57,10 @@ def respaldar(mantener=20):
         print(f"❌ No existe {origen} -- nada que respaldar.")
         return 1
 
-    DIRECTORIO_RESPALDOS.mkdir(parents=True, exist_ok=True)
+    directorio_respaldos = origen.parent / "respaldos"
+    directorio_respaldos.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    destino = DIRECTORIO_RESPALDOS / f"proyecta_{timestamp}.db"
+    destino = directorio_respaldos / f"proyecta_{timestamp}.db"
 
     conexion_origen = sqlite3.connect(str(origen))
     conexion_destino = sqlite3.connect(str(destino))
@@ -64,12 +72,12 @@ def respaldar(mantener=20):
     tamano_mb = destino.stat().st_size / (1024 * 1024)
     print(f"✅ Respaldo creado: {destino} ({tamano_mb:.1f} MB)")
 
-    _purgar_respaldos_viejos(mantener)
+    _purgar_respaldos_viejos(directorio_respaldos, mantener)
     return 0
 
 
-def _purgar_respaldos_viejos(mantener):
-    respaldos = sorted(DIRECTORIO_RESPALDOS.glob("proyecta_*.db"))
+def _purgar_respaldos_viejos(directorio_respaldos, mantener):
+    respaldos = sorted(directorio_respaldos.glob("proyecta_*.db"))
     de_mas = respaldos[:-mantener] if mantener > 0 else []
     for respaldo in de_mas:
         respaldo.unlink()
