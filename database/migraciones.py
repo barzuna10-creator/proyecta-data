@@ -65,6 +65,7 @@ gane el reclamo de esas dos. Corre en un hilo de fondo (ver
 
 import time
 
+import db
 from db import conectar
 from api.observabilidad import _asegurar_handler, logger
 
@@ -77,11 +78,21 @@ import database.agregar_plano_proyecto as _m_plano_proyecto
 import database.agregar_trazabilidad_items as _m_trazabilidad_items
 import database.agregar_autenticacion as _m_autenticacion
 
-# Orden = orden histórico real en que se introdujeron (ver git log).
-# Importa cuando una migración posterior altera una tabla que una anterior
+# agregar_autenticacion primero, a propósito, fuera del orden histórico
+# real de introducción: no depende de proyectos/productos/nada de las
+# otras 7 (solo crea usuarios/sesiones/feedback, tablas propias que nadie
+# más referencia), y es la que un incidente real de producción necesitaba
+# ver aplicada cuanto antes. Dejarla última significaba que quedaba
+# atrapada detrás de agregar_equivalencias (~10s recalculando el catálogo
+# completo, más en Render que en local) y de cualquier falla de las
+# primeras 7 -- sin ninguna razón real para depender de ese orden.
+#
+# El resto conserva su orden histórico real de introducción (ver git log):
+# importa porque una migración posterior altera una tabla que una anterior
 # crea (ej. agregar_cotizaciones.py hace ALTER TABLE sobre proyectos e
 # items_proyecto, creadas por agregar_proyectos.py).
 MIGRACIONES = [
+    ("agregar_autenticacion", _m_autenticacion.main),
     ("agregar_familias_producto", _m_familias_producto.main),
     ("agregar_indice_busqueda", _m_indice_busqueda.main),
     ("agregar_proyectos", _m_proyectos.main),
@@ -89,7 +100,6 @@ MIGRACIONES = [
     ("agregar_equivalencias", _m_equivalencias.main),
     ("agregar_plano_proyecto", _m_plano_proyecto.main),
     ("agregar_trazabilidad_items", _m_trazabilidad_items.main),
-    ("agregar_autenticacion", _m_autenticacion.main),
 ]
 
 
@@ -123,6 +133,25 @@ def _liberar(conexion, nombre):
     conexion.commit()
 
 
+def migraciones_completadas():
+    """Nombres ya registrados en migraciones_aplicadas -- para diagnóstico
+    (ver api/routers/auth.py: si /auth/registro se topa con "no such
+    table: usuarios", esto dice exactamente cuáles de las 8 sí llegaron a
+    correr). Nunca lanza: si la tabla de seguimiento todavía ni existe
+    (el propio arranque no llegó a asegurarla), devuelve una lista vacía
+    en vez de fallar -- es información de diagnóstico, no debe agregar un
+    segundo punto de falla."""
+    try:
+        conexion = conectar()
+        try:
+            filas = conexion.execute("SELECT nombre FROM migraciones_aplicadas ORDER BY fecha_aplicada").fetchall()
+        finally:
+            conexion.close()
+        return [fila["nombre"] for fila in filas]
+    except Exception:
+        return []
+
+
 def _procesar_una(nombre, funcion):
     # Una conexión nueva y corta por paso (reclamo, y liberar si hace
     # falta) -- no se mantiene una conexión propia abierta mientras corre
@@ -139,7 +168,7 @@ def _procesar_una(nombre, funcion):
 
     if not reclamada:
         logger.info(f"MIGRACION saltada nombre={nombre} -- ya estaba aplicada")
-        return
+        return "saltada"
 
     logger.info(f"MIGRACION inicio nombre={nombre}")
     t0 = time.time()
@@ -154,22 +183,33 @@ def _procesar_una(nombre, funcion):
         finally:
             conexion.close()
         logger.info(f"MIGRACION reclamo liberado nombre={nombre} -- se reintentará en el próximo arranque")
-        return
+        return "fallida"
 
     duracion_ms = int((time.time() - t0) * 1000)
     logger.info(f"MIGRACION completada nombre={nombre} duracion_ms={duracion_ms}")
+    return "completada"
 
 
 def aplicar_migraciones_pendientes():
     _asegurar_handler()
 
+    # Punto de partida de todo diagnóstico futuro: cuál DATABASE_PATH usa
+    # este proceso, y cuántas migraciones espera encontrar. Antes de esto
+    # no había ninguna línea de log que lo confirmara.
+    logger.info(
+        f"RUNNER inicio database_path={db.BASE_DATOS} migraciones_registradas={len(MIGRACIONES)} "
+        f"nombres={[nombre for nombre, _ in MIGRACIONES]}"
+    )
+    t_inicio_total = time.time()
+
     conexion = conectar()
     _asegurar_tabla_seguimiento(conexion)
     conexion.close()
 
+    resultados = {}
     for nombre, funcion in MIGRACIONES:
         try:
-            _procesar_una(nombre, funcion)
+            resultados[nombre] = _procesar_una(nombre, funcion)
         except Exception:
             # Red de seguridad final: si CUALQUIER paso de esta migración
             # -- incluido reclamar o liberar -- lanza algo no previsto
@@ -182,6 +222,28 @@ def aplicar_migraciones_pendientes():
                 f"MIGRACION error irrecuperable nombre={nombre} -- se sigue con las siguientes de la lista; "
                 "un reinicio del proceso la reintentará"
             )
+            resultados[nombre] = "error_irrecuperable"
+
+    duracion_total_ms = int((time.time() - t_inicio_total) * 1000)
+    completadas_o_ya_aplicadas = sum(1 for r in resultados.values() if r in ("completada", "saltada"))
+    fallidas = [nombre for nombre, r in resultados.items() if r not in ("completada", "saltada")]
+    total = len(MIGRACIONES)
+
+    # La línea a buscar en los logs para saber, de un vistazo, si el
+    # esquema quedó consistente: "RESUMEN N/N" significa que las N
+    # migraciones registradas están aplicadas (ahora o de antes). Un
+    # RESUMEN por debajo de N nombra exactamente cuáles faltan.
+    if fallidas:
+        logger.error(
+            f"RESUMEN {completadas_o_ya_aplicadas}/{total} migraciones aplicadas -- "
+            f"pendientes={fallidas} duracion_total_ms={duracion_total_ms}"
+        )
+    else:
+        logger.info(
+            f"RESUMEN {completadas_o_ya_aplicadas}/{total} migraciones aplicadas -- "
+            f"todas al día duracion_total_ms={duracion_total_ms}"
+        )
+    logger.info(f"RUNNER fin duracion_total_ms={duracion_total_ms}")
 
 
 if __name__ == "__main__":

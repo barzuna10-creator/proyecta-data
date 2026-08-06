@@ -56,6 +56,49 @@ class PruebaReclamo(unittest.TestCase):
         self.assertTrue(migraciones._reclamar(self.conexion, "una_migracion"))
 
 
+class PruebaOrden(unittest.TestCase):
+    def test_agregar_autenticacion_es_la_primera(self):
+        primer_nombre = migraciones.MIGRACIONES[0][0]
+        self.assertEqual(
+            primer_nombre,
+            "agregar_autenticacion",
+            "agregar_autenticacion no depende de ninguna otra migración -- no debe quedar "
+            "atrapada detrás de las que sí pueden tardar o fallar",
+        )
+
+
+class PruebaMigracionesCompletadas(unittest.TestCase):
+    def setUp(self):
+        archivo = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        archivo.close()
+        self.ruta_db = archivo.name
+        self._patch_conectar = mock.patch.object(
+            migraciones, "conectar", lambda: _conexion_temporal(self.ruta_db)
+        )
+        self._patch_conectar.start()
+
+    def tearDown(self):
+        self._patch_conectar.stop()
+        for sufijo in ("", "-wal", "-shm"):
+            try:
+                os.remove(self.ruta_db + sufijo)
+            except FileNotFoundError:
+                pass
+
+    def test_lista_vacia_si_la_tabla_de_seguimiento_no_existe_todavia(self):
+        self.assertEqual(migraciones.migraciones_completadas(), [])
+
+    def test_devuelve_los_nombres_ya_aplicados(self):
+        conexion = _conexion_temporal(self.ruta_db)
+        migraciones._asegurar_tabla_seguimiento(conexion)
+        migraciones._reclamar(conexion, "agregar_autenticacion")
+        migraciones._reclamar(conexion, "agregar_proyectos")
+        conexion.close()
+        self.assertEqual(
+            set(migraciones.migraciones_completadas()), {"agregar_autenticacion", "agregar_proyectos"}
+        )
+
+
 class PruebaOrquestacion(unittest.TestCase):
     """Reemplaza MIGRACIONES por un registro falso y conectar() por una
     fábrica de conexiones a un archivo temporal -- prueba el runner
@@ -133,6 +176,35 @@ class PruebaOrquestacion(unittest.TestCase):
         with mock.patch.object(migraciones, "MIGRACIONES", migracion_falsa):
             migraciones.aplicar_migraciones_pendientes()
         self.assertEqual(llamadas, ["sana"])
+
+    def test_resumen_final_reporta_las_pendientes_cuando_alguna_falla(self):
+        migracion_falsa = [
+            ("rota", lambda: (_ for _ in ()).throw(RuntimeError("siempre falla"))),
+            ("sana", lambda: None),
+        ]
+        with mock.patch.object(migraciones, "MIGRACIONES", migracion_falsa), mock.patch.object(
+            migraciones, "logger"
+        ) as logger_falso:
+            migraciones.aplicar_migraciones_pendientes()
+
+        mensajes_error = [llamada.args[0] for llamada in logger_falso.error.call_args_list]
+        self.assertTrue(
+            any(m.startswith("RESUMEN 1/2 migraciones aplicadas") and "pendientes=['rota']" in m for m in mensajes_error),
+            f"no se encontró la línea RESUMEN esperada entre: {mensajes_error}",
+        )
+
+    def test_resumen_final_reporta_todas_al_dia_cuando_no_hay_fallas(self):
+        migracion_falsa = [("sana", lambda: None)]
+        with mock.patch.object(migraciones, "MIGRACIONES", migracion_falsa), mock.patch.object(
+            migraciones, "logger"
+        ) as logger_falso:
+            migraciones.aplicar_migraciones_pendientes()
+
+        mensajes_info = [llamada.args[0] for llamada in logger_falso.info.call_args_list]
+        self.assertTrue(
+            any(m.startswith("RESUMEN 1/1 migraciones aplicadas") and "todas al día" in m for m in mensajes_info),
+            f"no se encontró la línea RESUMEN esperada entre: {mensajes_info}",
+        )
 
 
 class PruebaConcurrencia(unittest.TestCase):
