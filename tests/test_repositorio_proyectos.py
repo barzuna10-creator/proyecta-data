@@ -502,6 +502,62 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
 
         eliminar_proyecto(proyecto["id"], self.PROPIETARIO)
 
+    def test_listar_proyectos_totales_con_estados_y_precios_mixtos(self):
+        """RELEASE_CANDIDATE.md: listar_proyectos() pasó de N+1 consultas
+        (una por proyecto) a una sola consulta agregada -- esta prueba fija
+        el resultado EXACTO de _calcular_totales() para una mezcla real de
+        casos (pendiente con precio actual, pendiente con producto ya
+        borrado del catálogo -- cae a precio_al_agregar --, comprado,
+        descartado) para poder comparar antes/después del cambio de SQL
+        sin adivinar. Dos proyectos del mismo propietario, para confirmar
+        que los totales de uno no se mezclan con los del otro."""
+
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg",
+             "categoria": "Construcción", "precio": 5000},
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Cerámica 60x60",
+             "categoria": "Acabados", "precio": 8000},
+        ])
+
+        p1 = crear_proyecto(self.PROPIETARIO, "Proyecto totales 1")
+        pid1 = p1["id"]
+        agregar_item(pid1, self.PROPIETARIO, "EPA", "1", 3)  # pendiente, precio_actual=5000 -> 15000
+        p1 = agregar_item(pid1, self.PROPIETARIO, "EPA", "2", 2)  # se marca comprado abajo
+        item_comprado_id = next(i["id"] for i in p1["items"] if i["id_proveedor"] == "2")
+        actualizar_item(pid1, self.PROPIETARIO, item_comprado_id, {"estado": "comprado"})  # 2*8000=16000
+
+        p2 = crear_proyecto(self.PROPIETARIO, "Proyecto totales 2")
+        pid2 = p2["id"]
+        # Producto que después se elimina del catálogo -- precio_actual
+        # queda NULL, _calcular_totales debe caer a precio_al_agregar.
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "3", "nombre": "Producto que se descontinúa",
+             "categoria": "Varios", "precio": 3000},
+        ])
+        p2 = agregar_item(pid2, self.PROPIETARIO, "EPA", "3", 4)  # pendiente, 4*3000=12000 antes de borrar
+        item_descontinuado_id = p2["items"][0]["id"]
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.execute("DELETE FROM productos WHERE proveedor='EPA' AND id_proveedor='3'")
+        conexion.commit()
+        conexion.close()
+        # Ítem descartado -- no debe contar en ningún total ni en cantidad_items.
+        p2 = agregar_item(pid2, self.PROPIETARIO, "EPA", "1", 10)
+        item_descartado_id = next(i["id"] for i in p2["items"] if i["id_proveedor"] == "1")
+        actualizar_item(pid2, self.PROPIETARIO, item_descartado_id, {"estado": "descartado"})
+
+        resumenes = {r["id"]: r for r in listar_proyectos(self.PROPIETARIO)}
+
+        self.assertEqual(resumenes[pid1]["total_pendiente"], 15000)
+        self.assertEqual(resumenes[pid1]["total_comprado"], 16000)
+        self.assertEqual(resumenes[pid1]["cantidad_items"], 2)
+
+        self.assertEqual(resumenes[pid2]["total_pendiente"], 12000)  # precio_al_agregar, no NULL
+        self.assertEqual(resumenes[pid2]["total_comprado"], 0)
+        self.assertEqual(resumenes[pid2]["cantidad_items"], 1)  # el descartado no cuenta
+
+        eliminar_proyecto(pid1, self.PROPIETARIO)
+        eliminar_proyecto(pid2, self.PROPIETARIO)
+
     def test_proyecto_de_otro_propietario_no_se_puede_editar(self):
         proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto privado")
 

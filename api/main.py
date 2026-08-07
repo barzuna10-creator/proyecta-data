@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
@@ -19,57 +21,6 @@ from presupuestos import calcular_presupuesto as _calcular_presupuesto_motor
 from especificaciones import unidad_comercial as _unidad_comercial
 from database.respaldar_db import respaldar as _respaldar_db
 from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migraciones_pendientes
-
-app = FastAPI(
-    title="Proyecta CR API",
-    version="1.0"
-)
-
-# PRODUCTION_READINESS_REVIEW.md, hallazgo A7/H1: orígenes por defecto
-# iguales a los de siempre -- CORS_ORIGINS solo los reemplaza si está
-# seteada (coma-separados), para no tener que editar código y redesplegar
-# cada vez que se agrega un origen nuevo (ej. una nueva URL de preview).
-_ORIGENES_CORS_DEFECTO = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://proyecta-beta.vercel.app",
-]
-_origenes_cors_env = os.environ.get("CORS_ORIGINS")
-ORIGENES_CORS = (
-    [origen.strip() for origen in _origenes_cors_env.split(",") if origen.strip()]
-    if _origenes_cors_env
-    else _ORIGENES_CORS_DEFECTO
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ORIGENES_CORS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# BETA_1.0_CHECKLIST.md, hallazgos 1.1/8.2 (logging estructurado) y 8.1
-# (analítica mínima) -- ver api/observabilidad.py para por qué un solo
-# mecanismo resuelve ambos.
-app.middleware("http")(_middleware_logging)
-
-app.include_router(auth_router.router)
-app.include_router(feedback_router.router)
-app.include_router(proyectos.router)
-app.include_router(sistemas_constructivos.router)
-app.include_router(metricas_router.router)
-
-
-@app.on_event("shutdown")
-def _cerrar_executor_planos():
-    # Sin esto, el proceso worker que ProcessPoolExecutor deja abierto
-    # (ver api/repositorio_proyectos.py) sobrevive al proceso principal en
-    # un shutdown limpio -- inofensivo en producción (el orquestador mata
-    # el grupo de procesos entero), pero en desarrollo con --reload cada
-    # recarga dejaría un proceso huérfano más.
-    _EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
-
 
 # Investigación "no such table: usuarios" en producción: nada, en ningún
 # punto del despliegue, ejecutaba las migraciones de database/agregar_*.py
@@ -114,9 +65,63 @@ def _bucle_arranque_en_segundo_plano():
         time.sleep(INTERVALO_RESPALDO_SEGUNDOS)
 
 
-@app.on_event("startup")
-def _iniciar_tareas_en_segundo_plano():
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Reemplaza los antiguos @app.on_event("startup"/"shutdown") --
+    # deprecados en FastAPI reciente a favor de este único context
+    # manager (ver RELEASE_CANDIDATE.md). Mismo comportamiento exacto,
+    # solo el mecanismo de registro cambia: todo lo de antes de `yield`
+    # corría en "startup", todo lo de después corría en "shutdown".
     threading.Thread(target=_bucle_arranque_en_segundo_plano, daemon=True).start()
+    yield
+    # Sin esto, el proceso worker que ProcessPoolExecutor deja abierto
+    # (ver api/repositorio_proyectos.py) sobrevive al proceso principal en
+    # un shutdown limpio -- inofensivo en producción (el orquestador mata
+    # el grupo de procesos entero), pero en desarrollo con --reload cada
+    # recarga dejaría un proceso huérfano más.
+    _EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
+
+
+app = FastAPI(
+    title="Proyecta CR API",
+    version="1.0",
+    lifespan=_lifespan,
+)
+
+# PRODUCTION_READINESS_REVIEW.md, hallazgo A7/H1: orígenes por defecto
+# iguales a los de siempre -- CORS_ORIGINS solo los reemplaza si está
+# seteada (coma-separados), para no tener que editar código y redesplegar
+# cada vez que se agrega un origen nuevo (ej. una nueva URL de preview).
+_ORIGENES_CORS_DEFECTO = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://proyecta-beta.vercel.app",
+]
+_origenes_cors_env = os.environ.get("CORS_ORIGINS")
+ORIGENES_CORS = (
+    [origen.strip() for origen in _origenes_cors_env.split(",") if origen.strip()]
+    if _origenes_cors_env
+    else _ORIGENES_CORS_DEFECTO
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ORIGENES_CORS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# BETA_1.0_CHECKLIST.md, hallazgos 1.1/8.2 (logging estructurado) y 8.1
+# (analítica mínima) -- ver api/observabilidad.py para por qué un solo
+# mecanismo resuelve ambos.
+app.middleware("http")(_middleware_logging)
+
+app.include_router(auth_router.router)
+app.include_router(feedback_router.router)
+app.include_router(proyectos.router)
+app.include_router(sistemas_constructivos.router)
+app.include_router(metricas_router.router)
 
 # Etapa 2 del motor de búsqueda (ver busqueda.py): alterna entre el buscador
 # actual (LIKE + precio) y FTS5. Cambiar a False vuelve al buscador anterior

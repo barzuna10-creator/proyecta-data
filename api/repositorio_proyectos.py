@@ -1,6 +1,7 @@
 import json
 import multiprocessing
 import secrets
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,6 +9,7 @@ from datetime import datetime
 from db import conectar
 from busqueda import normalizar_texto
 from especificaciones import unidad_comercial as _unidad_comercial
+from api.observabilidad import logger as _logger, id_de_peticion_actual as _id_peticion
 from api.adaptador_planos import construir_analisis_plano
 from seleccion_automatica import (
     seleccionar_para_acabado as _seleccionar_para_acabado,
@@ -336,6 +338,16 @@ def crear_proyecto(propietario_id, nombre, comentario=None, fecha_objetivo=None)
 
 
 def listar_proyectos(propietario_id, incluir_archivados=False):
+    # RELEASE_CANDIDATE.md (rendimiento): antes hacía 1 consulta para la
+    # lista + 1 consulta extra POR proyecto (vía _obtener_items, con su
+    # propio JOIN a productos) solo para sumar total_pendiente/
+    # total_comprado -- un N+1 clásico. Ahora es una sola consulta
+    # agregada: mismo fallback de precio que _calcular_totales()
+    # (precio_actual del catálogo si existe, si no precio_al_agregar, si
+    # no 0 -- ver COALESCE) y mismo criterio de qué cuenta como
+    # pendiente/comprado/descartado. Cubierto por
+    # test_listar_proyectos_totales_con_estados_y_precios_mixtos, que fija
+    # el resultado exacto de la versión N+1 anterior como referencia.
     conexion = conectar()
 
     condicion = "" if incluir_archivados else "AND p.estado != 'archivado'"
@@ -344,10 +356,18 @@ def listar_proyectos(propietario_id, incluir_archivados=False):
         f"""
         SELECT
             p.id, p.nombre, p.cliente, p.estado, p.fecha_objetivo, p.fecha_actualizacion,
-            COUNT(i.id) AS cantidad_items
+            COUNT(CASE WHEN i.estado != 'descartado' THEN i.id END) AS cantidad_items,
+            COALESCE(SUM(
+                CASE WHEN i.estado = 'pendiente'
+                THEN i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0) END
+            ), 0) AS total_pendiente,
+            COALESCE(SUM(
+                CASE WHEN i.estado = 'comprado'
+                THEN i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0) END
+            ), 0) AS total_comprado
         FROM proyectos p
-        LEFT JOIN items_proyecto i
-            ON i.proyecto_id = p.id AND i.estado != 'descartado'
+        LEFT JOIN items_proyecto i ON i.proyecto_id = p.id
+        LEFT JOIN productos pr ON pr.proveedor = i.proveedor AND pr.id_proveedor = i.id_proveedor
         WHERE p.propietario_id = ? {condicion}
         GROUP BY p.id
         ORDER BY p.fecha_actualizacion DESC
@@ -358,10 +378,12 @@ def listar_proyectos(propietario_id, incluir_archivados=False):
     resumenes = []
     for fila in cursor.fetchall():
         resumen = dict(fila)
-        items = _obtener_items(conexion, resumen["id"])
-        total_pendiente, total_comprado = _calcular_totales(items)
-        resumen["total_pendiente"] = total_pendiente
-        resumen["total_comprado"] = total_comprado
+        # _calcular_totales() redondea con round() de Python (bankers'
+        # rounding) al final de la suma -- se replica acá para que el
+        # resultado sea idéntico al de la versión anterior, no solo
+        # "equivalente" (SUM ya viene en float desde SQLite).
+        resumen["total_pendiente"] = round(resumen["total_pendiente"])
+        resumen["total_comprado"] = round(resumen["total_comprado"])
         resumenes.append(resumen)
 
     conexion.close()
@@ -831,7 +853,13 @@ def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
     # pipe), no trabajo de CPU -- libera el GIL mientras espera, que es
     # justo lo que permite que el resto de la app siga respondiendo
     # mientras tanto (ver INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md).
+    inicio = time.perf_counter()
     analisis = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf).result()
+    duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
+    _logger.info(
+        f"ANALISIS_PLANO id={_id_peticion()} proyecto_id={proyecto_id} "
+        f"duracion_ms={duracion_ms} laminas={analisis.get('cantidad_laminas')}"
+    )
 
     ahora = _ahora()
     conexion.execute(
@@ -911,6 +939,7 @@ def generar_cotizacion_automatica(proyecto_id, propietario_id):
     analisis = json.loads(fila["plano_analisis"])
 
     resumen = {"agregados": 0, "sin_seleccion": 0}
+    inicio = time.perf_counter()
 
     for puerta in analisis.get("puertas", []):
         _procesar_material_plano(
@@ -943,6 +972,12 @@ def generar_cotizacion_automatica(proyecto_id, propietario_id):
             regla_generadora="computo_estructural", cantidad=pieza.get("cantidad") or 1,
             resumen=resumen,
         )
+
+    duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
+    _logger.info(
+        f"COTIZACION_AUTOMATICA id={_id_peticion()} proyecto_id={proyecto_id} "
+        f"duracion_ms={duracion_ms} agregados={resumen['agregados']} sin_seleccion={resumen['sin_seleccion']}"
+    )
 
     proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
     proyecto["cotizacion_automatica_resumen"] = resumen
