@@ -22,6 +22,8 @@ from api.routers.proyectos import (
     ActualizarItemRequest,
     ActualizarProyectoRequest,
     ReemplazarItemRequest,
+    congelar_presupuesto as congelar_presupuesto_router,
+    control_costos as control_costos_router,
     obtener_proyecto_compartido,
     reemplazar_item as reemplazar_item_router,
 )
@@ -209,6 +211,39 @@ class PruebaEndpointReemplazarItem(BasePruebaIntegracion):
 
         self.assertEqual(len(resultado["items"]), 1)
         self.assertEqual(resultado["items"][0]["id_proveedor"], "2")
+
+
+class PruebaEndpointsControlDeCostos(BasePruebaIntegracion):
+    """Endpoints nuevos (ver CONTROL_DE_COSTOS.md):
+    GET /proyectos/{id}/control-costos, POST /proyectos/{id}/presupuesto/congelar."""
+
+    def test_control_costos_devuelve_404_si_el_proyecto_no_existe(self):
+        with self.assertRaises(HTTPException) as contexto:
+            control_costos_router(999999, propietario_id=self.PROPIETARIO)
+        self.assertEqual(contexto.exception.status_code, 404)
+
+    def test_congelar_devuelve_404_si_el_proyecto_no_existe(self):
+        with self.assertRaises(HTTPException) as contexto:
+            congelar_presupuesto_router(999999, propietario_id=self.PROPIETARIO)
+        self.assertEqual(contexto.exception.status_code, 404)
+
+    def test_flujo_real_congelar_y_consultar(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg", "precio": 5000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto control de costos")
+        agregar_item(proyecto["id"], self.PROPIETARIO, "EPA", "1", 10)
+
+        sin_linea_base = control_costos_router(proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertFalse(sin_linea_base["tiene_linea_base"])
+
+        congelado = congelar_presupuesto_router(proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertTrue(congelado["tiene_linea_base"])
+        self.assertEqual(congelado["linea_base"]["total_final"], 50000)
+
+        con_linea_base = control_costos_router(proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertTrue(con_linea_base["tiene_linea_base"])
+        self.assertEqual(con_linea_base["estado"], "en_curso")
 
 
 if __name__ == "__main__":

@@ -278,6 +278,43 @@ def reemplazar_item(
     return proyecto
 
 
+@router.get("/{proyecto_id}/control-costos")
+def control_costos(
+    proyecto_id: int,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    """Control de Costos (ver CONTROL_DE_COSTOS.md): compara la línea base
+    de presupuesto congelada más reciente contra el gasto real acumulado
+    (mismo total_comprado que ya muestra el resumen de cotización).
+    Nunca inventa una línea base -- si el proyecto nunca se congeló,
+    tiene_linea_base viene en False y no hay nada que comparar todavía."""
+
+    resultado = repo.obtener_control_costos(proyecto_id, propietario_id)
+
+    if resultado is None:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return resultado
+
+
+@router.post("/{proyecto_id}/presupuesto/congelar")
+def congelar_presupuesto(
+    proyecto_id: int,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    """Aprueba el presupuesto actual como línea base de Control de Costos.
+    Se puede llamar más de una vez (ej. si el alcance cambió y se necesita
+    una nueva línea base) -- cada llamada agrega una fila nueva, ninguna
+    se sobreescribe (ver repo.congelar_presupuesto)."""
+
+    resultado = repo.congelar_presupuesto(proyecto_id, propietario_id)
+
+    if resultado is None:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return resultado
+
+
 @router.post("/{proyecto_id}/plano")
 def subir_plano(
     proyecto_id: int,

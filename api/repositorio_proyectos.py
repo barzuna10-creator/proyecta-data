@@ -429,6 +429,146 @@ def obtener_proyecto(proyecto_id=None, propietario_id=None, token=None):
     return proyecto
 
 
+# --- Control de Costos (ver CONTROL_DE_COSTOS.md) -----------------------
+#
+# "Congelar" el presupuesto guarda una foto de _calcular_cotizacion() en
+# una fila nueva de presupuesto_congelado -- nunca se sobreescribe una
+# línea base anterior (ver database/agregar_control_costos.py). La línea
+# base ACTIVA es, por diseño, la más reciente de un proyecto. El gasto
+# real reutiliza total_comprado tal cual ya lo calcula _calcular_totales
+# (el mismo número que ya se muestra en el resumen de cotización) -- este
+# módulo no introduce una segunda forma de calcular gasto, solo lo
+# compara contra una línea base.
+
+
+def _resumen_partidas_para_congelar(partidas):
+    """Versión liviana de cada partida para guardar en el snapshot --
+    nombre/cantidad/precio unitario de cada ítem, no la fila completa
+    (imágenes, urls, trazabilidad) que _calcular_cotizacion() trae para
+    la vista en vivo y que acá no aporta nada a una comparación histórica
+    de montos."""
+
+    resumen = []
+    for grupo in partidas:
+        items_resumidos = []
+        for item in grupo["items"]:
+            precio = item["precio_actual"]
+            if precio is None:
+                precio = item["precio_al_agregar"] or 0
+            items_resumidos.append({
+                "nombre": item["nombre"],
+                "cantidad": item["cantidad"],
+                "precio_unitario": precio,
+            })
+        resumen.append({
+            "partida": grupo["partida"],
+            "subtotal": grupo["subtotal"],
+            "items": items_resumidos,
+        })
+    return resumen
+
+
+def congelar_presupuesto(proyecto_id, propietario_id):
+    """Guarda la cotización actual del proyecto como línea base de Control
+    de Costos. Devuelve el control de costos resultante (equivalente a
+    llamar obtener_control_costos() justo después), o None si el proyecto
+    no existe o no pertenece a propietario_id."""
+
+    proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+    if proyecto is None:
+        return None
+
+    cotizacion = proyecto["cotizacion"]
+
+    conexion = conectar()
+    conexion.execute(
+        """
+        INSERT INTO presupuesto_congelado (
+            proyecto_id, fecha_creacion, subtotal_materiales,
+            indirectos, imprevistos, margen, total_final, snapshot_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            proyecto_id,
+            _ahora(),
+            cotizacion["subtotal_materiales"],
+            cotizacion["indirectos"],
+            cotizacion["imprevistos"],
+            cotizacion["margen"],
+            cotizacion["total_final"],
+            json.dumps(_resumen_partidas_para_congelar(cotizacion["partidas"]), ensure_ascii=False),
+        ),
+    )
+    conexion.commit()
+    conexion.close()
+
+    return obtener_control_costos(proyecto_id, propietario_id)
+
+
+def obtener_control_costos(proyecto_id, propietario_id):
+    """Compara la línea base congelada más reciente (si existe) contra el
+    gasto real acumulado hoy. Sin línea base todavía, devuelve
+    tiene_linea_base=False y solo el gasto real -- nunca se inventa un
+    "presupuestado" de cero para poder mostrar una comparación."""
+
+    proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+    if proyecto is None:
+        return None
+
+    gasto_real = proyecto["total_comprado"]
+
+    conexion = conectar()
+    fila = conexion.execute(
+        """
+        SELECT id, fecha_creacion, subtotal_materiales, indirectos,
+               imprevistos, margen, total_final, snapshot_json
+        FROM presupuesto_congelado
+        WHERE proyecto_id = ?
+        ORDER BY fecha_creacion DESC, id DESC
+        LIMIT 1
+        """,
+        (proyecto_id,),
+    ).fetchone()
+    conexion.close()
+
+    if fila is None:
+        return {
+            "tiene_linea_base": False,
+            "linea_base": None,
+            "gasto_real": gasto_real,
+            "saldo_disponible": None,
+            "porcentaje_ejecutado": None,
+            "estado": None,
+        }
+
+    linea_base = dict(fila)
+    snapshot_bruto = linea_base.pop("snapshot_json")
+    try:
+        linea_base["partidas"] = json.loads(snapshot_bruto)
+    except (ValueError, TypeError):
+        linea_base["partidas"] = []
+
+    total_presupuestado = linea_base["total_final"]
+    saldo_disponible = round(total_presupuestado - gasto_real, 2)
+    porcentaje_ejecutado = round((gasto_real / total_presupuestado) * 100, 2) if total_presupuestado else 0
+
+    if gasto_real > total_presupuestado:
+        estado = "excedido"
+    elif total_presupuestado and porcentaje_ejecutado >= 90:
+        estado = "por_agotarse"
+    else:
+        estado = "en_curso"
+
+    return {
+        "tiene_linea_base": True,
+        "linea_base": linea_base,
+        "gasto_real": gasto_real,
+        "saldo_disponible": saldo_disponible,
+        "porcentaje_ejecutado": porcentaje_ejecutado,
+        "estado": estado,
+    }
+
+
 def actualizar_proyecto(proyecto_id, propietario_id, cambios):
     campos_validos = {
         "nombre", "comentario", "estado", "fecha_objetivo",

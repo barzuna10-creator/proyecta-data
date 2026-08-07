@@ -79,6 +79,7 @@ import database.agregar_trazabilidad_items as _m_trazabilidad_items
 import database.agregar_autenticacion as _m_autenticacion
 import database.agregar_seleccion_automatica as _m_seleccion_automatica
 import database.agregar_eventos as _m_eventos
+import database.agregar_control_costos as _m_control_costos
 
 # agregar_autenticacion primero, a propósito, fuera del orden histórico
 # real de introducción: no depende de proyectos/productos/nada de las
@@ -109,6 +110,10 @@ MIGRACIONES = [
     # no depende de ninguna de las anteriores, va al final solo por orden
     # histórico de introducción, igual que el resto.
     ("agregar_eventos", _m_eventos.main),
+    # Tabla nueva, sin llave foránea (ver database/agregar_control_costos.py)
+    # -- no depende de ninguna de las anteriores, va al final por el mismo
+    # criterio que agregar_eventos.
+    ("agregar_control_costos", _m_control_costos.main),
 ]
 
 

@@ -358,6 +358,21 @@ def _crear_db_temporal():
         )
         """
     )
+    conexion.execute(
+        """
+        CREATE TABLE presupuesto_congelado (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proyecto_id INTEGER NOT NULL,
+            fecha_creacion TEXT NOT NULL,
+            subtotal_materiales REAL NOT NULL,
+            indirectos REAL NOT NULL,
+            imprevistos REAL NOT NULL,
+            margen REAL NOT NULL,
+            total_final REAL NOT NULL,
+            snapshot_json TEXT NOT NULL
+        )
+        """
+    )
     conexion.commit()
     conexion.close()
     return archivo.name
