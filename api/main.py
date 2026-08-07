@@ -13,6 +13,7 @@ from api.repositorio_proyectos import apagar_executor_planos, recuperar_analisis
 from api.routers import auth as auth_router, feedback as feedback_router, metricas as metricas_router, proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
 from api.observabilidad import logger as _logger, middleware_logging as _middleware_logging
+from id_producto import id_producto_a_url as _id_producto_a_url
 from busqueda import buscar_fts as _buscar_fts_motor
 from familias import analizar_nombre as _analizar_nombre_familia
 from reranking import reordenar as _reordenar_resultados
@@ -388,6 +389,46 @@ def productos_similares(proveedor: str, id_proveedor: str, limite: int = _LIMITE
     resultados = _obtener_similares_motor(proveedor, id_proveedor, limite=limite)
 
     return [_serializar_producto(r) for r in resultados]
+
+
+# RELEASE_CANDIDATE.md: antes /producto/{id} en el frontend solo se podía
+# resolver desde sessionStorage (poblado al navegar desde resultados de
+# búsqueda) -- un link compartido, recargado, o abierto en pestaña nueva
+# siempre mostraba "Producto no disponible", indistinguible de un
+# producto realmente eliminado. Este endpoint permite reconstruir
+# CUALQUIER url /producto/{id} válida directamente desde el catálogo,
+# sin depender de qué haya (o no) en el navegador de quien lo abre. Va
+# DESPUÉS de /productos/similares a propósito -- FastAPI resuelve rutas
+# en el orden en que se registran, y una ruta dinámica /productos/{id}
+# antes de la estática /productos/similares capturaría "similares" como
+# si fuera un id.
+@app.get("/productos/{id}")
+def producto_por_id(id: str):
+    url_producto = _id_producto_a_url(id)
+    if url_producto is None:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+    conexion = conectar()
+    fila = conexion.execute(
+        """
+        SELECT
+            p.nombre, p.precio, p.categoria, p.proveedor,
+            p.id_proveedor, p.url_producto, p.url_imagen,
+            p.marca, p.sku, p.subcategoria, p.descripcion,
+            p.peso, p.imagenes_adicionales,
+            p.familia_id, f.nombre_familia
+        FROM productos p
+        LEFT JOIN familias_producto f ON f.id = p.familia_id
+        WHERE p.url_producto = ?
+        """,
+        (url_producto,),
+    ).fetchone()
+    conexion.close()
+
+    if not fila:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+    return _serializar_producto(fila)
 
 
 @app.get("/proyectos/{proyecto_id}/presupuesto")

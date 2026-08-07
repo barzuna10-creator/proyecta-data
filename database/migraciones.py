@@ -82,6 +82,7 @@ import database.agregar_eventos as _m_eventos
 import database.agregar_control_costos as _m_control_costos
 import database.agregar_compras as _m_compras
 import database.agregar_plano_estado as _m_plano_estado
+import database.agregar_indice_url_producto as _m_indice_url_producto
 
 # agregar_autenticacion primero, a propósito, fuera del orden histórico
 # real de introducción: no depende de proyectos/productos/nada de las
@@ -124,6 +125,11 @@ MIGRACIONES = [
     # plano en proyectos) -- va justo después de esa por dependencia
     # directa, sin urgencia de arranque (ver database/agregar_plano_estado.py).
     ("agregar_plano_estado", _m_plano_estado.main),
+    # Índice sobre una columna que ya existe en productos -- no depende de
+    # ninguna de las anteriores (ver database/agregar_indice_url_producto.py,
+    # RELEASE_CANDIDATE.md). Reconciled forward from local main's f125373
+    # during the M3-prep repository-lineage reconciliation.
+    ("agregar_indice_url_producto", _m_indice_url_producto.main),
 ]
 
 
