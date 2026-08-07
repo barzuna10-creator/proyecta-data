@@ -76,7 +76,13 @@ def _procesar_plano_pdf(ruta_pdf):
     return construir_analisis_plano(proyecto_leido, modelo_edificio, cuadros, computo_estructural)
 
 ESTADOS_PROYECTO = {"activo", "completado", "archivado"}
-ESTADOS_ITEM = {"pendiente", "comprado", "descartado"}
+# "parcial" (ver COMPRAS.md) se llega solo a través de registrar_compra_item
+# -- no es una opción que el selector genérico de estado del frontend
+# ofrezca a mano, porque sin una cantidad_comprada real asociada no
+# significa nada. Queda en el set igual porque actualizar_item() valida
+# contra él, y un valor que la propia app puede escribir nunca debería
+# rechazar su propia escritura.
+ESTADOS_ITEM = {"pendiente", "parcial", "comprado", "descartado"}
 
 # De dónde puede venir un ítem agregado a un proyecto (ver
 # AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §1: "nunca se guarda de dónde
@@ -165,20 +171,37 @@ def _generar_token():
 
 
 def _calcular_totales(items):
+    """total_comprado es también el "gasto real" que lee Control de
+    Costos (ver CONTROL_DE_COSTOS.md) -- esta sigue siendo la ÚNICA
+    función que lo calcula, Compras (ver COMPRAS.md) no agrega una
+    segunda. Con Compras, un ítem "parcial" divide su costo entre lo ya
+    gastado (monto_comprado real si se registró uno, o cantidad_comprada
+    × precio si no) y lo que falta por comprar (el resto, a precio de
+    catálogo) -- exactamente el mismo criterio de fallback
+    (monto real > estimado por precio) que ya usaba "comprado" antes de
+    Compras, solo que ahora también se aplica a la porción parcial."""
+
     total_pendiente = 0
     total_comprado = 0
 
     for item in items:
+        if item["estado"] == "descartado":
+            continue
+
         precio = item["precio_actual"]
         if precio is None:
             precio = item["precio_al_agregar"] or 0
 
-        subtotal = item["cantidad"] * precio
-
         if item["estado"] == "comprado":
-            total_comprado += subtotal
-        elif item["estado"] != "descartado":
-            total_pendiente += subtotal
+            monto = item.get("monto_comprado")
+            total_comprado += monto if monto is not None else item["cantidad"] * precio
+        elif item["estado"] == "parcial":
+            monto = item.get("monto_comprado")
+            cantidad_comprada = item.get("cantidad_comprada") or 0
+            total_comprado += monto if monto is not None else cantidad_comprada * precio
+            total_pendiente += max(item["cantidad"] - cantidad_comprada, 0) * precio
+        else:
+            total_pendiente += item["cantidad"] * precio
 
     return round(total_pendiente), round(total_comprado)
 
@@ -286,6 +309,8 @@ def _obtener_items(conexion, proyecto_id):
             i.origen, i.pagina_fuente, i.lamina_fuente, i.texto_original,
             i.confianza, i.regla_generadora,
             i.confianza_match, i.revisado,
+            i.cantidad_comprada, i.monto_comprado, i.fecha_compra,
+            i.comprobante_tipo, i.comprobante_referencia,
             COALESCE(pr.nombre, i.nombre_al_agregar) AS nombre,
             COALESCE(pr.marca, i.marca_al_agregar) AS marca,
             COALESCE(pr.categoria, i.categoria_al_agregar) AS categoria,
@@ -569,6 +594,222 @@ def obtener_control_costos(proyecto_id, propietario_id):
     }
 
 
+# --- Compras (ver COMPRAS.md) --------------------------------------------
+#
+# Agrupa lo que todavía falta comprar por proveedor (para poder pedirlo
+# todo de una ferretería de una vez), genera un documento de orden de
+# compra por proveedor, y registra compras reales -- totales o
+# parciales -- contra cada ítem. El gasto real sigue viviendo
+# EXCLUSIVAMENTE en _calcular_totales() (ver su docstring, actualizado
+# para "parcial"): Compras nunca calcula un segundo total de gasto, solo
+# escribe los datos (cantidad_comprada/monto_comprado/estado) que esa
+# función ya sabe leer -- así Control de Costos se actualiza solo, sin
+# que este módulo tenga que llamarlo ni saber que existe.
+
+
+def _agrupar_por_proveedor(items):
+    """Solo ítems con algo pendiente de comprar (pendiente o parcial) --
+    lo ya comprado no tiene nada que hacer en una orden de compra nueva,
+    y lo descartado ya se excluye en todo el resto del sistema. El
+    subtotal es sobre la cantidad TODAVÍA pendiente (cantidad -
+    cantidad_comprada), no la cantidad total del ítem -- una orden de
+    compra pide lo que falta, no lo que ya se compró."""
+
+    grupos = {}
+
+    for item in items:
+        if item["estado"] not in ("pendiente", "parcial"):
+            continue
+
+        cantidad_pendiente = max(item["cantidad"] - (item.get("cantidad_comprada") or 0), 0)
+        if cantidad_pendiente <= 0:
+            continue
+
+        precio = item["precio_actual"]
+        if precio is None:
+            precio = item["precio_al_agregar"] or 0
+
+        grupo = grupos.setdefault(
+            item["proveedor"], {"proveedor": item["proveedor"], "items": [], "subtotal": 0}
+        )
+        grupo["items"].append({**item, "cantidad_pendiente": cantidad_pendiente})
+        grupo["subtotal"] += cantidad_pendiente * precio
+
+    for grupo in grupos.values():
+        grupo["subtotal"] = round(grupo["subtotal"], 2)
+
+    return sorted(grupos.values(), key=lambda g: g["proveedor"])
+
+
+def obtener_compras(proyecto_id, propietario_id):
+    """Materiales pendientes agrupados por proveedor + historial de
+    órdenes de compra ya generadas (más reciente primero)."""
+
+    proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+    if proyecto is None:
+        return None
+
+    conexion = conectar()
+    filas = conexion.execute(
+        """
+        SELECT id, proveedor, numero, fecha_creacion, monto_total, snapshot_json
+        FROM ordenes_compra
+        WHERE proyecto_id = ?
+        ORDER BY fecha_creacion DESC, id DESC
+        """,
+        (proyecto_id,),
+    ).fetchall()
+    conexion.close()
+
+    ordenes = []
+    for fila in filas:
+        orden = dict(fila)
+        snapshot_bruto = orden.pop("snapshot_json")
+        try:
+            orden["items"] = json.loads(snapshot_bruto)
+        except (ValueError, TypeError):
+            orden["items"] = []
+        ordenes.append(orden)
+
+    return {
+        "pendientes_por_proveedor": _agrupar_por_proveedor(proyecto["items"]),
+        "ordenes_generadas": ordenes,
+    }
+
+
+def generar_orden_compra(proyecto_id, propietario_id, proveedor):
+    """Genera un documento de orden de compra nuevo con TODO lo
+    pendiente de `proveedor` en este momento -- inmutable una vez creado
+    (mismo criterio que presupuesto_congelado: un evento histórico, no un
+    estado que se edita). Generar una orden no cambia el estado de
+    ningún ítem -- es un documento para enviarle al proveedor, no un
+    registro de que ya se compró (eso lo hace registrar_compra_item)."""
+
+    proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+    if proyecto is None:
+        return None
+
+    grupo = next(
+        (g for g in _agrupar_por_proveedor(proyecto["items"]) if g["proveedor"] == proveedor),
+        None,
+    )
+    if grupo is None:
+        raise ValueError(f"No hay materiales pendientes de {proveedor} en este proyecto")
+
+    conexion = conectar()
+    cantidad_previas = conexion.execute(
+        "SELECT COUNT(*) FROM ordenes_compra WHERE proyecto_id = ?", (proyecto_id,)
+    ).fetchone()[0]
+    numero = f"OC-{proyecto_id}-{cantidad_previas + 1}"
+
+    items_snapshot = [
+        {
+            "nombre": item["nombre"],
+            "cantidad": item["cantidad_pendiente"],
+            "precio_unitario": (
+                item["precio_actual"] if item["precio_actual"] is not None
+                else (item["precio_al_agregar"] or 0)
+            ),
+        }
+        for item in grupo["items"]
+    ]
+
+    conexion.execute(
+        """
+        INSERT INTO ordenes_compra (proyecto_id, proveedor, numero, fecha_creacion, monto_total, snapshot_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            proyecto_id, proveedor, numero, _ahora(), grupo["subtotal"],
+            json.dumps(items_snapshot, ensure_ascii=False),
+        ),
+    )
+    conexion.commit()
+    conexion.close()
+
+    return obtener_compras(proyecto_id, propietario_id)
+
+
+def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=None, fecha=None, comprobante_referencia=None):
+    """Registra una compra real -- total o parcial -- contra un ítem.
+
+    `cantidad` es lo que se compró EN ESTE registro (no el acumulado
+    total) -- se SUMA a cantidad_comprada. Igual `monto`: si se da (el
+    monto real pagado, que puede diferir del precio de catálogo por
+    fluctuación de precio o descuento real del proveedor), se suma a
+    monto_comprado; si no se da, se estima como cantidad × precio y se
+    suma igual, para que _calcular_totales() siempre tenga un
+    monto_comprado utilizable sin importar si el usuario lo indicó a
+    mano.
+
+    Si `cantidad` excede lo que todavía falta por comprar, se recorta a
+    lo pendiente -- un error de dedo (1000 en vez de 100) no debe poder
+    dejar cantidad_comprada por encima de cantidad, un estado que el
+    resto del sistema no sabría interpretar con sentido.
+
+    `comprobante_referencia` (ver COMPRAS.md, integración de facturas):
+    texto libre para el número de factura/comprobante -- carga manual
+    asistida, todavía sin lectura automática de ningún formato."""
+
+    if cantidad is None or cantidad <= 0:
+        raise ValueError("La cantidad comprada debe ser mayor a cero")
+    if monto is not None and monto < 0:
+        raise ValueError("El monto no puede ser negativo")
+
+    conexion = conectar()
+
+    item = conexion.execute(
+        """
+        SELECT i.id, i.cantidad, i.cantidad_comprada, i.monto_comprado, i.precio_al_agregar,
+               pr.precio AS precio_actual
+        FROM items_proyecto i
+        JOIN proyectos p ON p.id = i.proyecto_id
+        LEFT JOIN productos pr ON pr.proveedor = i.proveedor AND pr.id_proveedor = i.id_proveedor
+        WHERE i.id = ? AND i.proyecto_id = ? AND p.propietario_id = ?
+        """,
+        (item_id, proyecto_id, propietario_id),
+    ).fetchone()
+
+    if item is None:
+        conexion.close()
+        return None
+
+    precio = item["precio_actual"] if item["precio_actual"] is not None else (item["precio_al_agregar"] or 0)
+    cantidad_pendiente = max(item["cantidad"] - (item["cantidad_comprada"] or 0), 0)
+    cantidad_efectiva = min(cantidad, cantidad_pendiente)
+
+    if cantidad_efectiva <= 0:
+        conexion.close()
+        raise ValueError("Este ítem ya está completamente comprado")
+
+    monto_efectivo = monto if monto is not None else round(cantidad_efectiva * precio, 2)
+
+    nueva_cantidad_comprada = round((item["cantidad_comprada"] or 0) + cantidad_efectiva, 4)
+    nuevo_monto_comprado = round((item["monto_comprado"] or 0) + monto_efectivo, 2)
+    nuevo_estado = "comprado" if nueva_cantidad_comprada >= item["cantidad"] else "parcial"
+
+    conexion.execute(
+        """
+        UPDATE items_proyecto
+        SET cantidad_comprada = ?, monto_comprado = ?, fecha_compra = ?,
+            estado = ?, comprobante_tipo = 'manual',
+            comprobante_referencia = COALESCE(?, comprobante_referencia)
+        WHERE id = ?
+        """,
+        (
+            nueva_cantidad_comprada, nuevo_monto_comprado, fecha or _ahora(),
+            nuevo_estado, comprobante_referencia, item_id,
+        ),
+    )
+    conexion.execute(
+        "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?", (_ahora(), proyecto_id)
+    )
+    conexion.commit()
+    conexion.close()
+
+    return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+
+
 def actualizar_proyecto(proyecto_id, propietario_id, cambios):
     campos_validos = {
         "nombre", "comentario", "estado", "fecha_objetivo",
@@ -757,21 +998,38 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
         conexion.close()
         return None
 
-    # Leído ANTES del UPDATE, y solo cuando de verdad podría ser una
-    # aceptación (revisado pasando a True) -- es la única forma de saber
+    # Leído ANTES del UPDATE cuando podría ser una aceptación (revisado
+    # pasando a True) o un cambio de estado -- es la única forma de saber
     # si esto es una transición real de 0 a 1 (una "aceptación" de
-    # verdad) o un PATCH redundante sobre un ítem que ya estaba
-    # revisado=1 (nunca debe registrar un segundo evento por lo mismo).
+    # verdad, no un PATCH redundante) y, para estado, la cantidad total
+    # del ítem (ver Compras más abajo).
     item_previo = None
-    if cambios.get("revisado"):
+    if cambios.get("revisado") or "estado" in cambios:
         item_previo = conexion.execute(
             """
             SELECT revisado, origen, confianza_match, proveedor, id_proveedor,
-                   categoria_al_agregar, texto_original, fecha_agregado
+                   categoria_al_agregar, texto_original, fecha_agregado, cantidad
             FROM items_proyecto WHERE id = ? AND proyecto_id = ?
             """,
             (item_id, proyecto_id),
         ).fetchone()
+
+    # Compras (ver COMPRAS.md): el selector rápido de estado sigue
+    # funcionando exactamente como antes de Compras -- "comprado" acá
+    # significa "se compró todo, sin un monto real registrado todavía"
+    # (mismo fallback cantidad×precio que _calcular_totales ya usaba);
+    # "pendiente" limpia cualquier rastro de una compra parcial anterior.
+    # "parcial" nunca se llega por acá -- solo vía registrar_compra_item,
+    # porque sin una cantidad real asociada no significa nada.
+    if item_previo is not None and cambios.get("estado") in ("comprado", "pendiente"):
+        if cambios["estado"] == "comprado":
+            cambios["cantidad_comprada"] = cambios.get("cantidad", item_previo["cantidad"])
+            cambios["monto_comprado"] = None
+            cambios["fecha_compra"] = _ahora()
+        else:
+            cambios["cantidad_comprada"] = 0
+            cambios["monto_comprado"] = None
+            cambios["fecha_compra"] = None
 
     if cambios:
         asignaciones = ", ".join(f"{campo} = ?" for campo in cambios)

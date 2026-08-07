@@ -80,6 +80,7 @@ import database.agregar_autenticacion as _m_autenticacion
 import database.agregar_seleccion_automatica as _m_seleccion_automatica
 import database.agregar_eventos as _m_eventos
 import database.agregar_control_costos as _m_control_costos
+import database.agregar_compras as _m_compras
 
 # agregar_autenticacion primero, a propósito, fuera del orden histórico
 # real de introducción: no depende de proyectos/productos/nada de las
@@ -114,6 +115,10 @@ MIGRACIONES = [
     # -- no depende de ninguna de las anteriores, va al final por el mismo
     # criterio que agregar_eventos.
     ("agregar_control_costos", _m_control_costos.main),
+    # Depende de items_proyecto (agregar_proyectos) -- va al final por el
+    # mismo criterio que el resto de las ALTER TABLE sin urgencia de
+    # arranque (ver database/agregar_compras.py).
+    ("agregar_compras", _m_compras.main),
 ]
 
 

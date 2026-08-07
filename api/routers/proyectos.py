@@ -77,6 +77,17 @@ class ReemplazarItemRequest(BaseModel):
     cantidad: float | None = Field(default=None, gt=0, le=1_000_000)
 
 
+class GenerarOrdenCompraRequest(BaseModel):
+    proveedor: str = Field(min_length=1)
+
+
+class RegistrarCompraRequest(BaseModel):
+    cantidad: float = Field(gt=0, le=1_000_000)
+    monto: float | None = Field(default=None, ge=0)
+    fecha: str | None = None
+    comprobante_referencia: str | None = None
+
+
 class ActualizarItemRequest(BaseModel):
     cantidad: float | None = Field(default=None, gt=0, le=1_000_000)
     estado: str | None = None
@@ -313,6 +324,72 @@ def congelar_presupuesto(
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
 
     return resultado
+
+
+@router.get("/{proyecto_id}/compras")
+def compras(
+    proyecto_id: int,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    """Flujo de Compras (ver COMPRAS.md): materiales pendientes
+    agrupados por proveedor + historial de órdenes de compra ya
+    generadas."""
+
+    resultado = repo.obtener_compras(proyecto_id, propietario_id)
+
+    if resultado is None:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return resultado
+
+
+@router.post("/{proyecto_id}/compras/ordenes")
+def generar_orden_compra(
+    proyecto_id: int,
+    body: GenerarOrdenCompraRequest,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    """Genera un documento de orden de compra con todo lo pendiente de
+    un proveedor en este momento. 422 si ese proveedor no tiene nada
+    pendiente en el proyecto (nunca se genera una orden vacía)."""
+
+    try:
+        resultado = repo.generar_orden_compra(proyecto_id, propietario_id, body.proveedor)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+
+    if resultado is None:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    return resultado
+
+
+@router.post("/{proyecto_id}/items/{item_id}/registrar-compra")
+def registrar_compra_item(
+    proyecto_id: int,
+    item_id: int,
+    body: RegistrarCompraRequest,
+    propietario_id: str = Depends(obtener_propietario_id),
+):
+    """Registra una compra real -- total o parcial -- contra un ítem, y
+    con eso actualiza Control de Costos automáticamente (ver
+    repo.registrar_compra_item -- el gasto real siempre se recalcula en
+    vivo desde items_proyecto, este endpoint no toca Control de Costos
+    directamente)."""
+
+    try:
+        proyecto = repo.registrar_compra_item(
+            proyecto_id, propietario_id, item_id,
+            body.cantidad, monto=body.monto, fecha=body.fecha,
+            comprobante_referencia=body.comprobante_referencia,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+
+    if proyecto is None:
+        raise HTTPException(status_code=404, detail="Proyecto o ítem no encontrado")
+
+    return proyecto
 
 
 @router.post("/{proyecto_id}/plano")

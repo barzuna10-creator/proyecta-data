@@ -332,6 +332,11 @@ def _crear_db_temporal():
             regla_generadora TEXT,
             confianza_match TEXT,
             revisado INTEGER NOT NULL DEFAULT 1,
+            cantidad_comprada REAL NOT NULL DEFAULT 0,
+            monto_comprado REAL,
+            fecha_compra TEXT,
+            comprobante_tipo TEXT,
+            comprobante_referencia TEXT,
             UNIQUE(proyecto_id, proveedor, id_proveedor)
         )
         """
@@ -355,6 +360,19 @@ def _crear_db_temporal():
             tiempo_hasta_decision_segundos REAL,
             datos_extra TEXT,
             fecha_creacion TEXT NOT NULL
+        )
+        """
+    )
+    conexion.execute(
+        """
+        CREATE TABLE ordenes_compra (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proyecto_id INTEGER NOT NULL,
+            proveedor TEXT NOT NULL,
+            numero TEXT NOT NULL,
+            fecha_creacion TEXT NOT NULL,
+            monto_total REAL NOT NULL,
+            snapshot_json TEXT NOT NULL
         )
         """
     )

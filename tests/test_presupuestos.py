@@ -267,6 +267,11 @@ def _crear_db_temporal():
             regla_generadora TEXT,
             confianza_match TEXT,
             revisado INTEGER NOT NULL DEFAULT 1,
+            cantidad_comprada REAL NOT NULL DEFAULT 0,
+            monto_comprado REAL,
+            fecha_compra TEXT,
+            comprobante_tipo TEXT,
+            comprobante_referencia TEXT,
             UNIQUE(proyecto_id, proveedor, id_proveedor)
         )
         """

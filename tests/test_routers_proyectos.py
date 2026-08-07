@@ -21,10 +21,15 @@ from api.routers.proyectos import (
     AgregarItemRequest,
     ActualizarItemRequest,
     ActualizarProyectoRequest,
+    GenerarOrdenCompraRequest,
+    RegistrarCompraRequest,
     ReemplazarItemRequest,
+    compras as compras_router,
     congelar_presupuesto as congelar_presupuesto_router,
     control_costos as control_costos_router,
+    generar_orden_compra as generar_orden_compra_router,
     obtener_proyecto_compartido,
+    registrar_compra_item as registrar_compra_item_router,
     reemplazar_item as reemplazar_item_router,
 )
 from tests.test_repositorio_proyectos import BasePruebaIntegracion
@@ -244,6 +249,62 @@ class PruebaEndpointsControlDeCostos(BasePruebaIntegracion):
         con_linea_base = control_costos_router(proyecto["id"], propietario_id=self.PROPIETARIO)
         self.assertTrue(con_linea_base["tiene_linea_base"])
         self.assertEqual(con_linea_base["estado"], "en_curso")
+
+
+class PruebaEndpointsCompras(BasePruebaIntegracion):
+    """Endpoints nuevos (ver COMPRAS.md): GET /proyectos/{id}/compras,
+    POST /proyectos/{id}/compras/ordenes,
+    POST /proyectos/{id}/items/{item_id}/registrar-compra."""
+
+    def test_compras_devuelve_404_si_el_proyecto_no_existe(self):
+        with self.assertRaises(HTTPException) as contexto:
+            compras_router(999999, propietario_id=self.PROPIETARIO)
+        self.assertEqual(contexto.exception.status_code, 404)
+
+    def test_generar_orden_devuelve_422_si_el_proveedor_no_tiene_pendientes(self):
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto sin materiales")
+        with self.assertRaises(HTTPException) as contexto:
+            generar_orden_compra_router(
+                proyecto["id"], GenerarOrdenCompraRequest(proveedor="EPA"),
+                propietario_id=self.PROPIETARIO,
+            )
+        self.assertEqual(contexto.exception.status_code, 422)
+
+    def test_registrar_compra_devuelve_404_si_el_item_no_existe(self):
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto registrar compra fantasma")
+        with self.assertRaises(HTTPException) as contexto:
+            registrar_compra_item_router(
+                proyecto["id"], 999999, RegistrarCompraRequest(cantidad=1),
+                propietario_id=self.PROPIETARIO,
+            )
+        self.assertEqual(contexto.exception.status_code, 404)
+
+    def test_flujo_real_agrupar_generar_orden_y_registrar_compra(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg", "precio": 5000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto flujo de compras")
+        proyecto = agregar_item(proyecto["id"], self.PROPIETARIO, "EPA", "1", 10)
+        pid = proyecto["id"]
+        item_id = proyecto["items"][0]["id"]
+
+        compras = compras_router(pid, propietario_id=self.PROPIETARIO)
+        self.assertEqual(len(compras["pendientes_por_proveedor"]), 1)
+
+        orden = generar_orden_compra_router(
+            pid, GenerarOrdenCompraRequest(proveedor="EPA"), propietario_id=self.PROPIETARIO
+        )
+        self.assertEqual(len(orden["ordenes_generadas"]), 1)
+        self.assertEqual(orden["ordenes_generadas"][0]["monto_total"], 50000)
+
+        actualizado = registrar_compra_item_router(
+            pid, item_id, RegistrarCompraRequest(cantidad=4, comprobante_referencia="FAC-1"),
+            propietario_id=self.PROPIETARIO,
+        )
+        item = actualizado["items"][0]
+        self.assertEqual(item["estado"], "parcial")
+        self.assertEqual(item["cantidad_comprada"], 4)
+        self.assertEqual(item["comprobante_referencia"], "FAC-1")
 
 
 if __name__ == "__main__":
