@@ -12,6 +12,7 @@ tests/test_similares.py, nunca contra database/proyecta.db).
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -98,6 +99,33 @@ def _crear_db_temporal():
     return archivo.name
 
 
+def _crear_db_temporal_como_produccion():
+    """Reproduce el detalle que disparó la regresión: `id INT` sin índice."""
+    archivo = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    archivo.close()
+
+    conexion = sqlite3.connect(archivo.name)
+    conexion.executescript(
+        """
+        CREATE TABLE productos (
+            id INT, proveedor TEXT, id_proveedor TEXT, sku TEXT, nombre TEXT,
+            marca TEXT, categoria TEXT, subcategoria TEXT, precio REAL,
+            descripcion TEXT, url_imagen TEXT, url_producto TEXT,
+            peso TEXT, imagenes_adicionales TEXT, familia_id INTEGER
+        );
+        CREATE TABLE familias_producto (
+            id INTEGER PRIMARY KEY, proveedor TEXT, categoria TEXT,
+            firma_base TEXT, nombre_familia TEXT, fecha_calculo TEXT
+        );
+        CREATE VIRTUAL TABLE productos_fts USING fts5(
+            nombre, categoria, subcategoria, content=''
+        );
+        """
+    )
+    conexion.close()
+    return archivo.name
+
+
 def _insertar(conexion, **campos):
     base = {
         "proveedor": None, "id_proveedor": None, "sku": None, "nombre": None,
@@ -137,6 +165,143 @@ class BasePruebaBuscarFts(unittest.TestCase):
         with mock.patch.object(db, "BASE_DATOS", self.ruta_db):
             import busqueda
             return busqueda.buscar_fts(consulta, **kwargs)
+
+
+def _buscar_con_join_anterior(ruta_db, consulta, limite=50):
+    """Consulta anterior, conservada solo como oráculo de regresión/benchmark."""
+    import busqueda
+
+    tokens = busqueda.tokenizar(busqueda.normalizar_texto(consulta))
+    consulta_fts = " AND ".join(busqueda._condicion_fts(token) for token in tokens)
+    conexion = sqlite3.connect(ruta_db)
+    conexion.row_factory = sqlite3.Row
+    filas = conexion.execute(
+        f"""
+        SELECT
+            p.nombre, p.precio, p.categoria, p.proveedor,
+            p.id_proveedor, p.url_producto, p.url_imagen,
+            p.marca, p.sku, p.subcategoria, p.descripcion,
+            p.peso, p.imagenes_adicionales,
+            p.familia_id, f.nombre_familia,
+            bm25(productos_fts, {busqueda.PESO_NOMBRE},
+                 {busqueda.PESO_CATEGORIA},
+                 {busqueda.PESO_SUBCATEGORIA}) AS puntaje
+        FROM productos_fts
+        JOIN productos p ON p.id = productos_fts.rowid
+        LEFT JOIN familias_producto f ON f.id = p.familia_id
+        WHERE productos_fts MATCH ?
+        ORDER BY puntaje
+        LIMIT ?
+        """,
+        (consulta_fts, limite),
+    ).fetchall()
+    conexion.close()
+    return [dict(fila) for fila in filas]
+
+
+class PruebaRecuperacionDosFases(BasePruebaBuscarFts):
+    def test_preserva_resultados_campos_y_orden_bm25(self):
+        self._cargar_y_reconstruir_indice([
+            {
+                "proveedor": "EPA", "id_proveedor": "1", "sku": "SKU-1",
+                "nombre": "Pintura blanca interior", "marca": "Marca A",
+                "categoria": "Pinturas", "subcategoria": "Interior",
+                "precio": 12000, "descripcion": "Acabado mate",
+            },
+            {
+                "proveedor": "Lagar", "id_proveedor": "2", "sku": "SKU-2",
+                "nombre": "Pintura para baño", "marca": "Marca B",
+                "categoria": "Pinturas", "subcategoria": "Especialidad",
+                "precio": 15000, "descripcion": "Resistente a humedad",
+            },
+            {
+                "proveedor": "EPA", "id_proveedor": "3", "sku": "SKU-3",
+                "nombre": "Rodillo para pintura", "marca": "Marca C",
+                "categoria": "Accesorios", "subcategoria": "Aplicadores",
+                "precio": 3000,
+            },
+        ])
+
+        esperado = _buscar_con_join_anterior(self.ruta_db, "pintura", limite=3)
+        actual = self._buscar("pintura", limite=3)
+
+        self.assertEqual(actual, esperado)
+
+    def test_filtros_se_aplican_antes_del_limite_final(self):
+        self._cargar_y_reconstruir_indice([
+            {
+                "proveedor": "EPA", "id_proveedor": "1",
+                "nombre": "Pintura pintura pintura sellador",
+                "categoria": "Pinturas",
+            },
+            {
+                "proveedor": "EPA", "id_proveedor": "2",
+                "nombre": "Pintura antihongos para baño",
+                "categoria": "Pinturas",
+            },
+            {
+                "proveedor": "EPA", "id_proveedor": "3",
+                "nombre": "Pintura para manualidades",
+                "categoria": "Hogar",
+            },
+        ])
+
+        resultados = self._buscar(
+            "pintura",
+            limite=1,
+            categorias_permitidas=["Pinturas"],
+            exclusiones=["sellador"],
+        )
+
+        self.assertEqual(len(resultados), 1)
+        self.assertEqual(resultados[0]["nombre"], "Pintura antihongos para baño")
+
+
+class PruebaRendimientoRecuperacionDosFases(unittest.TestCase):
+    def test_evitar_join_fts_por_fila_en_esquema_sin_indice(self):
+        ruta_db = _crear_db_temporal_como_produccion()
+        self.addCleanup(os.remove, ruta_db)
+        conexion = sqlite3.connect(ruta_db)
+        productos = []
+        entradas_fts = []
+        for producto_id in range(1, 12001):
+            coincide = producto_id <= 2500
+            nombre = f"Pintura interior {producto_id}" if coincide else f"Producto {producto_id}"
+            categoria = "Pinturas" if coincide else "Ferretería"
+            productos.append((producto_id, "Proveedor", str(producto_id), nombre, categoria, 1000.0))
+            entradas_fts.append((producto_id, nombre, categoria, None))
+        conexion.executemany(
+            """
+            INSERT INTO productos
+                (id, proveedor, id_proveedor, nombre, categoria, precio)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            productos,
+        )
+        conexion.executemany(
+            "INSERT INTO productos_fts(rowid, nombre, categoria, subcategoria) VALUES (?, ?, ?, ?)",
+            entradas_fts,
+        )
+        conexion.commit()
+        conexion.close()
+
+        inicio_anterior = time.perf_counter()
+        resultado_anterior = _buscar_con_join_anterior(ruta_db, "pintura", limite=300)
+        duracion_anterior = time.perf_counter() - inicio_anterior
+
+        import db
+        import busqueda
+        inicio_nuevo = time.perf_counter()
+        with mock.patch.object(db, "BASE_DATOS", ruta_db):
+            resultado_nuevo = busqueda.buscar_fts("pintura", limite=300)
+        duracion_nueva = time.perf_counter() - inicio_nuevo
+
+        self.assertEqual(resultado_nuevo, resultado_anterior)
+        self.assertLess(
+            duracion_nueva,
+            duracion_anterior * 0.4,
+            f"dos fases={duracion_nueva:.4f}s, join anterior={duracion_anterior:.4f}s",
+        )
 
 
 class PruebaRegresionSinonimosVocabulario(BasePruebaBuscarFts):

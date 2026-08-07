@@ -259,24 +259,73 @@ def buscar_fts(
     conexion = conectar()
 
     try:
+        # Recuperación en dos fases. La consulta anterior hacía el JOIN entre
+        # FTS y `productos` antes del LIMIT. En una base importada donde
+        # `productos.id` perdió su índice, SQLite ejecutaba un scan completo de
+        # productos por cada coincidencia FTS (42 s medidos para "inodoro").
+        #
+        # 1. FTS decide exactamente los ids y el orden bm25.
+        # 2. Una única consulta carga esos productos y Python restaura el orden.
+        #
+        # Sin filtros de producto se puede limitar desde la primera fase. Con
+        # filtros se conservan todas las coincidencias FTS porque categoría y
+        # exclusiones deben aplicarse ANTES del límite final, igual que en la
+        # consulta original.
+        hay_filtros_producto = bool(categorias_permitidas or exclusiones)
+        clausula_limite_fts = "" if hay_filtros_producto else " LIMIT ?"
+        parametros_fts = (
+            (consulta_fts,)
+            if hay_filtros_producto
+            else (consulta_fts, limite)
+        )
+
+        coincidencias_fts = conexion.execute(
+            f"""
+            SELECT
+                rowid AS producto_id,
+                bm25(productos_fts, {PESO_NOMBRE}, {PESO_CATEGORIA}, {PESO_SUBCATEGORIA}) AS puntaje
+            FROM productos_fts
+            WHERE productos_fts MATCH ?
+            ORDER BY puntaje{clausula_limite_fts}
+            """,
+            parametros_fts,
+        ).fetchall()
+
+        if not coincidencias_fts:
+            return []
+
+        ids_ordenados = [fila["producto_id"] for fila in coincidencias_fts]
+        marcadores_ids = ",".join("?" for _ in ids_ordenados)
+
         filas = conexion.execute(
             f"""
             SELECT
+                p.id AS producto_id,
                 p.nombre, p.precio, p.categoria, p.proveedor,
                 p.id_proveedor, p.url_producto, p.url_imagen,
                 p.marca, p.sku, p.subcategoria, p.descripcion,
                 p.peso, p.imagenes_adicionales,
-                p.familia_id, f.nombre_familia,
-                bm25(productos_fts, {PESO_NOMBRE}, {PESO_CATEGORIA}, {PESO_SUBCATEGORIA}) AS puntaje
-            FROM productos_fts
-            JOIN productos p ON p.id = productos_fts.rowid
+                p.familia_id, f.nombre_familia
+            FROM productos p
             LEFT JOIN familias_producto f ON f.id = p.familia_id
-            WHERE productos_fts MATCH ?{filtro_extra}
-            ORDER BY puntaje
-            LIMIT ?
+            WHERE p.id IN ({marcadores_ids}){filtro_extra}
             """,
-            (consulta_fts, *parametros_extra, limite),
+            (*ids_ordenados, *parametros_extra),
         ).fetchall()
+
+        productos_por_id = {fila["producto_id"]: dict(fila) for fila in filas}
+        resultados = []
+        for coincidencia in coincidencias_fts:
+            producto = productos_por_id.get(coincidencia["producto_id"])
+            if producto is None:
+                continue
+
+            producto.pop("producto_id")
+            producto["puntaje"] = coincidencia["puntaje"]
+            resultados.append(producto)
+
+            if len(resultados) == limite:
+                break
     except sqlite3.OperationalError:
         # consulta con sintaxis FTS5 inválida (ej. token con caracteres
         # reservados) -> sin resultados, nunca un 500 por un input de
@@ -288,8 +337,8 @@ def buscar_fts(
         # comportamiento (devolver []) no cambia -- solo deja de ser
         # completamente silencioso.
         _logger.warning("buscar_fts devolvió [] por OperationalError", exc_info=True)
-        filas = []
+        resultados = []
     finally:
         conexion.close()
 
-    return [dict(fila) for fila in filas]
+    return resultados
