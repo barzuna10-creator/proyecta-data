@@ -52,13 +52,12 @@ class PruebaRegistroFinalizacion(unittest.TestCase):
 
 
 class PruebaOrden(unittest.TestCase):
-    def test_agregar_autenticacion_es_la_primera(self):
-        primer_nombre = migraciones.MIGRACIONES[0][0]
+    def test_esquema_fundacional_es_primero_y_autenticacion_segunda(self):
+        primeros_nombres = [nombre for nombre, _ in migraciones.MIGRACIONES[:2]]
         self.assertEqual(
-            primer_nombre,
-            "agregar_autenticacion",
-            "agregar_autenticacion no depende de ninguna otra migración -- no debe quedar "
-            "atrapada detrás de las que sí pueden tardar o fallar",
+            primeros_nombres,
+            ["crear_esquema_fundacional", "agregar_autenticacion"],
+            "productos debe existir antes de cualquier migración histórica que la altere",
         )
 
 

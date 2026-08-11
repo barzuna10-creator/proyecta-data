@@ -8,6 +8,7 @@ import threading
 import unittest
 from unittest import mock
 
+import db
 import database.migraciones as migraciones
 
 
@@ -172,9 +173,159 @@ class PruebaSeguridadReleaseMigraciones(unittest.TestCase):
         self._crear_tabla_y_commit()
         parches = self._contexto(self._crear_tabla_y_commit)
         with parches[0], parches[1], self.assertRaisesRegex(
-            migraciones.ErrorEsquema, "registro=ausente esquema=completo"
+            migraciones.ErrorEsquema, "BASE_LEGACY_DESCONOCIDA"
         ):
             migraciones.aplicar_migraciones_pendientes()
+
+
+class PruebaBootstrapBases(unittest.TestCase):
+    def setUp(self):
+        archivo = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        archivo.close()
+        self.ruta = archivo.name
+        self.patch_database_path = mock.patch.object(db, "BASE_DATOS", self.ruta)
+        self.patch_handler = mock.patch.object(
+            migraciones, "_asegurar_handler", lambda: None
+        )
+        self.patch_database_path.start()
+        self.patch_handler.start()
+
+    def tearDown(self):
+        self.patch_database_path.stop()
+        self.patch_handler.stop()
+        for sufijo in ("", "-wal", "-shm", ".migraciones.lock"):
+            try:
+                os.remove(self.ruta + sufijo)
+            except FileNotFoundError:
+                pass
+
+    def _conexion(self):
+        return _conectar(self.ruta)
+
+    def _crear_baseline_legacy(self):
+        migraciones._m_esquema_fundacional.main()
+        migraciones._m_familias_producto.main()
+        migraciones._m_indice_busqueda.main()
+        migraciones._m_proyectos.main()
+        migraciones._m_cotizaciones.main()
+        migraciones._m_equivalencias.main()
+        migraciones._m_plano_proyecto.main()
+        migraciones._m_trazabilidad_items.main()
+
+    def test_base_completamente_vacia_crea_todo_el_esquema(self):
+        migraciones.aplicar_migraciones_pendientes()
+
+        conexion = self._conexion()
+        try:
+            registradas = {
+                fila[0]
+                for fila in conexion.execute(
+                    "SELECT nombre FROM migraciones_aplicadas"
+                ).fetchall()
+            }
+            self.assertEqual(
+                registradas,
+                {nombre for nombre, _ in migraciones.MIGRACIONES},
+            )
+            for nombre, _ in migraciones.MIGRACIONES:
+                self.assertEqual(
+                    migraciones._faltantes_esquema(conexion, nombre),
+                    [],
+                    nombre,
+                )
+        finally:
+            conexion.close()
+
+    def test_base_historica_sin_registro_adopta_solo_esquemas_completos(self):
+        self._crear_baseline_legacy()
+        conexion = self._conexion()
+        self.assertFalse(migraciones._tabla_seguimiento_existe(conexion))
+        conexion.close()
+
+        migraciones.aplicar_migraciones_pendientes()
+
+        conexion = self._conexion()
+        try:
+            registradas = {
+                fila[0]
+                for fila in conexion.execute(
+                    "SELECT nombre FROM migraciones_aplicadas"
+                ).fetchall()
+            }
+            self.assertEqual(
+                registradas,
+                {nombre for nombre, _ in migraciones.MIGRACIONES},
+            )
+            self.assertEqual(
+                conexion.execute("SELECT COUNT(*) FROM productos").fetchone()[0], 0
+            )
+        finally:
+            conexion.close()
+
+    def test_registro_preexistente_adopta_el_nuevo_marcador_fundacional(self):
+        self._crear_baseline_legacy()
+        conexion = self._conexion()
+        migraciones._asegurar_tabla_seguimiento(conexion)
+        for nombre in migraciones.BASELINE_LEGACY_REQUERIDA - {
+            "crear_esquema_fundacional"
+        }:
+            migraciones._marcar_aplicada(conexion, nombre)
+        conexion.close()
+
+        migraciones.aplicar_migraciones_pendientes()
+
+        conexion = self._conexion()
+        try:
+            self.assertTrue(
+                migraciones._esta_aplicada(
+                    conexion, "crear_esquema_fundacional"
+                )
+            )
+            self.assertEqual(
+                conexion.execute(
+                    "SELECT COUNT(*) FROM migraciones_aplicadas"
+                ).fetchone()[0],
+                len(migraciones.MIGRACIONES),
+            )
+        finally:
+            conexion.close()
+
+    def test_ejecucion_repetida_no_duplica_registro_ni_esquema(self):
+        migraciones.aplicar_migraciones_pendientes()
+        migraciones.aplicar_migraciones_pendientes()
+
+        conexion = self._conexion()
+        try:
+            total_registro = conexion.execute(
+                "SELECT COUNT(*) FROM migraciones_aplicadas"
+            ).fetchone()[0]
+            columnas_productos = conexion.execute(
+                "PRAGMA table_info(productos)"
+            ).fetchall()
+            self.assertEqual(total_registro, len(migraciones.MIGRACIONES))
+            self.assertEqual(
+                sum(fila[1] == "familia_id" for fila in columnas_productos), 1
+            )
+        finally:
+            conexion.close()
+
+    def test_base_parcial_sin_registro_falla_sin_adoptar_marcadores(self):
+        migraciones._m_esquema_fundacional.main()
+        conexion = self._conexion()
+        conexion.execute("CREATE TABLE familias_producto (id INTEGER PRIMARY KEY)")
+        conexion.commit()
+        conexion.close()
+
+        with self.assertRaisesRegex(
+            migraciones.ErrorEsquema, "BASE_LEGACY_INCONSISTENTE"
+        ):
+            migraciones.aplicar_migraciones_pendientes()
+
+        conexion = self._conexion()
+        try:
+            self.assertFalse(migraciones._tabla_seguimiento_existe(conexion))
+        finally:
+            conexion.close()
 
 
 class PruebaReadinessStartup(unittest.TestCase):
