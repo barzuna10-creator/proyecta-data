@@ -81,6 +81,7 @@ import database.agregar_seleccion_automatica as _m_seleccion_automatica
 import database.agregar_eventos as _m_eventos
 import database.agregar_control_costos as _m_control_costos
 import database.agregar_compras as _m_compras
+import database.agregar_indice_url_producto as _m_indice_url_producto
 
 # agregar_autenticacion primero, a propósito, fuera del orden histórico
 # real de introducción: no depende de proyectos/productos/nada de las
@@ -119,6 +120,10 @@ MIGRACIONES = [
     # mismo criterio que el resto de las ALTER TABLE sin urgencia de
     # arranque (ver database/agregar_compras.py).
     ("agregar_compras", _m_compras.main),
+    # Índice sobre una columna que ya existe en productos -- no depende de
+    # ninguna de las anteriores (ver database/agregar_indice_url_producto.py,
+    # RELEASE_CANDIDATE.md).
+    ("agregar_indice_url_producto", _m_indice_url_producto.main),
 ]
 
 
