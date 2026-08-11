@@ -1,19 +1,21 @@
-"""Actualización rápida del catálogo: EPA, Ferretería Brenes, Carbone Store
-y Construplaza (todos vía llamadas en lote -- Construplaza es el más
-liviano de los cuatro, ~22 páginas para todo su catálogo vía la API
-pública de Algolia). El Lagar queda fuera a propósito -- necesita una
-llamada HTTP por producto y tarda ~50 minutos; se actualiza por separado
-con `actualizar_ellagar.py`, pensado para correr de noche (ver ese
-archivo)."""
+"""Actualización rápida del catálogo: EPA, Ferretería Brenes, Carbone
+Store, Construplaza, Ferreterías El Mar y Grupo Diasa (todos vía llamadas
+en lote -- ninguno necesita una llamada HTTP por producto). El Mar y
+Diasa se suman aquí porque son igual de livianos que Brenes (misma API
+pública de WooCommerce Store, ver ESTRATEGIA_EXPANSION_PROVEEDORES.md).
+El Lagar y Novex quedan fuera a propósito -- necesitan una llamada HTTP
+por producto y tardan mucho más; se actualizan por separado con
+`actualizar_ellagar.py`/`actualizar_novex.py`, pensados para correr de
+noche (ver esos archivos)."""
 
 import sys
 import time
 from datetime import datetime
 
-from crawlers import brenes, carbone, construplaza, epa
+from crawlers import brenes, carbone, construplaza, diasa, elmar, epa
 from busqueda import reconstruir_indice
 
-PROVEEDORES = [epa, brenes, carbone, construplaza]
+PROVEEDORES = [epa, brenes, carbone, construplaza, elmar, diasa]
 
 
 def _actualizar_proveedores(proveedores):
@@ -56,7 +58,7 @@ def _imprimir_resumen(resultados):
 
 
 def main():
-    print("=== PROYECTA CR — actualización de catálogo (EPA, Brenes, Carbone) ===")
+    print("=== PROYECTA CR — actualización de catálogo (EPA, Brenes, Carbone, Construplaza, El Mar, Diasa) ===")
     print(f"Inicio: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     resultados = _actualizar_proveedores(PROVEEDORES)
