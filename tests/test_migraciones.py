@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 import database.migraciones as migraciones
+import database.agregar_calculo_compra as migracion_calculo
 
 
 def _conexion_temporal(ruta):
@@ -65,6 +66,71 @@ class PruebaOrden(unittest.TestCase):
             "agregar_autenticacion no depende de ninguna otra migración -- no debe quedar "
             "atrapada detrás de las que sí pueden tardar o fallar",
         )
+
+
+class PruebaMigracionCalculoCompra(unittest.TestCase):
+    def setUp(self):
+        archivo = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        archivo.close()
+        self.ruta_db = archivo.name
+        conexion = _conexion_temporal(self.ruta_db)
+        conexion.executescript(
+            """
+            CREATE TABLE proyectos (id INTEGER PRIMARY KEY);
+            CREATE TABLE items_proyecto (id INTEGER PRIMARY KEY, estado_calculo TEXT);
+            CREATE TABLE presupuesto_congelado (id INTEGER PRIMARY KEY);
+            INSERT INTO proyectos(id) VALUES (1);
+            INSERT INTO items_proyecto(id, estado_calculo) VALUES (1, NULL);
+            INSERT INTO presupuesto_congelado(id) VALUES (1);
+            """
+        )
+        conexion.commit()
+        conexion.close()
+        self._patch = mock.patch.object(
+            migracion_calculo, "conectar", lambda: _conexion_temporal(self.ruta_db)
+        )
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        for sufijo in ("", "-wal", "-shm"):
+            try:
+                os.remove(self.ruta_db + sufijo)
+            except FileNotFoundError:
+                pass
+
+    def test_es_aditiva_y_preserva_filas_legacy(self):
+        migracion_calculo.main()
+        conexion = _conexion_temporal(self.ruta_db)
+        proyecto = conexion.execute(
+            "SELECT version_calculo_cotizacion FROM proyectos WHERE id = 1"
+        ).fetchone()
+        item = conexion.execute(
+            "SELECT estado_calculo, cantidad_requerida FROM items_proyecto WHERE id = 1"
+        ).fetchone()
+        self.assertEqual(proyecto["version_calculo_cotizacion"], 1)
+        self.assertIsNone(item["estado_calculo"])
+        self.assertIsNone(item["cantidad_requerida"])
+        self.assertEqual(
+            conexion.execute("SELECT COUNT(*) FROM presupuesto_congelado").fetchone()[0], 1
+        )
+        conexion.close()
+
+    def test_reejecucion_no_duplica_columnas_ni_conversiones(self):
+        migracion_calculo.main()
+        migracion_calculo.main()
+        conexion = _conexion_temporal(self.ruta_db)
+        columnas = conexion.execute("PRAGMA table_info(items_proyecto)").fetchall()
+        self.assertEqual(sum(f["name"] == "unidades_compra" for f in columnas), 1)
+        galon = conexion.execute(
+            "SELECT factor_a_canonica FROM conversiones_unidad WHERE unidad_origen = 'galon'"
+        ).fetchone()
+        libra = conexion.execute(
+            "SELECT factor_a_canonica FROM conversiones_unidad WHERE unidad_origen = 'lb'"
+        ).fetchone()
+        self.assertEqual(galon["factor_a_canonica"], "3.785411784")
+        self.assertEqual(libra["factor_a_canonica"], "0.45359237")
+        conexion.close()
 
 
 class PruebaMigracionesCompletadas(unittest.TestCase):

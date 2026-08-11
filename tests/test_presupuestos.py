@@ -301,6 +301,10 @@ class BasePruebaCalcularPresupuesto(unittest.TestCase):
 
     def setUp(self):
         self.ruta_db = _crear_db_temporal()
+        import db
+        from database.agregar_calculo_compra import main as migrar_calculo_compra
+        with mock.patch.object(db, "BASE_DATOS", self.ruta_db):
+            migrar_calculo_compra()
 
     def tearDown(self):
         os.remove(self.ruta_db)

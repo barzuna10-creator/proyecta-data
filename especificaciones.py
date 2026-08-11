@@ -396,6 +396,56 @@ def unidad_comercial(nombre, categoria=None):
     return None
 
 
+def presentacion_comercial_sugerida(nombre, categoria=None):
+    """Extrae una sugerencia no autoritativa desde el nombre del producto.
+
+    Nunca contiene factores de conversión y nunca habilita una cotización por
+    sí sola. La API la entrega separada de ``calculo_compra`` para que un
+    usuario pueda confirmarla o corregirla explícitamente.
+    """
+
+    texto = _preparar(nombre or "")
+    coincidencia_area = _PATRON_AREA_M2.search(texto)
+    if coincidencia_area:
+        contenido = _texto_a_numero(coincidencia_area.group(1))
+        if contenido and contenido > 0:
+            return {
+                "contenido_presentacion": contenido,
+                "unidad_presentacion": "m²",
+                "unidad_compra": "caja",
+                "presentacion_divisible": False,
+                "origen": "SUGGESTED",
+            }
+
+    if categoria == "Pinturas":
+        presentacion = extraer_presentacion_pintura(nombre)
+        if presentacion and _preparar(presentacion) == "galon":
+            return {
+                "contenido_presentacion": 1,
+                "unidad_presentacion": "galón",
+                "unidad_compra": "galón",
+                "presentacion_divisible": False,
+                "origen": "SUGGESTED",
+            }
+
+    specs = extraer_specs(nombre)
+    for clave, unidad in (("volumen_l", "L"), ("peso_kg", "kg"), ("peso_lb", "lb")):
+        if clave in specs:
+            texto_paquete = any(
+                palabra in texto
+                for palabra in ("cemento", "mortero", "pegamento", "adhesivo", "bondex", "fragua")
+            )
+            return {
+                "contenido_presentacion": specs[clave],
+                "unidad_presentacion": unidad,
+                "unidad_compra": "saco" if texto_paquete else "envase",
+                "presentacion_divisible": False,
+                "origen": "SUGGESTED",
+            }
+
+    return None
+
+
 def comparar_specs(specs_a, specs_b):
     """Compara dos diccionarios de specs ya extraídos. Devuelve:
     - conflicto: True si hay una especificación de compatibilidad o de
