@@ -1,50 +1,64 @@
-import sqlite3
+"""Esquema fundacional de la base de datos.
+
+Este módulo debe poder ejecutarse contra cualquier ``DATABASE_PATH``. Es la
+primera migración del runner: las migraciones históricas agregan columnas e
+índices sobre ``productos`` y no pueden crearla por sí mismas.
+"""
+
+from db import conectar
 
 
-conexion = sqlite3.connect("database/proyecta.db")
+COLUMNAS_PRODUCTOS = {
+    "id",
+    "proveedor",
+    "id_proveedor",
+    "sku",
+    "nombre",
+    "marca",
+    "categoria",
+    "subcategoria",
+    "precio",
+    "iva",
+    "cabys",
+    "descripcion",
+    "url_imagen",
+    "url_producto",
+    "compra_online",
+    "fecha_actualizacion",
+}
 
-cursor = conexion.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS productos (
+def main():
+    conexion = conectar()
+    try:
+        conexion.execute(
+            """
+            CREATE TABLE IF NOT EXISTS productos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proveedor TEXT,
+                id_proveedor TEXT,
+                sku TEXT,
+                nombre TEXT,
+                marca TEXT,
+                categoria TEXT,
+                subcategoria TEXT,
+                precio REAL,
+                iva REAL,
+                cabys TEXT,
+                descripcion TEXT,
+                url_imagen TEXT,
+                url_producto TEXT,
+                compra_online INTEGER,
+                fecha_actualizacion TEXT
+            )
+            """
+        )
+        conexion.commit()
+    finally:
+        conexion.close()
 
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    print("✅ Esquema fundacional creado correctamente.")
 
-    proveedor TEXT,
 
-    id_proveedor TEXT,
-
-    sku TEXT,
-
-    nombre TEXT,
-
-    marca TEXT,
-
-    categoria TEXT,
-
-    subcategoria TEXT,
-
-    precio REAL,
-
-    iva REAL,
-
-    cabys TEXT,
-
-    descripcion TEXT,
-
-    url_imagen TEXT,
-
-    url_producto TEXT,
-
-    compra_online INTEGER,
-
-    fecha_actualizacion TEXT
-
-)
-""")
-
-conexion.commit()
-
-conexion.close()
-
-print("✅ Base de datos creada correctamente.")
+if __name__ == "__main__":
+    main()

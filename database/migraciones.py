@@ -21,7 +21,8 @@ Diseño, punto por punto:
 - Lock de archivo separado para serializar procesos. Un reinicio que llega
   mientras otro proceso migra espera el lock y vuelve a verificar la base.
 - Verificación real de tablas, columnas, índices y conversiones. Registro y
-  esquema deben coincidir; cualquier diferencia aborta el arranque.
+  esquema deben coincidir; la única adopción permitida es el baseline legacy
+  explícito, validado completo antes de crear sus marcadores.
 - Fallo estricto: una migración fallida detiene el runner. La API ejecuta el
   runner antes del `yield` de su lifespan, por lo que nunca alcanza readiness
   con un esquema incompleto.
@@ -29,24 +30,17 @@ Diseño, punto por punto:
   reescribe ni un renglón de la lógica de ninguna migración existente.
 
 Verificado en vivo, no solo con pruebas unitarias con dobles de prueba
-(`tests/test_migraciones.py`): (1) contra un archivo vacío de verdad, para
-forzar fallas reales en cascada; (2) contra una copia real de
-database/proyecta.db con
-`usuarios`/`sesiones`/`feedback` eliminadas a propósito (el escenario real
-del bug) -- las 8 corrieron limpio, el catálogo (60,421 productos) y los
-17 proyectos existentes quedaron intactos, y `registrar_usuario()` empezó
-a funcionar de inmediato; correrlo una segunda vez saltó las 8 en 0.18s.
+(`tests/test_migraciones.py`): (1) contra un archivo vacío real, que crea
+productos antes de ejecutar el resto; (2) contra el snapshot histórico
+`48a3fcb` sin registro -- adoptó únicamente las firmas completas, conservó
+60,421 productos y 16 proyectos y aplicó las migraciones restantes; (3) una
+segunda ejecución saltó las 15 migraciones con el esquema verificado.
 
-Costo conocido: la
-tabla de seguimiento empieza vacía, así que el primer arranque con este
-runner intenta aplicar todas las registradas. Para las basadas en
-`CREATE ... IF NOT EXISTS` / `ALTER TABLE` con guard por columna,
-reintentar contra una base que ya las tiene es gratis. Pero `agregar_equivalencias.py` y
-`agregar_indice_busqueda.py` recalculan sin condición, sin importar si el
-resultado ya existe -- así están escritas, y no se les cambió la lógica.
-Ese primer arranque puede tardar varios minutos. El lifespan espera a que
-termine: la latencia de arranque es preferible a servir contra un esquema
-que todavía no fue verificado.
+Costo conocido: una base realmente nueva ejecuta todas las migraciones,
+incluidas las que reconstruyen búsqueda y equivalencias. Ese primer arranque
+puede tardar varios minutos con un catálogo poblado. El lifespan espera a que
+termine: la latencia de arranque es preferible a servir contra un esquema que
+todavía no fue verificado.
 """
 
 import fcntl
@@ -58,6 +52,7 @@ import db
 from db import conectar
 from api.observabilidad import _asegurar_handler, logger
 
+import database.crear_base as _m_esquema_fundacional
 import database.agregar_familias_producto as _m_familias_producto
 import database.agregar_indice_busqueda as _m_indice_busqueda
 import database.agregar_proyectos as _m_proyectos
@@ -73,20 +68,17 @@ import database.agregar_control_costos as _m_control_costos
 import database.agregar_compras as _m_compras
 import database.agregar_calculo_compra as _m_calculo_compra
 
-# agregar_autenticacion primero, a propósito, fuera del orden histórico
-# real de introducción: no depende de proyectos/productos/nada de las
-# otras 7 (solo crea usuarios/sesiones/feedback, tablas propias que nadie
-# más referencia), y es la que un incidente real de producción necesitaba
-# ver aplicada cuanto antes. Dejarla última significaba que quedaba
-# atrapada detrás de agregar_equivalencias (~10s recalculando el catálogo
-# completo, más en Render que en local) y de cualquier falla de las
-# primeras 7 -- sin ninguna razón real para depender de ese orden.
+# El esquema fundacional va primero: todas las bases nuevas necesitan la tabla
+# productos antes de que las migraciones históricas intenten alterarla.
+# Autenticación sigue inmediatamente después porque no depende del catálogo ni
+# de proyectos y fue el origen del runner de producción.
 #
 # El resto conserva su orden histórico real de introducción (ver git log):
 # importa porque una migración posterior altera una tabla que una anterior
 # crea (ej. agregar_cotizaciones.py hace ALTER TABLE sobre proyectos e
 # items_proyecto, creadas por agregar_proyectos.py).
 MIGRACIONES = [
+    ("crear_esquema_fundacional", _m_esquema_fundacional.main),
     ("agregar_autenticacion", _m_autenticacion.main),
     ("agregar_familias_producto", _m_familias_producto.main),
     ("agregar_indice_busqueda", _m_indice_busqueda.main),
@@ -128,6 +120,10 @@ class ErrorEsquema(RuntimeError):
 # suficiente por sí solo: cada arranque contrasta estas tablas, columnas e
 # índices contra sqlite_master/PRAGMA antes de aceptar tráfico.
 REQUISITOS_ESQUEMA = {
+    "crear_esquema_fundacional": {
+        "tablas": {"productos"},
+        "columnas": {"productos": _m_esquema_fundacional.COLUMNAS_PRODUCTOS},
+    },
     "agregar_autenticacion": {
         "tablas": {"usuarios", "sesiones", "feedback"},
         "indices": {"idx_sesiones_usuario"},
@@ -205,6 +201,20 @@ REQUISITOS_ESQUEMA = {
     },
 }
 
+# Snapshot histórico conocido anterior al registro de migraciones. Estas
+# firmas deben estar completas para adoptar una base legacy; una base más
+# antigua o parcialmente creada se rechaza en lugar de adivinar su estado.
+BASELINE_LEGACY_REQUERIDA = {
+    "crear_esquema_fundacional",
+    "agregar_familias_producto",
+    "agregar_indice_busqueda",
+    "agregar_proyectos",
+    "agregar_cotizaciones",
+    "agregar_equivalencias",
+    "agregar_plano_proyecto",
+    "agregar_trazabilidad_items",
+}
+
 
 def _asegurar_tabla_seguimiento(conexion):
     conexion.execute(
@@ -275,37 +285,151 @@ def _columnas_tabla(conexion, tabla):
     return {fila[1] for fila in conexion.execute(f"PRAGMA table_info({tabla})").fetchall()}
 
 
-def _faltantes_esquema(conexion, nombre):
+def _elementos_esquema(conexion, nombre):
+    """Firma atómica de una migración: ``token -> está presente/correcto``."""
+
     requisitos = REQUISITOS_ESQUEMA.get(nombre)
     if requisitos is None:
-        return [f"no existe verificador de esquema para {nombre}"]
+        return {f"verificador:{nombre}": False}
 
-    faltantes = []
+    elementos = {}
     tablas = _nombres_objetos(conexion, "table")
     indices = _nombres_objetos(conexion, "index")
-    for tabla in sorted(requisitos.get("tablas", set()) - tablas):
-        faltantes.append(f"tabla:{tabla}")
-    for indice in sorted(requisitos.get("indices", set()) - indices):
-        faltantes.append(f"indice:{indice}")
+    for tabla in sorted(requisitos.get("tablas", set())):
+        elementos[f"tabla:{tabla}"] = tabla in tablas
+    for indice in sorted(requisitos.get("indices", set())):
+        elementos[f"indice:{indice}"] = indice in indices
     for tabla, columnas in requisitos.get("columnas", {}).items():
         existentes = _columnas_tabla(conexion, tabla)
-        for columna in sorted(columnas - existentes):
-            faltantes.append(f"columna:{tabla}.{columna}")
+        for columna in sorted(columnas):
+            elementos[f"columna:{tabla}.{columna}"] = columna in existentes
 
-    if nombre == "agregar_calculo_compra" and "conversiones_unidad" in tablas:
-        conversiones = {
-            fila[0]: (fila[1], fila[2], fila[3], fila[4])
-            for fila in conexion.execute(
-                """
-                SELECT unidad_origen, unidad_canonica, factor_a_canonica, dimension, activa
-                FROM conversiones_unidad
-                """
-            ).fetchall()
-        }
+    if nombre == "agregar_calculo_compra":
+        conversiones = {}
+        if "conversiones_unidad" in tablas:
+            conversiones = {
+                fila[0]: (fila[1], fila[2], fila[3], fila[4])
+                for fila in conexion.execute(
+                    """
+                    SELECT unidad_origen, unidad_canonica, factor_a_canonica, dimension, activa
+                    FROM conversiones_unidad
+                    """
+                ).fetchall()
+            }
         for origen, canonica, factor, dimension in _m_calculo_compra.UNIDADES:
-            if conversiones.get(origen) != (canonica, factor, dimension, 1):
-                faltantes.append(f"conversion:{origen}")
-    return faltantes
+            elementos[f"conversion:{origen}"] = (
+                conversiones.get(origen) == (canonica, factor, dimension, 1)
+            )
+    return elementos
+
+
+def _faltantes_esquema(conexion, nombre):
+    return [
+        token
+        for token, presente in _elementos_esquema(conexion, nombre).items()
+        if not presente
+    ]
+
+
+def _estado_esquema(conexion, nombre):
+    elementos = _elementos_esquema(conexion, nombre)
+    presentes = sum(1 for presente in elementos.values() if presente)
+    if presentes == len(elementos):
+        return "completo"
+    if presentes == 0:
+        return "ausente"
+    return "parcial"
+
+
+def _tabla_seguimiento_existe(conexion):
+    return "migraciones_aplicadas" in _nombres_objetos(conexion, "table")
+
+
+def _tablas_aplicacion(conexion):
+    return {
+        nombre
+        for nombre in _nombres_objetos(conexion, "table")
+        if not nombre.startswith("sqlite_") and nombre != "migraciones_aplicadas"
+    }
+
+
+def _inicializar_registro_si_corresponde(conexion):
+    """Crea el registro para una base nueva o adopta un baseline legacy.
+
+    Una base legacy se adopta en una sola transacción y solo después de
+    clasificar cada migración como completa o totalmente ausente. Cualquier
+    firma parcial, o la ausencia del baseline histórico conocido, aborta sin
+    crear ni poblar el registro.
+    """
+
+    if _tabla_seguimiento_existe(conexion):
+        # El esquema fundacional se incorporó al registro después de que las
+        # bases de producción ya tenían marcadores para las migraciones
+        # históricas. Solo se adopta ese marcador cuando (a) el registro no
+        # está vacío y (b) la firma completa de productos fue verificada.
+        # Un registro vacío con esquema completo sigue siendo un mismatch de
+        # interrupción y no se repara silenciosamente.
+        nombre_fundacional = "crear_esquema_fundacional"
+        tiene_marcadores = conexion.execute(
+            "SELECT 1 FROM migraciones_aplicadas LIMIT 1"
+        ).fetchone() is not None
+        if tiene_marcadores and not _esta_aplicada(conexion, nombre_fundacional):
+            estado = _estado_esquema(conexion, nombre_fundacional)
+            if estado == "completo":
+                _marcar_aplicada(conexion, nombre_fundacional)
+                logger.info("REGISTRO_FUNDACIONAL_ADOPTADO esquema=productos")
+            elif estado == "parcial":
+                raise ErrorEsquema(
+                    "ESQUEMA_FUNDACIONAL_INCONSISTENTE registro=existente esquema=parcial"
+                )
+        return "existente"
+
+    if not _tablas_aplicacion(conexion):
+        _asegurar_tabla_seguimiento(conexion)
+        return "nueva"
+
+    estados = {
+        nombre: _estado_esquema(conexion, nombre)
+        for nombre, _ in MIGRACIONES
+    }
+    parciales = sorted(nombre for nombre, estado in estados.items() if estado == "parcial")
+    if parciales:
+        raise ErrorEsquema(
+            "BASE_LEGACY_INCONSISTENTE migraciones_parciales=" + ",".join(parciales)
+        )
+
+    baseline_incompleta = sorted(
+        nombre
+        for nombre in BASELINE_LEGACY_REQUERIDA
+        if estados.get(nombre) != "completo"
+    )
+    if baseline_incompleta:
+        raise ErrorEsquema(
+            "BASE_LEGACY_DESCONOCIDA baseline_incompleta=" + ",".join(baseline_incompleta)
+        )
+
+    try:
+        conexion.execute(
+            """
+            CREATE TABLE migraciones_aplicadas (
+                nombre TEXT PRIMARY KEY,
+                fecha_aplicada TEXT NOT NULL
+            )
+            """
+        )
+        fecha = time.strftime("%Y-%m-%d %H:%M:%S")
+        conexion.executemany(
+            "INSERT INTO migraciones_aplicadas (nombre, fecha_aplicada) VALUES (?, ?)",
+            [(nombre, fecha) for nombre, estado in estados.items() if estado == "completo"],
+        )
+        conexion.commit()
+    except Exception:
+        conexion.rollback()
+        raise
+
+    adoptadas = sorted(nombre for nombre, estado in estados.items() if estado == "completo")
+    logger.info(f"REGISTRO_LEGACY_ADOPTADO migraciones={adoptadas}")
+    return "legacy"
 
 
 def _verificar_coherencia(conexion, nombre):
@@ -395,8 +519,10 @@ def aplicar_migraciones_pendientes():
     resultados = {}
     with _bloqueo_exclusivo_runner():
         conexion = conectar()
-        _asegurar_tabla_seguimiento(conexion)
-        conexion.close()
+        try:
+            _inicializar_registro_si_corresponde(conexion)
+        finally:
+            conexion.close()
 
         for nombre, funcion in MIGRACIONES:
             resultados[nombre] = _procesar_una(nombre, funcion)
