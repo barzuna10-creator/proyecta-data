@@ -26,17 +26,15 @@ from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migr
 # Investigación "no such table: usuarios" en producción: nada, en ningún
 # punto del despliegue, ejecutaba las migraciones de database/agregar_*.py
 # contra la base real (ver database/migraciones.py para el diseño
-# completo -- registro explícito, reclamo atómico entre los --workers,
-# libera el reclamo si una migración falla).
+# completo -- registro posterior al commit, lock separado y verificación
+# del esquema real antes de readiness).
 #
 # Investigación posterior, "database is locked" durante el arranque:
-# antes, este hilo de migraciones y el hilo de respaldo (más abajo)
-# arrancaban EN PARALELO, los dos desde su propio on_event("startup") --
-# dos escritores concurrentes contra la misma base real, justo en el
-# momento de más escrituras de todo el ciclo de vida del proceso. Ahora
-# es un solo hilo de fondo: primero terminan las migraciones, RECIÉN
-# DESPUÉS arranca el bucle de respaldo -- nunca compiten por la base al
-# mismo tiempo. (El otro cambio de esa misma investigación fue que las 8
+# antes, las migraciones y el respaldo arrancaban EN PARALELO -- dos
+# escritores concurrentes contra la misma base real, justo en el momento
+# de más escrituras. Ahora las migraciones terminan de forma síncrona y,
+# recién después, arranca el hilo de respaldos. (El otro cambio de esa
+# misma investigación fue que las 8
 # migraciones y el respaldo pasaron de sqlite3.connect() crudo a
 # db.conectar(), que ya trae busy_timeout -- ver database/migraciones.py
 # y database/respaldar_db.py. Ese es el fix real contra el bloqueo en sí;
@@ -56,8 +54,7 @@ from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migr
 INTERVALO_RESPALDO_SEGUNDOS = 6 * 60 * 60  # cada 6 horas
 
 
-def _bucle_arranque_en_segundo_plano():
-    _aplicar_migraciones_pendientes()
+def _bucle_respaldos():
     while True:
         try:
             _respaldar_db()
@@ -73,7 +70,18 @@ async def _lifespan(app: FastAPI):
     # manager (ver RELEASE_CANDIDATE.md). Mismo comportamiento exacto,
     # solo el mecanismo de registro cambia: todo lo de antes de `yield`
     # corría en "startup", todo lo de después corría en "shutdown".
-    threading.Thread(target=_bucle_arranque_en_segundo_plano, daemon=True).start()
+    # Gate de readiness: Uvicorn no empieza a servir solicitudes hasta que
+    # el bloque anterior a `yield` termina. Una migración fallida o cualquier
+    # diferencia entre registro y esquema aborta el arranque completo.
+    try:
+        _aplicar_migraciones_pendientes()
+    except Exception:
+        _logger.exception(
+            "STARTUP_ESQUEMA_INVALIDO -- se rechaza readiness y no se servirá tráfico"
+        )
+        raise
+
+    threading.Thread(target=_bucle_respaldos, daemon=True).start()
     yield
     # Sin esto, el proceso worker que ProcessPoolExecutor deja abierto
     # (ver api/repositorio_proyectos.py) sobrevive al proceso principal en
