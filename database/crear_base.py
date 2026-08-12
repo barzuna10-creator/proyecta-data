@@ -28,8 +28,10 @@ COLUMNAS_PRODUCTOS = {
 }
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     try:
         conexion.execute(
             """
@@ -53,9 +55,11 @@ def main():
             )
             """
         )
-        conexion.commit()
+        if propia:
+            conexion.commit()
     finally:
-        conexion.close()
+        if propia:
+            conexion.close()
 
     print("✅ Esquema fundacional creado correctamente.")
 

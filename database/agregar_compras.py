@@ -48,8 +48,10 @@ def _agregar_columnas_faltantes(cursor, tabla, columnas):
         print(f"  + {tabla}.{nombre}")
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     cursor = conexion.cursor()
 
     print("Columnas agregadas:")
@@ -71,8 +73,9 @@ def main():
         "ON ordenes_compra (proyecto_id, fecha_creacion)"
     )
 
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     print("✅ Esquema de Compras listo.")
 

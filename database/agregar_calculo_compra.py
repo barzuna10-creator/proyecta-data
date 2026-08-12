@@ -101,8 +101,10 @@ def _agregar_faltantes(cursor, tabla, columnas):
             print(f"  + {tabla}.{nombre}")
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     cursor = conexion.cursor()
     _agregar_faltantes(cursor, "proyectos", COLUMNAS_PROYECTOS)
     _agregar_faltantes(cursor, "items_proyecto", COLUMNAS_ITEMS)
@@ -133,7 +135,8 @@ def main():
         UNIDADES,
     )
 
-    conexion.commit()
+    if propia:
+        conexion.commit()
     conteos = cursor.execute(
         """
         SELECT
@@ -142,7 +145,8 @@ def main():
         FROM proyectos WHERE version_calculo_cotizacion = 1
         """
     ).fetchone()
-    conexion.close()
+    if propia:
+        conexion.close()
     print(
         "✅ Cálculo de compra listo; "
         f"proyectos_legacy={conteos[0]}, items_sin_clasificar={conteos[1]}"

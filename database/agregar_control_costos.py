@@ -24,8 +24,10 @@ ni duplicar nada."""
 from db import conectar
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     cursor = conexion.cursor()
 
     cursor.execute("""
@@ -49,8 +51,9 @@ def main():
         "ON presupuesto_congelado (proyecto_id, fecha_creacion)"
     )
 
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     print("✅ Tabla de presupuesto congelado (Control de Costos) lista.")
 

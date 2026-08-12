@@ -4,8 +4,10 @@ from db import conectar
 from equivalencias import calcular_equivalencias
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
 
     conexion.execute(
         """
@@ -28,21 +30,16 @@ def main():
             "CREATE INDEX IF NOT EXISTS idx_producto_equivalencia ON productos (equivalencia_id)"
         )
 
-    conexion.commit()
-    conexion.close()
-
     print("✅ Tabla grupos_equivalencia y columna productos.equivalencia_id listas.")
 
     print("\nCargando catálogo completo...")
     t0 = time.time()
-    conexion = conectar()
     productos = [
         dict(fila)
         for fila in conexion.execute(
             "SELECT id, proveedor, nombre, marca, categoria FROM productos"
         ).fetchall()
     ]
-    conexion.close()
     print(f"{len(productos)} productos cargados en {time.time() - t0:.1f}s")
 
     print("\nCalculando equivalencias (esto recorre todo el catálogo, puede tardar varios minutos)...")
@@ -55,7 +52,6 @@ def main():
     print(f"{total_productos_agrupados} productos quedaron en algún grupo.")
 
     print("\nGuardando en la base de datos...")
-    conexion = conectar()
     conexion.execute("UPDATE productos SET equivalencia_id = NULL")
     conexion.execute("DELETE FROM grupos_equivalencia")
 
@@ -89,10 +85,15 @@ def main():
             [(equivalencia_id, m["id"]) for m in miembros],
         )
 
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     print(f"✅ {len(grupos)} grupos guardados, {total_productos_agrupados} productos vinculados.")
+    return {
+        "grupos_equivalencia": len(grupos),
+        "productos_equivalentes": total_productos_agrupados,
+    }
 
 
 if __name__ == "__main__":

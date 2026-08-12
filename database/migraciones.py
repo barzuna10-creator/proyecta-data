@@ -16,8 +16,8 @@ Diseño, punto por punto:
   por convención de nombre. Agregar una migración nueva requiere agregar
   una línea acá a propósito.
 - Tabla `migraciones_aplicadas(nombre PRIMARY KEY)` exclusivamente como
-  registro de finalización. Nunca funciona como lock ni se escribe antes
-  de que el cuerpo haya retornado después de su commit.
+  registro de finalización. Nunca funciona como lock: el runner inserta el
+  marcador en la misma transacción que el esquema y los datos.
 - Lock de archivo separado para serializar procesos. Un reinicio que llega
   mientras otro proceso migra espera el lock y vuelve a verificar la base.
 - Verificación real de tablas, columnas, índices y conversiones. Registro y
@@ -26,8 +26,9 @@ Diseño, punto por punto:
 - Fallo estricto: una migración fallida detiene el runner. La API ejecuta el
   runner antes del `yield` de su lifespan, por lo que nunca alcanza readiness
   con un esquema incompleto.
-- Reutiliza el `main()` de cada `agregar_*.py` tal cual -- este módulo no
-  reescribe ni un renglón de la lógica de ninguna migración existente.
+- Reutiliza el `main()` de cada `agregar_*.py` con la conexión del runner.
+  Los mismos `main()` sin argumentos conservan su ejecución manual, pero
+  cuando reciben una conexión no pueden confirmar ni cerrarla.
 
 Verificado en vivo, no solo con pruebas unitarias con dobles de prueba
 (`tests/test_migraciones.py`): (1) contra un archivo vacío real, que crea
@@ -235,26 +236,29 @@ def _esta_aplicada(conexion, nombre):
 
 
 def _marcar_aplicada(conexion, nombre):
-    """Registra éxito únicamente después de que el cuerpo retornó.
+    """Inserta el marcador sin confirmar la transacción.
 
-    Cada migración hace commit antes de retornar. Esta escritura ocurre en
-    una transacción posterior e independiente; nunca funciona como reclamo.
+    El dueño de la conexión decide el commit. Durante una migración, esquema,
+    datos, postcondiciones y marcador se confirman juntos.
     """
     conexion.execute(
         "INSERT INTO migraciones_aplicadas (nombre, fecha_aplicada) VALUES (?, ?)",
         (nombre, time.strftime("%Y-%m-%d %H:%M:%S")),
     )
+
+
+def _confirmar_atomico(conexion):
+    """Único punto de commit de una migración ejecutada por el runner."""
+
     conexion.commit()
 
 
 def _ruta_base_real():
-    conexion = conectar()
-    try:
-        fila = conexion.execute("PRAGMA database_list").fetchone()
-        ruta = fila[2] if fila else ""
-    finally:
-        conexion.close()
-    return os.path.abspath(ruta or db.BASE_DATOS)
+    # No se abre SQLite antes del flock: varios workers que ejecutaran a la
+    # vez ``PRAGMA journal_mode=WAL`` podían competir antes de estar
+    # serializados y uno fallaba con ``database is locked``. DATABASE_PATH es
+    # la fuente canónica compartida por todos los procesos del servicio.
+    return os.path.abspath(db.BASE_DATOS)
 
 
 @contextmanager
@@ -341,6 +345,111 @@ def _estado_esquema(conexion, nombre):
     return "parcial"
 
 
+def _faltantes_postcondiciones(conexion, nombre, resultado=None):
+    """Valida efectos de datos que la firma estructural no puede demostrar.
+
+    ``resultado`` contiene los conteos calculados por la misma ejecución de
+    la migración. En la adopción legacy no existe ese resultado, por lo que
+    se validan igualmente todas las invariantes observables de la base.
+    """
+
+    faltantes = []
+
+    if nombre == "agregar_familias_producto":
+        familias = conexion.execute(
+            "SELECT COUNT(*) FROM familias_producto"
+        ).fetchone()[0]
+        productos_agrupados = conexion.execute(
+            "SELECT COUNT(*) FROM productos WHERE familia_id IS NOT NULL"
+        ).fetchone()[0]
+        inconsistente = conexion.execute(
+            """
+            SELECT 1
+            FROM familias_producto f
+            LEFT JOIN productos p ON p.familia_id = f.id
+            GROUP BY f.id, f.proveedor, f.categoria
+            HAVING COUNT(p.id) < 2
+                OR SUM(CASE WHEN p.proveedor != f.proveedor OR p.categoria != f.categoria
+                            THEN 1 ELSE 0 END) > 0
+            LIMIT 1
+            """
+        ).fetchone()
+        colgante = conexion.execute(
+            """
+            SELECT 1 FROM productos p
+            LEFT JOIN familias_producto f ON f.id = p.familia_id
+            WHERE p.familia_id IS NOT NULL AND f.id IS NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        if inconsistente or colgante:
+            faltantes.append("datos:familias_producto_consistentes")
+        if resultado is not None:
+            if familias != resultado.get("familias"):
+                faltantes.append("datos:cantidad_familias")
+            if productos_agrupados != resultado.get("productos_agrupados"):
+                faltantes.append("datos:productos_agrupados")
+
+    elif nombre == "agregar_indice_busqueda":
+        productos = conexion.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+        indexados = conexion.execute("SELECT COUNT(*) FROM productos_fts").fetchone()[0]
+        falta_producto = conexion.execute(
+            """
+            SELECT id FROM productos
+            EXCEPT SELECT rowid FROM productos_fts
+            LIMIT 1
+            """
+        ).fetchone()
+        sobra_indice = conexion.execute(
+            """
+            SELECT rowid FROM productos_fts
+            EXCEPT SELECT id FROM productos
+            LIMIT 1
+            """
+        ).fetchone()
+        if productos != indexados or falta_producto or sobra_indice:
+            faltantes.append("datos:productos_fts_cubre_catalogo")
+        if resultado is not None and indexados != resultado.get("productos_indexados"):
+            faltantes.append("datos:cantidad_productos_fts")
+
+    elif nombre == "agregar_equivalencias":
+        grupos = conexion.execute(
+            "SELECT COUNT(*) FROM grupos_equivalencia"
+        ).fetchone()[0]
+        productos_equivalentes = conexion.execute(
+            "SELECT COUNT(*) FROM productos WHERE equivalencia_id IS NOT NULL"
+        ).fetchone()[0]
+        inconsistente = conexion.execute(
+            """
+            SELECT 1
+            FROM grupos_equivalencia g
+            LEFT JOIN productos p ON p.equivalencia_id = g.id
+            GROUP BY g.id, g.cantidad_miembros, g.cantidad_proveedores
+            HAVING COUNT(p.id) != g.cantidad_miembros
+                OR COUNT(DISTINCT p.proveedor) != g.cantidad_proveedores
+                OR COUNT(p.id) < 2
+            LIMIT 1
+            """
+        ).fetchone()
+        colgante = conexion.execute(
+            """
+            SELECT 1 FROM productos p
+            LEFT JOIN grupos_equivalencia g ON g.id = p.equivalencia_id
+            WHERE p.equivalencia_id IS NOT NULL AND g.id IS NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        if inconsistente or colgante:
+            faltantes.append("datos:equivalencias_consistentes")
+        if resultado is not None:
+            if grupos != resultado.get("grupos_equivalencia"):
+                faltantes.append("datos:cantidad_grupos_equivalencia")
+            if productos_equivalentes != resultado.get("productos_equivalentes"):
+                faltantes.append("datos:productos_equivalentes")
+
+    return faltantes
+
+
 def _tabla_seguimiento_existe(conexion):
     return "migraciones_aplicadas" in _nombres_objetos(conexion, "table")
 
@@ -377,6 +486,7 @@ def _inicializar_registro_si_corresponde(conexion):
             estado = _estado_esquema(conexion, nombre_fundacional)
             if estado == "completo":
                 _marcar_aplicada(conexion, nombre_fundacional)
+                conexion.commit()
                 logger.info("REGISTRO_FUNDACIONAL_ADOPTADO esquema=productos")
             elif estado == "parcial":
                 raise ErrorEsquema(
@@ -397,6 +507,23 @@ def _inicializar_registro_si_corresponde(conexion):
         raise ErrorEsquema(
             "BASE_LEGACY_INCONSISTENTE migraciones_parciales=" + ",".join(parciales)
         )
+
+    efectos_incompletos = {
+        nombre: _faltantes_postcondiciones(conexion, nombre)
+        for nombre, estado in estados.items()
+        if estado == "completo"
+    }
+    efectos_incompletos = {
+        nombre: faltantes
+        for nombre, faltantes in efectos_incompletos.items()
+        if faltantes
+    }
+    if efectos_incompletos:
+        detalle = ";".join(
+            f"{nombre}={','.join(faltantes)}"
+            for nombre, faltantes in sorted(efectos_incompletos.items())
+        )
+        raise ErrorEsquema("BASE_LEGACY_DATOS_INCONSISTENTES " + detalle)
 
     baseline_incompleta = sorted(
         nombre
@@ -469,33 +596,33 @@ def migraciones_completadas():
 def _procesar_una(nombre, funcion):
     conexion = conectar()
     try:
+        conexion.execute("BEGIN IMMEDIATE")
         aplicada = _verificar_coherencia(conexion, nombre)
-    finally:
-        conexion.close()
+        if aplicada:
+            conexion.rollback()
+            logger.info(f"MIGRACION saltada nombre={nombre} -- ya estaba aplicada")
+            return "saltada"
 
-    if aplicada:
-        logger.info(f"MIGRACION saltada nombre={nombre} -- ya estaba aplicada")
-        return "saltada"
+        logger.info(f"MIGRACION inicio nombre={nombre}")
+        t0 = time.time()
+        try:
+            resultado = funcion(conexion)
+        except Exception as error:
+            duracion_ms = int((time.time() - t0) * 1000)
+            logger.exception(f"MIGRACION fallo nombre={nombre} duracion_ms={duracion_ms}")
+            raise ErrorEsquema(f"MIGRACION_FALLIDA nombre={nombre}") from error
 
-    logger.info(f"MIGRACION inicio nombre={nombre}")
-    t0 = time.time()
-    try:
-        funcion()
-    except Exception as error:
-        duracion_ms = int((time.time() - t0) * 1000)
-        logger.exception(f"MIGRACION fallo nombre={nombre} duracion_ms={duracion_ms}")
-        raise ErrorEsquema(f"MIGRACION_FALLIDA nombre={nombre}") from error
-
-    # El cuerpo ya retornó y, por contrato, su transacción terminó con commit.
-    # Antes de registrar el éxito se comprueba el resultado real.
-    conexion = conectar()
-    try:
         faltantes = _faltantes_esquema(conexion, nombre)
+        faltantes.extend(_faltantes_postcondiciones(conexion, nombre, resultado))
         if faltantes:
             raise ErrorEsquema(
-                f"MIGRACION_SIN_ESQUEMA nombre={nombre} faltantes={faltantes}"
+                f"MIGRACION_SIN_POSTCONDICIONES nombre={nombre} faltantes={faltantes}"
             )
         _marcar_aplicada(conexion, nombre)
+        _confirmar_atomico(conexion)
+    except BaseException:
+        conexion.rollback()
+        raise
     finally:
         conexion.close()
 

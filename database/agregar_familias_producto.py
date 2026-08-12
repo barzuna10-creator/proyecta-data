@@ -2,8 +2,10 @@ from db import conectar
 from familias import calcular_familias
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
 
     conexion.execute(
         """
@@ -23,13 +25,17 @@ def main():
     if "familia_id" not in columnas:
         conexion.execute("ALTER TABLE productos ADD COLUMN familia_id INTEGER")
 
-    conexion.commit()
-    conexion.close()
-
     print("✅ Tabla familias_producto y columna productos.familia_id listas.")
 
-    total_familias, total_productos = calcular_familias()
+    total_familias, total_productos = calcular_familias(conexion)
+    if propia:
+        conexion.commit()
+        conexion.close()
     print(f"✅ Familias calculadas: {total_familias} familias, {total_productos} productos agrupados.")
+    return {
+        "familias": total_familias,
+        "productos_agrupados": total_productos,
+    }
 
 
 if __name__ == "__main__":

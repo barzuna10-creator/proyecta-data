@@ -13,13 +13,16 @@ fallar ni duplicar nada."""
 from db import conectar
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     conexion.execute(
         "CREATE INDEX IF NOT EXISTS idx_producto_url ON productos (url_producto)"
     )
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     print("✅ Índice de url_producto listo.")
 

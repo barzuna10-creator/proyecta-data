@@ -58,13 +58,15 @@ def analizar_nombre(nombre):
     return firma, nombre_familia, etiqueta_presentacion
 
 
-def calcular_familias():
+def calcular_familias(conexion=None):
     """Recalcula familias_producto y productos.familia_id para las categorías
     en CATEGORIAS_AGRUPABLES. Conserva el mismo id de familia entre corridas
     para la misma combinación (proveedor, categoria, firma_base), para que
     familia_id sea estable si algún día se cachea o se usa en una URL."""
 
-    conexion = conectar()
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
 
     # Limpiar primero: si una categoría sale de la lista blanca en el futuro,
     # sus productos no deben quedar con un familia_id obsoleto.
@@ -133,7 +135,8 @@ def calcular_familias():
     else:
         conexion.execute("DELETE FROM familias_producto")
 
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     return total_familias, total_productos_agrupados

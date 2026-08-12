@@ -1,8 +1,10 @@
 from db import conectar
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     cursor = conexion.cursor()
 
     cursor.execute("""
@@ -51,8 +53,9 @@ def main():
         ON items_proyecto (proyecto_id)
     """)
 
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     print("✅ Tablas de proyectos creadas correctamente.")
 
