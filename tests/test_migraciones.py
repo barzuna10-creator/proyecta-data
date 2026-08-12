@@ -3,11 +3,10 @@ migraciones pendientes en el arranque (ver el hallazgo real que lo
 originó: producción falló con "no such table: usuarios" porque nada
 ejecutaba database/agregar_autenticacion.py contra la base real).
 
-Se prueban los mecanismos del runner (reclamo, liberación al fallar,
-salteo de lo ya aplicado, concurrencia bajo --workers 4) contra un
-registro de migraciones FALSO -- las funciones reales de
-database/agregar_*.py ya están cubiertas por sus propias pruebas y no se
-les tocó ni una línea; lo nuevo a probar es la orquestación."""
+Se prueban los mecanismos del runner (transacción atómica, rollback,
+salteo de lo ya aplicado y concurrencia bajo --workers 4) contra un
+registro de migraciones FALSO. Las regresiones con migraciones reales y
+sus efectos de datos viven en tests/test_release_safety.py."""
 
 import os
 import sqlite3
@@ -49,6 +48,8 @@ class PruebaRegistroFinalizacion(unittest.TestCase):
         self.assertFalse(migraciones._esta_aplicada(self.conexion, "una_migracion"))
         migraciones._marcar_aplicada(self.conexion, "una_migracion")
         self.assertTrue(migraciones._esta_aplicada(self.conexion, "una_migracion"))
+        self.conexion.rollback()
+        self.assertFalse(migraciones._esta_aplicada(self.conexion, "una_migracion"))
 
 
 class PruebaOrden(unittest.TestCase):
@@ -173,6 +174,7 @@ class PruebaMigracionesCompletadas(unittest.TestCase):
         migraciones._asegurar_tabla_seguimiento(conexion)
         migraciones._marcar_aplicada(conexion, "agregar_autenticacion")
         migraciones._marcar_aplicada(conexion, "agregar_proyectos")
+        conexion.commit()
         conexion.close()
         self.assertEqual(
             set(migraciones.migraciones_completadas()), {"agregar_autenticacion", "agregar_proyectos"}
@@ -207,12 +209,9 @@ class PruebaOrquestacion(unittest.TestCase):
     def test_migracion_pendiente_se_ejecuta_y_queda_registrada(self):
         llamadas = []
 
-        def cuerpo():
+        def cuerpo(conexion):
             llamadas.append(1)
-            conexion = _conexion_temporal(self.ruta_db)
             conexion.execute("CREATE TABLE prueba_esquema (id INTEGER)")
-            conexion.commit()
-            conexion.close()
 
         with mock.patch.object(migraciones, "MIGRACIONES", [("prueba", cuerpo)]), mock.patch.object(
             migraciones, "REQUISITOS_ESQUEMA", {"prueba": {"tablas": {"prueba_esquema"}}}
@@ -229,12 +228,9 @@ class PruebaOrquestacion(unittest.TestCase):
     def test_migracion_ya_aplicada_no_se_vuelve_a_ejecutar(self):
         llamadas = []
 
-        def cuerpo():
+        def cuerpo(conexion):
             llamadas.append(1)
-            conexion = _conexion_temporal(self.ruta_db)
             conexion.execute("CREATE TABLE prueba_esquema (id INTEGER)")
-            conexion.commit()
-            conexion.close()
 
         migracion_falsa = [("prueba", cuerpo)]
         with mock.patch.object(migraciones, "MIGRACIONES", migracion_falsa), mock.patch.object(
@@ -247,14 +243,11 @@ class PruebaOrquestacion(unittest.TestCase):
     def test_migracion_fallida_no_se_marca_y_permite_reintentar(self):
         intentos = {"n": 0}
 
-        def cuerpo_que_falla_la_primera_vez():
+        def cuerpo_que_falla_la_primera_vez(conexion):
             intentos["n"] += 1
             if intentos["n"] == 1:
                 raise RuntimeError("falla simulada")
-            conexion = _conexion_temporal(self.ruta_db)
             conexion.execute("CREATE TABLE prueba_esquema (id INTEGER)")
-            conexion.commit()
-            conexion.close()
 
         with mock.patch.object(
             migraciones, "MIGRACIONES", [("prueba", cuerpo_que_falla_la_primera_vez)]
@@ -277,8 +270,8 @@ class PruebaOrquestacion(unittest.TestCase):
     def test_una_migracion_que_falla_bloquea_readiness_y_las_siguientes(self):
         llamadas = []
         migracion_falsa = [
-            ("rota", lambda: (_ for _ in ()).throw(RuntimeError("siempre falla"))),
-            ("sana", lambda: llamadas.append("sana")),
+            ("rota", lambda conexion: (_ for _ in ()).throw(RuntimeError("siempre falla"))),
+            ("sana", lambda conexion: llamadas.append("sana")),
         ]
         requisitos = {
             "rota": {"tablas": {"rota_esquema"}},
@@ -291,7 +284,9 @@ class PruebaOrquestacion(unittest.TestCase):
         self.assertEqual(llamadas, [])
 
     def test_falla_no_emite_resumen_exitoso(self):
-        migracion_falsa = [("rota", lambda: (_ for _ in ()).throw(RuntimeError("siempre falla")))]
+        migracion_falsa = [
+            ("rota", lambda conexion: (_ for _ in ()).throw(RuntimeError("siempre falla")))
+        ]
         with mock.patch.object(migraciones, "MIGRACIONES", migracion_falsa), mock.patch.object(
             migraciones, "REQUISITOS_ESQUEMA", {"rota": {"tablas": {"rota_esquema"}}}
         ), mock.patch.object(migraciones, "logger") as logger_falso, self.assertRaises(
@@ -301,11 +296,8 @@ class PruebaOrquestacion(unittest.TestCase):
         self.assertFalse(any("RESUMEN" in llamada.args[0] for llamada in logger_falso.info.call_args_list))
 
     def test_resumen_final_reporta_todas_al_dia_cuando_no_hay_fallas(self):
-        def sana():
-            conexion = _conexion_temporal(self.ruta_db)
+        def sana(conexion):
             conexion.execute("CREATE TABLE sana_esquema (id INTEGER)")
-            conexion.commit()
-            conexion.close()
 
         migracion_falsa = [("sana", sana)]
         with mock.patch.object(migraciones, "MIGRACIONES", migracion_falsa), mock.patch.object(
@@ -329,6 +321,8 @@ class PruebaConcurrencia(unittest.TestCase):
         archivo = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         archivo.close()
         self.ruta_db = archivo.name
+        conexion = _conexion_temporal(self.ruta_db)
+        conexion.close()
         self._patch_conectar = mock.patch.object(
             migraciones, "conectar", lambda: _conexion_temporal(self.ruta_db)
         )
@@ -347,17 +341,21 @@ class PruebaConcurrencia(unittest.TestCase):
         maximo_activos = 0
         lock = threading.Lock()
         barrera = threading.Barrier(4)
+        errores = []
 
         def worker():
             nonlocal activos, maximo_activos
-            barrera.wait()
-            with migraciones._bloqueo_exclusivo_runner():
-                with lock:
-                    activos += 1
-                    maximo_activos = max(maximo_activos, activos)
-                time.sleep(0.02)
-                with lock:
-                    activos -= 1
+            try:
+                barrera.wait()
+                with migraciones._bloqueo_exclusivo_runner():
+                    with lock:
+                        activos += 1
+                        maximo_activos = max(maximo_activos, activos)
+                    time.sleep(0.02)
+                    with lock:
+                        activos -= 1
+            except Exception as error:
+                errores.append(error)
 
         hilos = [threading.Thread(target=worker) for _ in range(4)]
         for hilo in hilos:
@@ -365,6 +363,7 @@ class PruebaConcurrencia(unittest.TestCase):
         for hilo in hilos:
             hilo.join(timeout=10)
 
+        self.assertEqual(errores, [])
         self.assertEqual(maximo_activos, 1)
 
 

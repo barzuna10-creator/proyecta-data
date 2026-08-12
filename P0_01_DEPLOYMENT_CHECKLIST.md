@@ -17,34 +17,37 @@
 1. Enable the agreed maintenance/read-only window.
 2. Deploy the backend before the frontend.
 3. Do not route traffic until application startup completes.
-4. Confirm the log contains `RESUMEN 14/14 migraciones aplicadas -- esquema verificado`.
+4. Confirm the log contains `RESUMEN 15/15 migraciones aplicadas -- esquema verificado`.
 5. Confirm there is no `STARTUP_ESQUEMA_INVALIDO`,
    `REGISTRO_ESQUEMA_INCONSISTENTE`, `MIGRACION_FALLIDA`, `no such column`,
    `no such table` or recurring `database is locked`.
-6. Query `migraciones_aplicadas` and confirm all 14 registered names exist.
+6. Query `migraciones_aplicadas` and confirm all 15 registered names exist.
 7. Verify actual tables, columns, indexes and canonical conversion rows.
 8. Run `PRAGMA integrity_check` and require `ok`.
 9. Compare representative version-1 projects and approved quotations against
    their pre-deployment totals.
+10. Restart the backend once and confirm all 15 migrations are skipped with
+    the same registry, schema and row counts.
 
 ## Frontend rollout
 
-10. Deploy the new frontend only after the backend gate passes.
-11. Create a new project and confirm calculation version 2.
-12. Validate unit, m, m², L, kg, gallon, pound and divisible presentations.
-13. Validate values immediately below, exactly on and immediately above a
+11. Deploy the new frontend only after the backend gate passes.
+12. Create a new project and confirm calculation version 2.
+13. Validate unit, m, m², L, kg, gallon, pound and divisible presentations.
+14. Validate values immediately below, exactly on and immediately above a
     presentation boundary.
-14. Confirm zero/missing price remains editable but blocks approval.
-15. Confirm insufficient manual coverage requires acknowledgement.
-16. Approve a valid quotation and compare project, print, share, purchase
+15. Confirm zero/missing price remains editable but blocks approval.
+16. Confirm insufficient manual coverage requires acknowledgement.
+17. Approve a valid quotation and compare project, print, share, purchase
     order, purchases and cost-control totals.
-17. Exercise concurrent edit/approval; the snapshot must match the state that
+18. Exercise concurrent edit/approval; the snapshot must match the state that
     passed validation.
-18. Remove maintenance only after every smoke test passes.
+19. Remove maintenance only after every smoke test passes.
 
 ## Immediate rollback triggers
 
-- Any registry/schema mismatch or incomplete migration summary.
+- Any registry/schema mismatch, incomplete migration summary or migration
+  whose schema/data exists without its marker (or vice versa).
 - Any SQLite integrity failure.
 - Any changed version-1 quotation total.
 - Any difference between quotation, approved snapshot, purchase order or cost
