@@ -4,11 +4,22 @@ import secrets
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 
 from db import conectar
 from busqueda import normalizar_texto
 from especificaciones import unidad_comercial as _unidad_comercial
+from especificaciones import presentacion_comercial_sugerida as _presentacion_sugerida
+from api.calculo_cotizacion import (
+    VERSION_CALCULO_ACTUAL,
+    calcular_linea,
+    calculo_aprobable,
+    cargar_conversiones,
+    decimal_api,
+    decimal_exacto_persistido,
+    decimal_persistido,
+)
 from api.observabilidad import logger as _logger, id_de_peticion_actual as _id_peticion
 from api.adaptador_planos import construir_analisis_plano
 from seleccion_automatica import (
@@ -83,6 +94,146 @@ ESTADOS_PROYECTO = {"activo", "completado", "archivado"}
 # contra él, y un valor que la propia app puede escribir nunca debería
 # rechazar su propia escritura.
 ESTADOS_ITEM = {"pendiente", "parcial", "comprado", "descartado"}
+
+
+def _precio_crc(valor):
+    if valor is None:
+        return None
+    decimal = Decimal(str(valor))
+    if not decimal.is_finite() or decimal <= 0:
+        return None
+    return int(decimal.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _calculo_desde_item(item):
+    if item.get("version_calculo") is None:
+        return None
+
+    def numero(campo):
+        valor = item.get(campo)
+        return decimal_api(Decimal(str(valor))) if valor is not None else None
+
+    return {
+        "cantidad_requerida": numero("cantidad_requerida"),
+        "unidad_requerida": item.get("unidad_requerida"),
+        "contenido_presentacion": numero("contenido_presentacion"),
+        "unidad_presentacion": item.get("unidad_presentacion"),
+        "presentacion_divisible": bool(item.get("presentacion_divisible")),
+        "regla_redondeo": item.get("regla_redondeo"),
+        "unidad_compra": item.get("unidad_compra"),
+        "unidades_compra": numero("unidades_compra"),
+        "unidades_compra_override": numero("unidades_compra_override"),
+        "cobertura_compra": numero("cobertura_compra"),
+        "sobrante_estimado": numero("sobrante_estimado"),
+        "precio_presentacion_crc": item.get("precio_presentacion_crc"),
+        "subtotal_crc": item.get("subtotal_cotizado_crc"),
+        "estado": item.get("estado_calculo"),
+        "motivo_revision": item.get("motivo_revision"),
+        "version_calculo": item.get("version_calculo"),
+        "origen_presentacion": item.get("origen_presentacion"),
+        "cobertura_insuficiente": bool(item.get("cobertura_insuficiente")),
+        "requiere_reconocimiento": bool(
+            item.get("cobertura_insuficiente") and not item.get("override_reconocido")
+        ),
+        "override_reconocido": bool(item.get("override_reconocido")),
+    }
+
+
+def _guardar_resultado_calculo(conexion, item_id, calculo):
+    valores_exactos = calculo.get("_valores_exactos", {})
+
+    def persistir(campo):
+        valor = valores_exactos.get(campo)
+        if valor is None:
+            valor_visible = calculo.get(campo)
+            valor = Decimal(str(valor_visible)) if valor_visible is not None else None
+        return decimal_exacto_persistido(valor)
+
+    conexion.execute(
+        """
+        UPDATE items_proyecto SET
+            cantidad_requerida = ?, unidad_requerida = ?,
+            contenido_presentacion = ?, unidad_presentacion = ?,
+            presentacion_divisible = ?, regla_redondeo = ?, unidad_compra = ?,
+            unidades_compra = ?, unidades_compra_override = ?,
+            cobertura_compra = ?, sobrante_estimado = ?,
+            precio_presentacion_crc = ?, subtotal_cotizado_crc = ?,
+            estado_calculo = ?, motivo_revision = ?, version_calculo = ?,
+            origen_presentacion = ?, override_reconocido = ?, cobertura_insuficiente = ?
+        WHERE id = ?
+        """,
+        (
+            persistir("cantidad_requerida"),
+            calculo["unidad_requerida"],
+            persistir("contenido_presentacion"),
+            calculo["unidad_presentacion"],
+            int(calculo["presentacion_divisible"]), calculo["regla_redondeo"],
+            calculo["unidad_compra"],
+            persistir("unidades_compra"),
+            persistir("unidades_compra_override"),
+            persistir("cobertura_compra"),
+            persistir("sobrante_estimado"),
+            calculo["precio_presentacion_crc"], calculo["subtotal_crc"],
+            calculo["estado"], calculo["motivo_revision"], calculo["version_calculo"],
+            calculo["origen_presentacion"], int(calculo["override_reconocido"]),
+            int(calculo["cobertura_insuficiente"]), item_id,
+        ),
+    )
+
+
+def _recalcular_item(conexion, item_id):
+    item = conexion.execute(
+        """
+        SELECT cantidad, unidad_medida, cantidad_requerida, unidad_requerida,
+               contenido_presentacion, unidad_presentacion, presentacion_divisible,
+               unidad_compra, unidades_compra_override, precio_presentacion_crc,
+               origen_presentacion, override_reconocido, precio_al_agregar
+        FROM items_proyecto WHERE id = ?
+        """,
+        (item_id,),
+    ).fetchone()
+    if item is None:
+        return None
+    calculo = calcular_linea(
+        cantidad_requerida=(item["cantidad_requerida"] if item["cantidad_requerida"] is not None else item["cantidad"]),
+        unidad_requerida=(item["unidad_requerida"] or item["unidad_medida"]),
+        contenido_presentacion=item["contenido_presentacion"],
+        unidad_presentacion=item["unidad_presentacion"],
+        presentacion_divisible=bool(item["presentacion_divisible"]),
+        unidad_compra=item["unidad_compra"],
+        precio_presentacion_crc=(
+            item["precio_presentacion_crc"]
+            if item["precio_presentacion_crc"] is not None
+            else _precio_crc(item["precio_al_agregar"])
+        ),
+        origen_presentacion=item["origen_presentacion"],
+        conversiones=cargar_conversiones(conexion),
+        unidades_compra_override=item["unidades_compra_override"],
+        override_reconocido=bool(item["override_reconocido"]),
+    )
+    _guardar_resultado_calculo(conexion, item_id, calculo)
+    return calculo
+
+
+def _inicializar_items_calculo(conexion, proyecto_id):
+    filas = conexion.execute(
+        "SELECT id, cantidad, unidad_medida, precio_al_agregar FROM items_proyecto WHERE proyecto_id = ?",
+        (proyecto_id,),
+    ).fetchall()
+    for fila in filas:
+        conexion.execute(
+            """
+            UPDATE items_proyecto SET
+                cantidad_requerida = ?, unidad_requerida = ?,
+                precio_presentacion_crc = ?, version_calculo = ?
+            WHERE id = ?
+            """,
+            (
+                decimal_persistido(Decimal(str(fila["cantidad"]))), fila["unidad_medida"],
+                _precio_crc(fila["precio_al_agregar"]), VERSION_CALCULO_ACTUAL, fila["id"],
+            ),
+        )
+        _recalcular_item(conexion, fila["id"])
 
 # De dónde puede venir un ítem agregado a un proyecto (ver
 # AUDITORIA_INTEGRAL_PRODUCTO.md, hallazgo §1: "nunca se guarda de dónde
@@ -188,6 +339,22 @@ def _calcular_totales(items):
         if item["estado"] == "descartado":
             continue
 
+        calculo = item.get("calculo_compra")
+        if calculo is not None:
+            precio = calculo.get("precio_presentacion_crc") or 0
+            unidades = calculo.get("unidades_compra") or 0
+            cantidad_comprada = item.get("cantidad_comprada") or 0
+            if item["estado"] == "comprado":
+                monto = item.get("monto_comprado")
+                total_comprado += monto if monto is not None else cantidad_comprada * precio
+            elif item["estado"] == "parcial":
+                monto = item.get("monto_comprado")
+                total_comprado += monto if monto is not None else cantidad_comprada * precio
+                total_pendiente += max(unidades - cantidad_comprada, 0) * precio
+            else:
+                total_pendiente += calculo.get("subtotal_crc") or 0
+            continue
+
         precio = item["precio_actual"]
         if precio is None:
             precio = item["precio_al_agregar"] or 0
@@ -222,7 +389,7 @@ def _clave_orden_partida(nombre_partida):
     return (1, nombre_partida.lower())
 
 
-def _agrupar_por_partida(items):
+def _agrupar_por_partida(items, usar_calculo_confiable=False):
     """Agrupa los ítems de un proyecto (materiales, por ahora) en partidas
     para la cotización. Ítems descartados no forman parte de la cotización
     -- ya se excluyen en todo el resto del sistema (ver _calcular_totales).
@@ -249,9 +416,13 @@ def _agrupar_por_partida(items):
         if item["estado"] == "descartado":
             continue
 
-        precio = item["precio_actual"]
-        if precio is None:
-            precio = item["precio_al_agregar"] or 0
+        if usar_calculo_confiable:
+            subtotal_item = (item.get("calculo_compra") or {}).get("subtotal_crc") or 0
+        else:
+            precio = item["precio_actual"]
+            if precio is None:
+                precio = item["precio_al_agregar"] or 0
+            subtotal_item = item["cantidad"] * precio
 
         nombre_partida = item["partida"] or SIN_PARTIDA
         clave = normalizar_texto(nombre_partida)
@@ -259,7 +430,7 @@ def _agrupar_por_partida(items):
             clave, {"partida": nombre_partida, "items": [], "subtotal": 0}
         )
         grupo["items"].append(item)
-        grupo["subtotal"] += item["cantidad"] * precio
+        grupo["subtotal"] += subtotal_item
 
     for grupo in grupos.values():
         grupo["subtotal"] = round(grupo["subtotal"], 2)
@@ -277,7 +448,8 @@ def _calcular_cotizacion(proyecto, items):
     la misma base es más fácil de auditar a simple vista, y no había una
     única convención "correcta" que asumir sin inventar un criterio propio."""
 
-    partidas = _agrupar_por_partida(items)
+    es_v2 = proyecto.get("version_calculo_cotizacion", 1) >= VERSION_CALCULO_ACTUAL
+    partidas = _agrupar_por_partida(items, usar_calculo_confiable=es_v2)
     subtotal_materiales = round(sum(p["subtotal"] for p in partidas), 2)
 
     indirectos = round(subtotal_materiales * (proyecto["indirectos_porcentaje"] or 0) / 100, 2)
@@ -288,6 +460,28 @@ def _calcular_cotizacion(proyecto, items):
     area_m2 = proyecto.get("area_m2")
     costo_por_m2 = round(total_final / area_m2, 2) if area_m2 else None
 
+    problemas = []
+    if es_v2:
+        for item in items:
+            if item["estado"] == "descartado":
+                continue
+            calculo = item.get("calculo_compra")
+            if not calculo_aprobable(calculo):
+                problemas.append({
+                    "item_id": item["id"],
+                    "nombre": item["nombre"],
+                    "mensaje": (
+                        calculo.get("motivo_revision")
+                        if calculo else "La línea todavía no tiene un cálculo de compra verificable."
+                    ),
+                })
+        if not partidas:
+            problemas.append({
+                "item_id": None,
+                "nombre": None,
+                "mensaje": "La cotización no tiene materiales activos.",
+            })
+
     return {
         "partidas": partidas,
         "subtotal_materiales": subtotal_materiales,
@@ -296,10 +490,17 @@ def _calcular_cotizacion(proyecto, items):
         "margen": margen,
         "total_final": total_final,
         "costo_por_m2": costo_por_m2,
+        "lista_para_aprobar": not problemas,
+        "problemas": problemas,
+        "version_calculo": proyecto.get("version_calculo_cotizacion", 1),
+        "aviso_iva": (
+            "No se confirmó si los precios publicados incluyen IVA. "
+            "La factura final del proveedor puede variar."
+        ),
     }
 
 
-def _obtener_items(conexion, proyecto_id):
+def _obtener_items(conexion, proyecto_id, version_calculo_proyecto=1):
     cursor = conexion.execute(
         """
         SELECT
@@ -311,6 +512,14 @@ def _obtener_items(conexion, proyecto_id):
             i.confianza_match, i.revisado,
             i.cantidad_comprada, i.monto_comprado, i.fecha_compra,
             i.comprobante_tipo, i.comprobante_referencia,
+            i.cantidad_requerida, i.unidad_requerida,
+            i.contenido_presentacion, i.unidad_presentacion,
+            i.unidad_compra, i.presentacion_divisible, i.regla_redondeo,
+            i.unidades_compra, i.unidades_compra_override,
+            i.cobertura_compra, i.sobrante_estimado,
+            i.precio_presentacion_crc, i.subtotal_cotizado_crc,
+            i.estado_calculo, i.motivo_revision, i.version_calculo,
+            i.origen_presentacion, i.override_reconocido, i.cobertura_insuficiente,
             COALESCE(pr.nombre, i.nombre_al_agregar) AS nombre,
             COALESCE(pr.marca, i.marca_al_agregar) AS marca,
             COALESCE(pr.categoria, i.categoria_al_agregar) AS categoria,
@@ -336,6 +545,14 @@ def _obtener_items(conexion, proyecto_id):
         # 2.08 m²...) -- ver PRUEBA_INGENIERO_BANO.md, hallazgo #2. None
         # si no hay señal confiable; el frontend cae a "c/u" en ese caso.
         item["unidad_comercial"] = _unidad_comercial(item["nombre"], item["categoria"])
+        item["calculo_compra"] = (
+            _calculo_desde_item(item)
+            if version_calculo_proyecto >= VERSION_CALCULO_ACTUAL else None
+        )
+        item["sugerencia_presentacion"] = (
+            _presentacion_sugerida(item["nombre"], item["categoria"])
+            if item.get("origen_presentacion") not in {"PROVEEDOR", "USUARIO"} else None
+        )
         items.append(item)
 
     return items
@@ -350,10 +567,14 @@ def crear_proyecto(propietario_id, nombre, comentario=None, fecha_objetivo=None)
         """
         INSERT INTO proyectos (
             propietario_id, nombre, comentario, estado,
-            fecha_objetivo, token_compartido, fecha_creacion, fecha_actualizacion
-        ) VALUES (?, ?, ?, 'activo', ?, ?, ?, ?)
+            fecha_objetivo, token_compartido, fecha_creacion, fecha_actualizacion,
+            version_calculo_cotizacion
+        ) VALUES (?, ?, ?, 'activo', ?, ?, ?, ?, ?)
         """,
-        (propietario_id, nombre, comentario, fecha_objetivo, token, ahora, ahora),
+        (
+            propietario_id, nombre, comentario, fecha_objetivo, token, ahora, ahora,
+            VERSION_CALCULO_ACTUAL,
+        ),
     )
     proyecto_id = cursor.lastrowid
     conexion.commit()
@@ -384,11 +605,30 @@ def listar_proyectos(propietario_id, incluir_archivados=False):
             COUNT(CASE WHEN i.estado != 'descartado' THEN i.id END) AS cantidad_items,
             COALESCE(SUM(
                 CASE WHEN i.estado = 'pendiente'
-                THEN i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0) END
+                THEN CASE
+                    WHEN p.version_calculo_cotizacion >= {VERSION_CALCULO_ACTUAL}
+                    THEN COALESCE(i.subtotal_cotizado_crc, 0)
+                    ELSE i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0)
+                END
+                WHEN i.estado = 'parcial'
+                THEN CASE
+                    WHEN p.version_calculo_cotizacion >= {VERSION_CALCULO_ACTUAL}
+                    THEN MAX(CAST(COALESCE(i.unidades_compra, '0') AS REAL) - COALESCE(i.cantidad_comprada, 0), 0)
+                         * COALESCE(i.precio_presentacion_crc, 0)
+                    ELSE MAX(i.cantidad - COALESCE(i.cantidad_comprada, 0), 0)
+                         * COALESCE(pr.precio, i.precio_al_agregar, 0)
+                END END
             ), 0) AS total_pendiente,
             COALESCE(SUM(
-                CASE WHEN i.estado = 'comprado'
-                THEN i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0) END
+                CASE WHEN i.estado IN ('comprado', 'parcial')
+                THEN COALESCE(
+                    i.monto_comprado,
+                    COALESCE(i.cantidad_comprada, 0) * CASE
+                        WHEN p.version_calculo_cotizacion >= {VERSION_CALCULO_ACTUAL}
+                        THEN COALESCE(i.precio_presentacion_crc, 0)
+                        ELSE COALESCE(pr.precio, i.precio_al_agregar, 0)
+                    END
+                ) END
             ), 0) AS total_comprado
         FROM proyectos p
         LEFT JOIN items_proyecto i ON i.proyecto_id = p.id
@@ -415,8 +655,18 @@ def listar_proyectos(propietario_id, incluir_archivados=False):
     return resumenes
 
 
-def obtener_proyecto(proyecto_id=None, propietario_id=None, token=None):
-    conexion = conectar()
+def obtener_proyecto(
+    proyecto_id=None, propietario_id=None, token=None, *, _conexion=None
+):
+    """Obtiene un proyecto desde una vista consistente de la base.
+
+    ``_conexion`` es exclusivamente para operaciones internas que necesitan
+    que la lectura forme parte de una transacción mayor. Las llamadas
+    existentes siguen abriendo y cerrando su propia conexión.
+    """
+
+    conexion = _conexion or conectar()
+    conexion_propia = _conexion is None
 
     if token is not None:
         fila = conexion.execute(
@@ -429,12 +679,16 @@ def obtener_proyecto(proyecto_id=None, propietario_id=None, token=None):
         ).fetchone()
 
     if not fila:
-        conexion.close()
+        if conexion_propia:
+            conexion.close()
         return None
 
     proyecto = dict(fila)
-    items = _obtener_items(conexion, proyecto["id"])
-    conexion.close()
+    items = _obtener_items(
+        conexion, proyecto["id"], proyecto.get("version_calculo_cotizacion", 1)
+    )
+    if conexion_propia:
+        conexion.close()
 
     total_pendiente, total_comprado = _calcular_totales(items)
 
@@ -477,13 +731,18 @@ def _resumen_partidas_para_congelar(partidas):
     for grupo in partidas:
         items_resumidos = []
         for item in grupo["items"]:
-            precio = item["precio_actual"]
-            if precio is None:
-                precio = item["precio_al_agregar"] or 0
+            calculo = item.get("calculo_compra")
+            if calculo is not None:
+                precio = calculo.get("precio_presentacion_crc") or 0
+            else:
+                precio = item["precio_actual"]
+                if precio is None:
+                    precio = item["precio_al_agregar"] or 0
             items_resumidos.append({
                 "nombre": item["nombre"],
                 "cantidad": item["cantidad"],
                 "precio_unitario": precio,
+                "calculo_compra": item.get("calculo_compra"),
             })
         resumen.append({
             "partida": grupo["partida"],
@@ -499,33 +758,58 @@ def congelar_presupuesto(proyecto_id, propietario_id):
     llamar obtener_control_costos() justo después), o None si el proyecto
     no existe o no pertenece a propietario_id."""
 
-    proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
-    if proyecto is None:
-        return None
-
-    cotizacion = proyecto["cotizacion"]
-
     conexion = conectar()
-    conexion.execute(
-        """
-        INSERT INTO presupuesto_congelado (
-            proyecto_id, fecha_creacion, subtotal_materiales,
-            indirectos, imprevistos, margen, total_final, snapshot_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
+    try:
+        # Tomar el bloqueo de escritura ANTES de leer impide que otra
+        # solicitud confirme un cambio entre la validación y el INSERT.
+        # Lectura, validación y snapshot pertenecen así a una sola vista.
+        conexion.execute("BEGIN IMMEDIATE")
+        proyecto = obtener_proyecto(
             proyecto_id,
-            _ahora(),
-            cotizacion["subtotal_materiales"],
-            cotizacion["indirectos"],
-            cotizacion["imprevistos"],
-            cotizacion["margen"],
-            cotizacion["total_final"],
-            json.dumps(_resumen_partidas_para_congelar(cotizacion["partidas"]), ensure_ascii=False),
-        ),
-    )
-    conexion.commit()
-    conexion.close()
+            propietario_id=propietario_id,
+            _conexion=conexion,
+        )
+        if proyecto is None:
+            conexion.rollback()
+            return None
+
+        cotizacion = proyecto["cotizacion"]
+
+        if proyecto.get("version_calculo_cotizacion", 1) >= VERSION_CALCULO_ACTUAL:
+            if not cotizacion["lista_para_aprobar"]:
+                raise ValueError(
+                    "La cotización tiene líneas que requieren revisión antes de aprobar."
+                )
+
+        conexion.execute(
+            """
+            INSERT INTO presupuesto_congelado (
+                proyecto_id, fecha_creacion, subtotal_materiales,
+                indirectos, imprevistos, margen, total_final, snapshot_json,
+                version_calculo
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proyecto_id,
+                _ahora(),
+                cotizacion["subtotal_materiales"],
+                cotizacion["indirectos"],
+                cotizacion["imprevistos"],
+                cotizacion["margen"],
+                cotizacion["total_final"],
+                json.dumps(
+                    _resumen_partidas_para_congelar(cotizacion["partidas"]),
+                    ensure_ascii=False,
+                ),
+                proyecto.get("version_calculo_cotizacion", 1),
+            ),
+        )
+        conexion.commit()
+    except Exception:
+        conexion.rollback()
+        raise
+    finally:
+        conexion.close()
 
     return obtener_control_costos(proyecto_id, propietario_id)
 
@@ -546,7 +830,7 @@ def obtener_control_costos(proyecto_id, propietario_id):
     fila = conexion.execute(
         """
         SELECT id, fecha_creacion, subtotal_materiales, indirectos,
-               imprevistos, margen, total_final, snapshot_json
+               imprevistos, margen, total_final, snapshot_json, version_calculo
         FROM presupuesto_congelado
         WHERE proyecto_id = ?
         ORDER BY fecha_creacion DESC, id DESC
@@ -621,19 +905,52 @@ def _agrupar_por_proveedor(items):
         if item["estado"] not in ("pendiente", "parcial"):
             continue
 
-        cantidad_pendiente = max(item["cantidad"] - (item.get("cantidad_comprada") or 0), 0)
-        if cantidad_pendiente <= 0:
-            continue
+        calculo = item.get("calculo_compra")
+        if calculo is not None and item.get("unidades_compra") is not None:
+            cantidad_objetivo_exacta = Decimal(str(item["unidades_compra"] or "0"))
+            cantidad_comprada_exacta = Decimal(str(item.get("cantidad_comprada") or 0))
+            cantidad_pendiente_exacta = max(
+                cantidad_objetivo_exacta - cantidad_comprada_exacta,
+                Decimal("0"),
+            )
+            if cantidad_pendiente_exacta <= 0:
+                continue
+            cantidad_pendiente = decimal_api(cantidad_pendiente_exacta)
+        else:
+            cantidad_objetivo = item["cantidad"]
+            cantidad_pendiente = max(
+                cantidad_objetivo - (item.get("cantidad_comprada") or 0), 0
+            )
+            if cantidad_pendiente <= 0:
+                continue
 
-        precio = item["precio_actual"]
-        if precio is None:
-            precio = item["precio_al_agregar"] or 0
+        if calculo is not None:
+            precio = calculo.get("precio_presentacion_crc") or 0
+        else:
+            precio = item["precio_actual"]
+            if precio is None:
+                precio = item["precio_al_agregar"] or 0
+
+        if calculo is not None and item.get("unidades_compra") is not None:
+            subtotal_pendiente = int(
+                (cantidad_pendiente_exacta * Decimal(str(precio))).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+        else:
+            subtotal_pendiente = cantidad_pendiente * precio
 
         grupo = grupos.setdefault(
             item["proveedor"], {"proveedor": item["proveedor"], "items": [], "subtotal": 0}
         )
-        grupo["items"].append({**item, "cantidad_pendiente": cantidad_pendiente})
-        grupo["subtotal"] += cantidad_pendiente * precio
+        grupo["items"].append({
+            **item,
+            "cantidad_pendiente": cantidad_pendiente,
+            "unidad_cantidad_pendiente": (
+                calculo.get("unidad_compra") if calculo else item.get("unidad_medida")
+            ),
+        })
+        grupo["subtotal"] += subtotal_pendiente
 
     for grupo in grupos.values():
         grupo["subtotal"] = round(grupo["subtotal"], 2)
@@ -706,10 +1023,16 @@ def generar_orden_compra(proyecto_id, propietario_id, proveedor):
         {
             "nombre": item["nombre"],
             "cantidad": item["cantidad_pendiente"],
+            "unidad_compra": item.get("unidad_cantidad_pendiente"),
             "precio_unitario": (
-                item["precio_actual"] if item["precio_actual"] is not None
-                else (item["precio_al_agregar"] or 0)
+                item["calculo_compra"]["precio_presentacion_crc"]
+                if item.get("calculo_compra")
+                else (
+                    item["precio_actual"] if item["precio_actual"] is not None
+                    else (item["precio_al_agregar"] or 0)
+                )
             ),
+            "calculo_compra": item.get("calculo_compra"),
         }
         for item in grupo["items"]
     ]
@@ -761,6 +1084,7 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
     item = conexion.execute(
         """
         SELECT i.id, i.cantidad, i.cantidad_comprada, i.monto_comprado, i.precio_al_agregar,
+               i.unidades_compra, i.precio_presentacion_crc, i.version_calculo,
                pr.precio AS precio_actual
         FROM items_proyecto i
         JOIN proyectos p ON p.id = i.proyecto_id
@@ -774,8 +1098,13 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
         conexion.close()
         return None
 
-    precio = item["precio_actual"] if item["precio_actual"] is not None else (item["precio_al_agregar"] or 0)
-    cantidad_pendiente = max(item["cantidad"] - (item["cantidad_comprada"] or 0), 0)
+    if item["version_calculo"] is not None and item["unidades_compra"] is not None:
+        precio = item["precio_presentacion_crc"] or 0
+        cantidad_objetivo = float(item["unidades_compra"])
+    else:
+        precio = item["precio_actual"] if item["precio_actual"] is not None else (item["precio_al_agregar"] or 0)
+        cantidad_objetivo = item["cantidad"]
+    cantidad_pendiente = max(cantidad_objetivo - (item["cantidad_comprada"] or 0), 0)
     cantidad_efectiva = min(cantidad, cantidad_pendiente)
 
     if cantidad_efectiva <= 0:
@@ -786,7 +1115,7 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
 
     nueva_cantidad_comprada = round((item["cantidad_comprada"] or 0) + cantidad_efectiva, 4)
     nuevo_monto_comprado = round((item["monto_comprado"] or 0) + monto_efectivo, 2)
-    nuevo_estado = "comprado" if nueva_cantidad_comprada >= item["cantidad"] else "parcial"
+    nuevo_estado = "comprado" if nueva_cantidad_comprada >= cantidad_objetivo else "parcial"
 
     conexion.execute(
         """
@@ -815,6 +1144,7 @@ def actualizar_proyecto(proyecto_id, propietario_id, cambios):
         "nombre", "comentario", "estado", "fecha_objetivo",
         "cliente", "direccion", "area_m2",
         "indirectos_porcentaje", "imprevistos_porcentaje", "margen_porcentaje",
+        "version_calculo_cotizacion",
     }
     cambios = {k: v for k, v in cambios.items() if k in campos_validos and v is not None}
 
@@ -826,13 +1156,22 @@ def actualizar_proyecto(proyecto_id, propietario_id, cambios):
 
     conexion = conectar()
     fila = conexion.execute(
-        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+        "SELECT id, version_calculo_cotizacion FROM proyectos WHERE id = ? AND propietario_id = ?",
         (proyecto_id, propietario_id),
     ).fetchone()
 
     if not fila:
         conexion.close()
         return None
+
+    version_solicitada = cambios.get("version_calculo_cotizacion")
+    if version_solicitada is not None:
+        if version_solicitada != VERSION_CALCULO_ACTUAL:
+            conexion.close()
+            raise ValueError("Solo se puede migrar a la versión de cálculo vigente")
+        if fila["version_calculo_cotizacion"] > version_solicitada:
+            conexion.close()
+            raise ValueError("La versión de cálculo de un proyecto no se puede degradar")
 
     cambios["fecha_actualizacion"] = _ahora()
     asignaciones = ", ".join(f"{campo} = ?" for campo in cambios)
@@ -841,6 +1180,11 @@ def actualizar_proyecto(proyecto_id, propietario_id, cambios):
         f"UPDATE proyectos SET {asignaciones} WHERE id = ?",
         (*cambios.values(), proyecto_id),
     )
+    if (
+        version_solicitada == VERSION_CALCULO_ACTUAL
+        and fila["version_calculo_cotizacion"] < VERSION_CALCULO_ACTUAL
+    ):
+        _inicializar_items_calculo(conexion, proyecto_id)
     conexion.commit()
     conexion.close()
 
@@ -877,7 +1221,7 @@ def agregar_item(
     conexion = conectar()
 
     proyecto = conexion.execute(
-        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+        "SELECT id, version_calculo_cotizacion FROM proyectos WHERE id = ? AND propietario_id = ?",
         (proyecto_id, propietario_id),
     ).fetchone()
 
@@ -962,10 +1306,26 @@ def agregar_item(
     # ON CONFLICT DO UPDATE -- (proyecto_id, proveedor, id_proveedor) es
     # UNIQUE, así que esta lectura siempre identifica la fila correcta,
     # haya sido inserción o actualización.
-    item_id = conexion.execute(
-        "SELECT id FROM items_proyecto WHERE proyecto_id = ? AND proveedor = ? AND id_proveedor = ?",
+    item_guardado = conexion.execute(
+        "SELECT id, cantidad, unidad_requerida FROM items_proyecto WHERE proyecto_id = ? AND proveedor = ? AND id_proveedor = ?",
         (proyecto_id, proveedor, id_proveedor),
-    ).fetchone()["id"]
+    ).fetchone()
+    item_id = item_guardado["id"]
+    if proyecto["version_calculo_cotizacion"] >= VERSION_CALCULO_ACTUAL:
+        conexion.execute(
+            """
+            UPDATE items_proyecto SET
+                cantidad_requerida = ?, unidad_requerida = ?,
+                precio_presentacion_crc = ?, version_calculo = ?
+            WHERE id = ?
+            """,
+            (
+                decimal_persistido(Decimal(str(item_guardado["cantidad"]))),
+                unidad_medida if unidad_medida is not None else item_guardado["unidad_requerida"],
+                _precio_crc(producto["precio"]), VERSION_CALCULO_ACTUAL, item_id,
+            ),
+        )
+        _recalcular_item(conexion, item_id)
     _eventos.registrar_evento(
         conexion, _eventos.TIPO_ITEM_AGREGADO,
         usuario_id=propietario_id, proyecto_id=proyecto_id, item_id=item_id,
@@ -981,8 +1341,16 @@ def agregar_item(
 
 
 def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
-    campos_validos = {"cantidad", "estado", "prioridad", "comentario", "partida", "revisado"}
-    cambios = {k: v for k, v in cambios.items() if k in campos_validos and v is not None}
+    campos_validos = {
+        "cantidad", "estado", "prioridad", "comentario", "partida", "revisado",
+        "unidad_requerida", "contenido_presentacion", "unidad_presentacion",
+        "unidad_compra", "presentacion_divisible", "unidades_compra_override",
+        "override_reconocido",
+    }
+    cambios = {
+        k: v for k, v in cambios.items()
+        if k in campos_validos and (v is not None or k == "unidades_compra_override")
+    }
 
     if "estado" in cambios and cambios["estado"] not in ESTADOS_ITEM:
         raise ValueError(f"Estado inválido: {cambios['estado']}")
@@ -990,13 +1358,37 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
     conexion = conectar()
 
     proyecto = conexion.execute(
-        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+        "SELECT id, version_calculo_cotizacion FROM proyectos WHERE id = ? AND propietario_id = ?",
         (proyecto_id, propietario_id),
     ).fetchone()
 
     if not proyecto:
         conexion.close()
         return None
+
+    campos_presentacion = {
+        "contenido_presentacion", "unidad_presentacion", "unidad_compra",
+        "presentacion_divisible",
+    }
+    if campos_presentacion.intersection(cambios):
+        requeridos = ("contenido_presentacion", "unidad_presentacion", "unidad_compra")
+        valores_actuales = conexion.execute(
+            """
+            SELECT contenido_presentacion, unidad_presentacion, unidad_compra
+            FROM items_proyecto WHERE id = ? AND proyecto_id = ?
+            """,
+            (item_id, proyecto_id),
+        ).fetchone()
+        if valores_actuales is None:
+            conexion.close()
+            return None
+        combinados = {
+            campo: cambios.get(campo, valores_actuales[campo]) for campo in requeridos
+        }
+        if not all(combinados.values()):
+            conexion.close()
+            raise ValueError("Confirmar una presentación requiere contenido, unidad y empaque")
+        cambios["origen_presentacion"] = "USUARIO"
 
     # Leído ANTES del UPDATE cuando podría ser una aceptación (revisado
     # pasando a True) o un cambio de estado -- es la única forma de saber
@@ -1008,7 +1400,8 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
         item_previo = conexion.execute(
             """
             SELECT revisado, origen, confianza_match, proveedor, id_proveedor,
-                   categoria_al_agregar, texto_original, fecha_agregado, cantidad
+                   categoria_al_agregar, texto_original, fecha_agregado, cantidad,
+                   unidades_compra, version_calculo
             FROM items_proyecto WHERE id = ? AND proyecto_id = ?
             """,
             (item_id, proyecto_id),
@@ -1023,7 +1416,13 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
     # porque sin una cantidad real asociada no significa nada.
     if item_previo is not None and cambios.get("estado") in ("comprado", "pendiente"):
         if cambios["estado"] == "comprado":
-            cambios["cantidad_comprada"] = cambios.get("cantidad", item_previo["cantidad"])
+            cantidad_total = (
+                float(item_previo["unidades_compra"])
+                if item_previo["version_calculo"] is not None
+                and item_previo["unidades_compra"] is not None
+                else cambios.get("cantidad", item_previo["cantidad"])
+            )
+            cambios["cantidad_comprada"] = cantidad_total
             cambios["monto_comprado"] = None
             cambios["fecha_compra"] = _ahora()
         else:
@@ -1032,6 +1431,25 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
             cambios["fecha_compra"] = None
 
     if cambios:
+        requiere_recalculo = bool(
+            {
+                "cantidad", "unidad_requerida", "contenido_presentacion",
+                "unidad_presentacion", "unidad_compra", "presentacion_divisible",
+                "unidades_compra_override", "override_reconocido",
+            }.intersection(cambios)
+        )
+        cambios_de_cobertura = {
+            "cantidad", "unidad_requerida", "contenido_presentacion",
+            "unidad_presentacion", "unidad_compra", "presentacion_divisible",
+            "unidades_compra_override",
+        }
+        if cambios_de_cobertura.intersection(cambios):
+            # El reconocimiento corresponde al cálculo que el usuario vio.
+            # Cualquier cambio que pueda alterar la cobertura exige una
+            # confirmación nueva si vuelve a existir un faltante.
+            cambios["override_reconocido"] = False
+        if "cantidad" in cambios and proyecto["version_calculo_cotizacion"] >= VERSION_CALCULO_ACTUAL:
+            cambios["cantidad_requerida"] = decimal_persistido(Decimal(str(cambios["cantidad"])))
         asignaciones = ", ".join(f"{campo} = ?" for campo in cambios)
         cursor = conexion.execute(
             f"UPDATE items_proyecto SET {asignaciones} WHERE id = ? AND proyecto_id = ?",
@@ -1045,6 +1463,9 @@ def actualizar_item(proyecto_id, propietario_id, item_id, cambios):
         if cursor.rowcount == 0:
             conexion.close()
             return None
+
+        if requiere_recalculo and proyecto["version_calculo_cotizacion"] >= VERSION_CALCULO_ACTUAL:
+            _recalcular_item(conexion, item_id)
 
         if (
             item_previo is not None

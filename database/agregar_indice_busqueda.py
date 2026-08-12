@@ -2,8 +2,10 @@ from db import conectar
 from busqueda import reconstruir_indice
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
 
     conexion.execute(
         """
@@ -16,13 +18,14 @@ def main():
         """
     )
 
-    conexion.commit()
-    conexion.close()
-
     print("✅ Tabla productos_fts creada.")
 
-    cantidad = reconstruir_indice()
+    cantidad = reconstruir_indice(conexion)
+    if propia:
+        conexion.commit()
+        conexion.close()
     print(f"✅ Índice reconstruido: {cantidad} productos indexados.")
+    return {"productos_indexados": cantidad}
 
 
 if __name__ == "__main__":

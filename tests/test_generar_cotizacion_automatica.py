@@ -179,6 +179,8 @@ class PruebaGenerarCotizacionAutomatica(unittest.TestCase):
         import db
         self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
         self._patch_db.start()
+        from database.agregar_calculo_compra import main as migrar_calculo_compra
+        migrar_calculo_compra()
 
         conexion = sqlite3.connect(self.ruta_db)
         _insertar_producto(
@@ -229,9 +231,11 @@ class PruebaGenerarCotizacionAutomatica(unittest.TestCase):
         self.assertEqual(item["regla_generadora"], "cuadro_puertas")
         self.assertIn(item["confianza_match"], ("alta", "media", "baja"))
 
-    def test_la_cotizacion_ya_refleja_el_item_agregado(self):
+    def test_la_cotizacion_refleja_el_item_sin_confiar_en_presentacion_inferida(self):
         resultado = generar_cotizacion_automatica(self.proyecto["id"], self.PROPIETARIO)
-        self.assertEqual(resultado["cotizacion"]["subtotal_materiales"], 10000 * 2)
+        self.assertEqual(resultado["cotizacion"]["subtotal_materiales"], 0)
+        self.assertFalse(resultado["cotizacion"]["lista_para_aprobar"])
+        self.assertEqual(resultado["items"][0]["calculo_compra"]["estado"], "REQUIRES_REVIEW")
 
     def test_cantidad_del_material_del_plano_se_respeta(self):
         resultado = generar_cotizacion_automatica(self.proyecto["id"], self.PROPIETARIO)

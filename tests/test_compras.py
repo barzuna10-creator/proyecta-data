@@ -266,6 +266,7 @@ class PruebaIntegracionConControlDeCostos(BasePruebaIntegracion):
         pid = proyecto["id"]
         proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 10)  # 100,000
         item_id = proyecto["items"][0]["id"]
+        self._confirmar_presentaciones_unitarias(pid)
         congelar_presupuesto(pid, self.PROPIETARIO)
 
         registrar_compra_item(pid, self.PROPIETARIO, item_id, 3)  # 30,000 de 100,000
@@ -283,6 +284,7 @@ class PruebaIntegracionConControlDeCostos(BasePruebaIntegracion):
         pid = proyecto["id"]
         proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 10)
         item_id = proyecto["items"][0]["id"]
+        self._confirmar_presentaciones_unitarias(pid)
         congelar_presupuesto(pid, self.PROPIETARIO)
 
         registrar_compra_item(pid, self.PROPIETARIO, item_id, 3)

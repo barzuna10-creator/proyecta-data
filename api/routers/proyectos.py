@@ -45,6 +45,7 @@ class ActualizarProyectoRequest(BaseModel):
     indirectos_porcentaje: float | None = Field(default=None, ge=0, le=1000)
     imprevistos_porcentaje: float | None = Field(default=None, ge=0, le=1000)
     margen_porcentaje: float | None = Field(default=None, ge=0, le=1000)
+    version_calculo_cotizacion: int | None = Field(default=None, ge=1)
 
     _validar_nombre = field_validator("nombre")(_no_vacio)
 
@@ -99,6 +100,13 @@ class ActualizarItemRequest(BaseModel):
     # por defecto (no se manda) para que ningún caller existente (agregar/
     # actualizar a mano) se vea afectado.
     revisado: bool | None = None
+    unidad_requerida: str | None = None
+    contenido_presentacion: float | None = Field(default=None, gt=0, le=1_000_000)
+    unidad_presentacion: str | None = None
+    unidad_compra: str | None = None
+    presentacion_divisible: bool | None = None
+    unidades_compra_override: float | None = Field(default=None, gt=0, le=1_000_000)
+    override_reconocido: bool | None = None
 
 
 CAMPOS_INTERNOS_PROYECTO = {"propietario_id", "indirectos_porcentaje", "imprevistos_porcentaje", "margen_porcentaje"}
@@ -175,7 +183,7 @@ def actualizar_proyecto(
 ):
     try:
         proyecto = repo.actualizar_proyecto(
-            proyecto_id, propietario_id, body.model_dump()
+            proyecto_id, propietario_id, body.model_dump(exclude_unset=True)
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))
@@ -236,7 +244,7 @@ def actualizar_item(
 ):
     try:
         proyecto = repo.actualizar_item(
-            proyecto_id, propietario_id, item_id, body.model_dump()
+            proyecto_id, propietario_id, item_id, body.model_dump(exclude_unset=True)
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))
@@ -318,7 +326,10 @@ def congelar_presupuesto(
     una nueva línea base) -- cada llamada agrega una fila nueva, ninguna
     se sobreescribe (ver repo.congelar_presupuesto)."""
 
-    resultado = repo.congelar_presupuesto(proyecto_id, propietario_id)
+    try:
+        resultado = repo.congelar_presupuesto(proyecto_id, propietario_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
 
     if resultado is None:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")

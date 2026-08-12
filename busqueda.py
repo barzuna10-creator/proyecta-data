@@ -148,11 +148,13 @@ def tokenizar(texto_normalizado):
     return tokens
 
 
-def reconstruir_indice():
+def reconstruir_indice(conexion=None):
     """Reconstruye el índice completo desde `productos`. Pensado para correr
     después de cada scraping (medido: ~180ms para todo el catálogo)."""
 
-    conexion = conectar()
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     try:
         # `productos_fts` es una tabla FTS5 "contentless" (content='') --
         # no soporta DELETE normal (SQLite lo rechaza: "cannot DELETE
@@ -179,7 +181,8 @@ def reconstruir_indice():
             datos,
         )
 
-        conexion.commit()
+        if propia:
+            conexion.commit()
         return len(datos)
     finally:
         # Investigación "database is locked" en el arranque: si algo entre
@@ -189,7 +192,8 @@ def reconstruir_indice():
         # candado de escritura pegado por el resto de la vida del proceso.
         # Cerrar acá, siempre, haya pasado lo que haya pasado, descarta
         # cualquier transacción sin confirmar y libera el candado.
-        conexion.close()
+        if propia:
+            conexion.close()
 
 
 def _condicion_fts(token):

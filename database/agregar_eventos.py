@@ -23,8 +23,10 @@ fallar ni duplicar nada."""
 from db import conectar
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     cursor = conexion.cursor()
 
     cursor.execute("""
@@ -57,8 +59,9 @@ def main():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_eventos_categoria ON eventos (categoria)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_eventos_texto_material ON eventos (texto_material)")
 
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     print("✅ Tabla de eventos lista.")
 

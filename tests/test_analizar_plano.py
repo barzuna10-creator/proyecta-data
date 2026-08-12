@@ -134,6 +134,8 @@ class PruebaAnalizarPlano(unittest.TestCase):
         import db
         self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
         self._patch_db.start()
+        from database.agregar_calculo_compra import main as migrar_calculo_compra
+        migrar_calculo_compra()
         self._patch_executor = mock.patch("api.repositorio_proyectos._EXECUTOR_PLANOS")
         executor_falso = self._patch_executor.start()
         futuro_falso = mock.MagicMock()
@@ -209,6 +211,8 @@ class PruebaEliminarPlano(unittest.TestCase):
         import db
         self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
         self._patch_db.start()
+        from database.agregar_calculo_compra import main as migrar_calculo_compra
+        migrar_calculo_compra()
         self._patch_executor = mock.patch("api.repositorio_proyectos._EXECUTOR_PLANOS")
         executor_falso = self._patch_executor.start()
         futuro_falso = mock.MagicMock()

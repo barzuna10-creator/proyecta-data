@@ -58,6 +58,7 @@ class PruebaCongelarPresupuesto(BasePruebaIntegracion):
         actualizar_proyecto(pid, self.PROPIETARIO, {
             "indirectos_porcentaje": 10, "imprevistos_porcentaje": 5, "margen_porcentaje": 15,
         })
+        self._confirmar_presentaciones_unitarias(pid)
         return pid
 
     def test_congela_los_totales_exactos_de_la_cotizacion_actual(self):
@@ -81,7 +82,10 @@ class PruebaCongelarPresupuesto(BasePruebaIntegracion):
         partidas = resultado["linea_base"]["partidas"]
         self.assertTrue(partidas)
         item = partidas[0]["items"][0]
-        self.assertEqual(set(item.keys()), {"nombre", "cantidad", "precio_unitario"})
+        self.assertEqual(
+            set(item.keys()),
+            {"nombre", "cantidad", "precio_unitario", "calculo_compra"},
+        )
 
     def test_congelar_dos_veces_no_borra_la_linea_base_anterior(self):
         pid = self._proyecto_con_cotizacion()
@@ -114,6 +118,7 @@ class PruebaComparacionContraGastoReal(BasePruebaIntegracion):
         # el gasto real se pueda comparar contra un número redondo sin ruido de porcentajes
         proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 10)
         item_id = proyecto["items"][0]["id"]
+        self._confirmar_presentaciones_unitarias(pid)
         congelar_presupuesto(pid, self.PROPIETARIO)
         return pid, item_id
 
@@ -131,12 +136,12 @@ class PruebaComparacionContraGastoReal(BasePruebaIntegracion):
 
     def test_estado_por_agotarse_desde_90_por_ciento(self):
         pid, item_id = self._proyecto_congelado()
-        actualizar_item(pid, self.PROPIETARIO, item_id, {"cantidad": 9.5})  # 95,000 de 100,000
+        actualizar_item(pid, self.PROPIETARIO, item_id, {"cantidad": 9})  # 90,000 de 100,000
         actualizar_item(pid, self.PROPIETARIO, item_id, {"estado": "comprado"})
 
         resultado = obtener_control_costos(pid, self.PROPIETARIO)
 
-        self.assertEqual(resultado["porcentaje_ejecutado"], 95.0)
+        self.assertEqual(resultado["porcentaje_ejecutado"], 90.0)
         self.assertEqual(resultado["estado"], "por_agotarse")
 
     def test_estado_excedido_cuando_el_gasto_supera_el_presupuesto(self):

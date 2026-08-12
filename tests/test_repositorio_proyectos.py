@@ -12,6 +12,7 @@ database/proyecta.db.
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -418,6 +419,8 @@ class BasePruebaIntegracion(unittest.TestCase):
         self.ruta_db = _crear_db_temporal()
         self._patch = self._parchar_db()
         self._patch.start()
+        from database.agregar_calculo_compra import main as migrar_calculo_compra
+        migrar_calculo_compra()
 
     def tearDown(self):
         self._patch.stop()
@@ -433,6 +436,357 @@ class BasePruebaIntegracion(unittest.TestCase):
             _insertar_producto(conexion, **fila)
         conexion.commit()
         conexion.close()
+
+    def _confirmar_presentaciones_unitarias(self, proyecto_id):
+        proyecto = obtener_proyecto(proyecto_id, propietario_id=self.PROPIETARIO)
+        for item in proyecto["items"]:
+            actualizar_item(
+                proyecto_id,
+                self.PROPIETARIO,
+                item["id"],
+                {
+                    "unidad_requerida": "unidad",
+                    "contenido_presentacion": 1,
+                    "unidad_presentacion": "unidad",
+                    "unidad_compra": "unidad",
+                    "presentacion_divisible": False,
+                },
+            )
+
+
+class PruebaCotizacionConfiableP0_01(BasePruebaIntegracion):
+    def _crear_ceramica(self, cantidad="6.6"):
+        self._insertar_productos([
+            {
+                "proveedor": "EPA", "id_proveedor": "ceramica-p0",
+                "nombre": "Cerámica Nevado 2.08m2", "categoria": "Pisos",
+                "precio": 10995,
+            },
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Baño confiable")
+        return agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "ceramica-p0",
+            float(cantidad), unidad_medida="m²",
+        )
+
+    def test_nombre_solo_sugiere_y_no_cotiza_hasta_confirmacion(self):
+        proyecto = self._crear_ceramica()
+        item = proyecto["items"][0]
+        self.assertEqual(item["sugerencia_presentacion"]["contenido_presentacion"], 2.08)
+        self.assertEqual(item["calculo_compra"]["estado"], "REQUIRES_REVIEW")
+        self.assertIsNone(item["calculo_compra"]["subtotal_crc"])
+        self.assertFalse(proyecto["cotizacion"]["lista_para_aprobar"])
+
+    def test_confirmacion_calcula_y_persiste_snapshot_autoritativo(self):
+        proyecto = self._crear_ceramica()
+        item_id = proyecto["items"][0]["id"]
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 2.08,
+                "unidad_presentacion": "m²",
+                "unidad_compra": "caja",
+                "presentacion_divisible": False,
+            },
+        )
+        calculo = proyecto["items"][0]["calculo_compra"]
+        self.assertEqual(calculo["estado"], "CALCULATED")
+        self.assertEqual(calculo["unidades_compra"], 4)
+        self.assertEqual(calculo["cobertura_compra"], 8.32)
+        self.assertEqual(calculo["sobrante_estimado"], 1.72)
+        self.assertEqual(calculo["subtotal_crc"], 43980)
+        self.assertEqual(proyecto["cotizacion"]["subtotal_materiales"], 43980)
+        recargado = obtener_proyecto(proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(recargado["items"][0]["calculo_compra"], calculo)
+
+    def test_precio_catalogo_no_muta_snapshot_de_linea(self):
+        proyecto = self._crear_ceramica()
+        item_id = proyecto["items"][0]["id"]
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 2.08,
+                "unidad_presentacion": "m²",
+                "unidad_compra": "caja",
+                "presentacion_divisible": False,
+            },
+        )
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.execute("UPDATE productos SET precio = 999999 WHERE id_proveedor = 'ceramica-p0'")
+        conexion.commit()
+        conexion.close()
+        recargado = obtener_proyecto(proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(recargado["items"][0]["calculo_compra"]["subtotal_crc"], 43980)
+
+    def test_reagregar_acumula_cantidad_sin_perder_presentacion_confirmada(self):
+        proyecto = self._crear_ceramica("2")
+        item_id = proyecto["items"][0]["id"]
+        actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 2,
+                "unidad_presentacion": "m²",
+                "unidad_compra": "caja",
+                "presentacion_divisible": False,
+            },
+        )
+
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "ceramica-p0", 3,
+        )
+
+        calculo = proyecto["items"][0]["calculo_compra"]
+        self.assertEqual(calculo["cantidad_requerida"], 5)
+        self.assertEqual(calculo["contenido_presentacion"], 2)
+        self.assertEqual(calculo["unidades_compra"], 3)
+        self.assertEqual(calculo["estado"], "CALCULATED")
+
+    def test_mismo_calculo_alimenta_proyecto_compartir_compras_orden_y_control(self):
+        from api.repositorio_proyectos import (
+            congelar_presupuesto,
+            generar_orden_compra,
+            obtener_compras,
+            obtener_control_costos,
+        )
+
+        proyecto = self._crear_ceramica()
+        item_id = proyecto["items"][0]["id"]
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 2.08,
+                "unidad_presentacion": "m²",
+                "unidad_compra": "caja",
+                "presentacion_divisible": False,
+            },
+        )
+        esperado = proyecto["items"][0]["calculo_compra"]
+
+        compartido = obtener_proyecto(token=proyecto["token_compartido"])
+        compras = obtener_compras(proyecto["id"], self.PROPIETARIO)
+        ordenes = generar_orden_compra(proyecto["id"], self.PROPIETARIO, "EPA")
+        congelar_presupuesto(proyecto["id"], self.PROPIETARIO)
+        control = obtener_control_costos(proyecto["id"], self.PROPIETARIO)
+
+        self.assertEqual(compartido["items"][0]["calculo_compra"], esperado)
+        pendiente = compras["pendientes_por_proveedor"][0]["items"][0]
+        self.assertEqual(pendiente["cantidad_pendiente"], 4)
+        self.assertEqual(compras["pendientes_por_proveedor"][0]["subtotal"], 43980)
+        self.assertEqual(ordenes["ordenes_generadas"][0]["items"][0]["calculo_compra"], esperado)
+        guardado = control["linea_base"]["partidas"][0]["items"][0]["calculo_compra"]
+        self.assertEqual(guardado, esperado)
+
+    def test_override_insuficiente_bloquea_hasta_reconocimiento_y_queda_en_snapshot(self):
+        proyecto = self._crear_ceramica("10")
+        item_id = proyecto["items"][0]["id"]
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 2,
+                "unidad_presentacion": "m²",
+                "unidad_compra": "caja",
+                "presentacion_divisible": False,
+                "unidades_compra_override": 4,
+            },
+        )
+        self.assertEqual(proyecto["items"][0]["calculo_compra"]["estado"], "OVERRIDDEN")
+        self.assertFalse(proyecto["cotizacion"]["lista_para_aprobar"])
+        with self.assertRaises(ValueError):
+            from api.repositorio_proyectos import congelar_presupuesto
+            congelar_presupuesto(proyecto["id"], self.PROPIETARIO)
+
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {"override_reconocido": True},
+        )
+        self.assertTrue(proyecto["cotizacion"]["lista_para_aprobar"])
+        from api.repositorio_proyectos import congelar_presupuesto
+        congelado = congelar_presupuesto(proyecto["id"], self.PROPIETARIO)
+        calculo_guardado = congelado["linea_base"]["partidas"][0]["items"][0]["calculo_compra"]
+        self.assertTrue(calculo_guardado["override_reconocido"])
+        self.assertTrue(calculo_guardado["cobertura_insuficiente"])
+
+        cambiado = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {"unidades_compra_override": 3},
+        )
+        self.assertFalse(cambiado["items"][0]["calculo_compra"]["override_reconocido"])
+        self.assertFalse(cambiado["cotizacion"]["lista_para_aprobar"])
+
+    def test_aprobacion_espera_escritura_y_valida_el_estado_confirmado(self):
+        """La aprobación no puede leer antes de una escritura en curso.
+
+        Antes del fix, congelar_presupuesto leía con una conexión, la
+        cerraba y abría otra para insertar. Esta prueba mantiene una
+        escritura sin confirmar durante esa ventana: el código anterior
+        leía el estado previo y después aprobaba un snapshot obsoleto.
+        """
+
+        from api import repositorio_proyectos as repo
+
+        proyecto = self._crear_ceramica()
+        item_id = proyecto["items"][0]["id"]
+        actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 2.08,
+                "unidad_presentacion": "m2",
+                "unidad_compra": "caja",
+                "presentacion_divisible": False,
+            },
+        )
+
+        escritura = sqlite3.connect(self.ruta_db, timeout=2)
+        escritura.execute("BEGIN IMMEDIATE")
+        escritura.execute(
+            """
+            UPDATE items_proyecto
+            SET estado_calculo = 'REQUIRES_REVIEW',
+                motivo_revision = 'Cambio concurrente pendiente de revisión',
+                subtotal_cotizado_crc = NULL
+            WHERE id = ?
+            """,
+            (item_id,),
+        )
+
+        lectura_iniciada = threading.Event()
+        resultado = {}
+        obtener_original = repo.obtener_proyecto
+
+        def observar_lectura(*args, **kwargs):
+            lectura_iniciada.set()
+            return obtener_original(*args, **kwargs)
+
+        def aprobar():
+            try:
+                repo.congelar_presupuesto(proyecto["id"], self.PROPIETARIO)
+            except Exception as error:
+                resultado["error"] = error
+
+        with mock.patch.object(repo, "obtener_proyecto", side_effect=observar_lectura):
+            hilo = threading.Thread(target=aprobar)
+            hilo.start()
+            leyo_durante_escritura = lectura_iniciada.wait(0.2)
+            escritura.commit()
+            escritura.close()
+            hilo.join(timeout=3)
+
+        self.assertFalse(hilo.is_alive())
+        self.assertFalse(leyo_durante_escritura)
+        self.assertIsInstance(resultado.get("error"), ValueError)
+
+        conexion = sqlite3.connect(self.ruta_db)
+        aprobaciones = conexion.execute(
+            "SELECT COUNT(*) FROM presupuesto_congelado WHERE proyecto_id = ?",
+            (proyecto["id"],),
+        ).fetchone()[0]
+        conexion.close()
+        self.assertEqual(aprobaciones, 0)
+
+    def test_conversion_exacta_sobrevive_recarga_y_recalculo(self):
+        self._insertar_productos([
+            {
+                "proveedor": "EPA", "id_proveedor": "pintura-galon-p0",
+                "nombre": "Pintura interior galón", "categoria": "Pinturas",
+                "precio": 25000,
+            },
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Pintura precisa")
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "pintura-galon-p0",
+            11.356236, unidad_medida="L",
+        )
+        item_id = proyecto["items"][0]["id"]
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 1,
+                "unidad_presentacion": "galón",
+                "unidad_compra": "galón",
+                "presentacion_divisible": False,
+            },
+        )
+        self.assertEqual(proyecto["items"][0]["calculo_compra"]["unidades_compra"], 4)
+        self.assertEqual(proyecto["cotizacion"]["subtotal_materiales"], 100000)
+
+        # Recalcular desde lo persistido no puede convertir nuevamente el
+        # factor exacto en el valor visible 3.785412.
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {"cantidad": 11.356236},
+        )
+        recargado = obtener_proyecto(
+            proyecto["id"], propietario_id=self.PROPIETARIO
+        )
+        self.assertEqual(recargado["items"][0]["calculo_compra"]["unidades_compra"], 4)
+        self.assertEqual(recargado["cotizacion"]["subtotal_materiales"], 100000)
+
+    def test_compra_divisible_usa_subtotal_exacto_no_unidades_visibles(self):
+        from api.repositorio_proyectos import generar_orden_compra, obtener_compras
+
+        self._insertar_productos([
+            {
+                "proveedor": "EPA", "id_proveedor": "cable-divisible-p0",
+                "nombre": "Cable vendido por tramo", "categoria": "Electricidad",
+                "precio": 1000,
+            },
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Cable preciso")
+        proyecto = agregar_item(
+            proyecto["id"], self.PROPIETARIO, "EPA", "cable-divisible-p0",
+            1, unidad_medida="m",
+        )
+        item_id = proyecto["items"][0]["id"]
+        proyecto = actualizar_item(
+            proyecto["id"], self.PROPIETARIO, item_id,
+            {
+                "contenido_presentacion": 3,
+                "unidad_presentacion": "m",
+                "unidad_compra": "tramo",
+                "presentacion_divisible": True,
+            },
+        )
+        self.assertEqual(proyecto["cotizacion"]["subtotal_materiales"], 333)
+        self.assertEqual(
+            proyecto["items"][0]["calculo_compra"]["unidades_compra"],
+            0.333333,
+        )
+
+        compras = obtener_compras(proyecto["id"], self.PROPIETARIO)
+        self.assertEqual(compras["pendientes_por_proveedor"][0]["subtotal"], 333)
+        ordenes = generar_orden_compra(proyecto["id"], self.PROPIETARIO, "EPA")
+        self.assertEqual(ordenes["ordenes_generadas"][0]["monto_total"], 333)
+
+    def test_proyecto_legacy_no_cambia_hasta_migracion_explicita(self):
+        proyecto = self._crear_ceramica()
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.execute(
+            """
+            UPDATE proyectos SET version_calculo_cotizacion = 1 WHERE id = ?
+            """,
+            (proyecto["id"],),
+        )
+        conexion.execute(
+            """
+            UPDATE items_proyecto SET estado_calculo = NULL, version_calculo = NULL,
+                subtotal_cotizado_crc = NULL WHERE proyecto_id = ?
+            """,
+            (proyecto["id"],),
+        )
+        conexion.commit()
+        conexion.close()
+        legado = obtener_proyecto(proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(legado["version_calculo_cotizacion"], 1)
+        self.assertIsNone(legado["items"][0]["calculo_compra"])
+        self.assertEqual(legado["cotizacion"]["subtotal_materiales"], 72567)
+
+        migrado = actualizar_proyecto(
+            proyecto["id"], self.PROPIETARIO,
+            {"version_calculo_cotizacion": 2},
+        )
+        self.assertEqual(migrado["version_calculo_cotizacion"], 2)
+        self.assertEqual(migrado["items"][0]["calculo_compra"]["estado"], "REQUIRES_REVIEW")
+        self.assertEqual(migrado["cotizacion"]["subtotal_materiales"], 0)
 
 
 class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
@@ -450,6 +804,18 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
         agregar_item(pid, self.PROPIETARIO, "EPA", "1", 10)
         proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "2", 5)
         items = proyecto["items"]
+
+        for item, empaque in zip(items, ("saco", "caja")):
+            actualizar_item(
+                pid, self.PROPIETARIO, item["id"],
+                {
+                    "unidad_requerida": "unidad",
+                    "contenido_presentacion": 1,
+                    "unidad_presentacion": "unidad",
+                    "unidad_compra": empaque,
+                    "presentacion_divisible": False,
+                },
+            )
 
         actualizar_item(pid, self.PROPIETARIO, items[0]["id"], {"partida": "Cimentación"})
         proyecto = actualizar_item(pid, self.PROPIETARIO, items[1]["id"], {"partida": "Acabados"})
@@ -556,6 +922,7 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
         pid1 = p1["id"]
         agregar_item(pid1, self.PROPIETARIO, "EPA", "1", 3)  # pendiente, precio_actual=5000 -> 15000
         p1 = agregar_item(pid1, self.PROPIETARIO, "EPA", "2", 2)  # se marca comprado abajo
+        self._confirmar_presentaciones_unitarias(pid1)
         item_comprado_id = next(i["id"] for i in p1["items"] if i["id_proveedor"] == "2")
         actualizar_item(pid1, self.PROPIETARIO, item_comprado_id, {"estado": "comprado"})  # 2*8000=16000
 
@@ -568,6 +935,7 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
              "categoria": "Varios", "precio": 3000},
         ])
         p2 = agregar_item(pid2, self.PROPIETARIO, "EPA", "3", 4)  # pendiente, 4*3000=12000 antes de borrar
+        self._confirmar_presentaciones_unitarias(pid2)
         item_descontinuado_id = p2["items"][0]["id"]
         conexion = sqlite3.connect(self.ruta_db)
         conexion.execute("DELETE FROM productos WHERE proveedor='EPA' AND id_proveedor='3'")
@@ -575,6 +943,7 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
         conexion.close()
         # Ítem descartado -- no debe contar en ningún total ni en cantidad_items.
         p2 = agregar_item(pid2, self.PROPIETARIO, "EPA", "1", 10)
+        self._confirmar_presentaciones_unitarias(pid2)
         item_descartado_id = next(i["id"] for i in p2["items"] if i["id_proveedor"] == "1")
         actualizar_item(pid2, self.PROPIETARIO, item_descartado_id, {"estado": "descartado"})
 

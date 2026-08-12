@@ -238,6 +238,7 @@ class PruebaEndpointsControlDeCostos(BasePruebaIntegracion):
         ])
         proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto control de costos")
         agregar_item(proyecto["id"], self.PROPIETARIO, "EPA", "1", 10)
+        self._confirmar_presentaciones_unitarias(proyecto["id"])
 
         sin_linea_base = control_costos_router(proyecto["id"], propietario_id=self.PROPIETARIO)
         self.assertFalse(sin_linea_base["tiene_linea_base"])

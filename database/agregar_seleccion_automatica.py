@@ -47,15 +47,18 @@ def _agregar_columnas_faltantes(cursor, tabla, columnas):
         print(f"  + {tabla}.{nombre}")
 
 
-def main():
-    conexion = conectar()
+def main(conexion=None):
+    propia = conexion is None
+    if propia:
+        conexion = conectar()
     cursor = conexion.cursor()
 
     print("Columnas agregadas:")
     _agregar_columnas_faltantes(cursor, "items_proyecto", COLUMNAS_ITEMS_PROYECTO)
 
-    conexion.commit()
-    conexion.close()
+    if propia:
+        conexion.commit()
+        conexion.close()
 
     print("✅ Esquema de selección automática listo.")
 

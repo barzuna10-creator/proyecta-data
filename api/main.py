@@ -12,6 +12,7 @@ from api.repositorio_proyectos import _EXECUTOR_PLANOS
 from api.routers import auth as auth_router, feedback as feedback_router, metricas as metricas_router, proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
 from api.observabilidad import logger as _logger, middleware_logging as _middleware_logging
+from id_producto import id_producto_a_url as _id_producto_a_url
 from busqueda import buscar_fts as _buscar_fts_motor
 from familias import analizar_nombre as _analizar_nombre_familia
 from reranking import reordenar as _reordenar_resultados
@@ -25,17 +26,15 @@ from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migr
 # Investigación "no such table: usuarios" en producción: nada, en ningún
 # punto del despliegue, ejecutaba las migraciones de database/agregar_*.py
 # contra la base real (ver database/migraciones.py para el diseño
-# completo -- registro explícito, reclamo atómico entre los --workers,
-# libera el reclamo si una migración falla).
+# completo -- registro posterior al commit, lock separado y verificación
+# del esquema real antes de readiness).
 #
 # Investigación posterior, "database is locked" durante el arranque:
-# antes, este hilo de migraciones y el hilo de respaldo (más abajo)
-# arrancaban EN PARALELO, los dos desde su propio on_event("startup") --
-# dos escritores concurrentes contra la misma base real, justo en el
-# momento de más escrituras de todo el ciclo de vida del proceso. Ahora
-# es un solo hilo de fondo: primero terminan las migraciones, RECIÉN
-# DESPUÉS arranca el bucle de respaldo -- nunca compiten por la base al
-# mismo tiempo. (El otro cambio de esa misma investigación fue que las 8
+# antes, las migraciones y el respaldo arrancaban EN PARALELO -- dos
+# escritores concurrentes contra la misma base real, justo en el momento
+# de más escrituras. Ahora las migraciones terminan de forma síncrona y,
+# recién después, arranca el hilo de respaldos. (El otro cambio de esa
+# misma investigación fue que las 8
 # migraciones y el respaldo pasaron de sqlite3.connect() crudo a
 # db.conectar(), que ya trae busy_timeout -- ver database/migraciones.py
 # y database/respaldar_db.py. Ese es el fix real contra el bloqueo en sí;
@@ -55,8 +54,7 @@ from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migr
 INTERVALO_RESPALDO_SEGUNDOS = 6 * 60 * 60  # cada 6 horas
 
 
-def _bucle_arranque_en_segundo_plano():
-    _aplicar_migraciones_pendientes()
+def _bucle_respaldos():
     while True:
         try:
             _respaldar_db()
@@ -72,7 +70,18 @@ async def _lifespan(app: FastAPI):
     # manager (ver RELEASE_CANDIDATE.md). Mismo comportamiento exacto,
     # solo el mecanismo de registro cambia: todo lo de antes de `yield`
     # corría en "startup", todo lo de después corría en "shutdown".
-    threading.Thread(target=_bucle_arranque_en_segundo_plano, daemon=True).start()
+    # Gate de readiness: Uvicorn no empieza a servir solicitudes hasta que
+    # el bloque anterior a `yield` termina. Una migración fallida o cualquier
+    # diferencia entre registro y esquema aborta el arranque completo.
+    try:
+        _aplicar_migraciones_pendientes()
+    except Exception:
+        _logger.exception(
+            "STARTUP_ESQUEMA_INVALIDO -- se rechaza readiness y no se servirá tráfico"
+        )
+        raise
+
+    threading.Thread(target=_bucle_respaldos, daemon=True).start()
     yield
     # Sin esto, el proceso worker que ProcessPoolExecutor deja abierto
     # (ver api/repositorio_proyectos.py) sobrevive al proceso principal en
@@ -303,6 +312,46 @@ def productos_similares(proveedor: str, id_proveedor: str, limite: int = _LIMITE
     resultados = _obtener_similares_motor(proveedor, id_proveedor, limite=limite)
 
     return [_serializar_producto(r) for r in resultados]
+
+
+# RELEASE_CANDIDATE.md: antes /producto/{id} en el frontend solo se podía
+# resolver desde sessionStorage (poblado al navegar desde resultados de
+# búsqueda) -- un link compartido, recargado, o abierto en pestaña nueva
+# siempre mostraba "Producto no disponible", indistinguible de un
+# producto realmente eliminado. Este endpoint permite reconstruir
+# CUALQUIER url /producto/{id} válida directamente desde el catálogo,
+# sin depender de qué haya (o no) en el navegador de quien lo abre. Va
+# DESPUÉS de /productos/similares a propósito -- FastAPI resuelve rutas
+# en el orden en que se registran, y una ruta dinámica /productos/{id}
+# antes de la estática /productos/similares capturaría "similares" como
+# si fuera un id.
+@app.get("/productos/{id}")
+def producto_por_id(id: str):
+    url_producto = _id_producto_a_url(id)
+    if url_producto is None:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+    conexion = conectar()
+    fila = conexion.execute(
+        """
+        SELECT
+            p.nombre, p.precio, p.categoria, p.proveedor,
+            p.id_proveedor, p.url_producto, p.url_imagen,
+            p.marca, p.sku, p.subcategoria, p.descripcion,
+            p.peso, p.imagenes_adicionales,
+            p.familia_id, f.nombre_familia
+        FROM productos p
+        LEFT JOIN familias_producto f ON f.id = p.familia_id
+        WHERE p.url_producto = ?
+        """,
+        (url_producto,),
+    ).fetchone()
+    conexion.close()
+
+    if not fila:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+    return _serializar_producto(fila)
 
 
 @app.get("/proyectos/{proyecto_id}/presupuesto")
