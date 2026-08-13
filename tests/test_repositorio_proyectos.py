@@ -747,6 +747,126 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
 
         eliminar_proyecto(pid, self.PROPIETARIO)
 
+    def test_listar_proyectos_coincide_con_detalle_cantidad_decimal(self):
+        """Cantidades decimales (m², litros -- ver unidad_comercial en
+        especificaciones.py) no son un caso especial en ninguna de las dos
+        implementaciones, pero nunca se habían probado juntas. cantidad y
+        monto se eligen para que un truncamiento accidental (cantidad_comprada
+        recortada a entero, o el monto de la compra recortado con int() en
+        vez de redondeado) cambie el resultado de forma visible: 1.25 de 2.5
+        no es un entero, y tanto 1088.67 (monto real pagado) como
+        850.30 (precio de catálogo) tienen centavos que un int() truncaría
+        hacia abajo de forma distinta a como redondea round()."""
+
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "5", "nombre": "Cerámica importada",
+             "categoria": "Acabados", "precio": 850.30},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra con cantidad decimal")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "5", 2.5)
+        item_id = proyecto["items"][0]["id"]
+
+        # Compra 1.25 de 2.5 (queda parcial) a un monto real con centavos,
+        # distinto del estimado (1.25*850.30=1062.875) -- igual que la
+        # prueba de "monto real" ya existente, pero acá además la cantidad
+        # comprada es fraccionaria.
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=1.25, monto=1088.67)
+
+        resumen, detalle = self._resumen_y_detalle(pid)
+
+        self.assertEqual(detalle["items"][0]["estado"], "parcial")
+        # Si algo truncara la cantidad comprada a entero (1 en vez de 1.25),
+        # esto fallaría -- confirma que no se pierde la parte decimal.
+        self.assertEqual(detalle["items"][0]["cantidad_comprada"], 1.25)
+        # Si algo truncara el monto con int() en vez de guardarlo tal cual,
+        # 1088.67 se volvería 1088 -- confirma que los centavos no se pierden
+        # en el almacenamiento.
+        self.assertEqual(detalle["items"][0]["monto_comprado"], 1088.67)
+
+        self.assertEqual(resumen["total_comprado"], detalle["total_comprado"])
+        self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
+        # comprado = round(1088.67) = 1089 -- round(), no int(), que daría 1088.
+        self.assertEqual(detalle["total_comprado"], 1089)
+        # pendiente = round((2.5-1.25)*850.30) = round(1062.875) = 1063 --
+        # round(), no int(), que daría 1062.
+        self.assertEqual(detalle["total_pendiente"], 1063)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_listar_proyectos_coincide_con_detalle_producto_descontinuado_monto_null(self):
+        """monto_comprado es una columna REAL nullable (a diferencia de
+        cantidad_comprada, que es NOT NULL DEFAULT 0) -- registrar_compra_item
+        siempre la deja con un valor numérico (real o estimado), pero un
+        registro histórico o una edición manual de la base podría dejarla en
+        NULL de verdad. Esta prueba fuerza ese NULL a mano (vía SQL directo,
+        igual que test_listar_proyectos_totales_con_estados_y_precios_mixtos
+        ya hace para simular un producto borrado del catálogo) para ejercer
+        el fallback a cantidad_comprada/cantidad × precio_al_agregar -- con
+        el producto además eliminado del catálogo, así que ni siquiera hay
+        precio_actual de dónde caer primero. Un ítem 'parcial' y uno
+        'comprado', los dos casos que usan ese fallback en _calcular_totales."""
+
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "6", "nombre": "Producto Descontinuado A",
+             "categoria": "Varios", "precio": 940},
+            {"proveedor": "EPA", "id_proveedor": "7", "nombre": "Producto Descontinuado B",
+             "categoria": "Varios", "precio": 1500},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra con productos descontinuados")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "6", 10)
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "7", 5)
+        item_parcial_id = next(i["id"] for i in proyecto["items"] if i["id_proveedor"] == "6")
+        item_comprado_id = next(i["id"] for i in proyecto["items"] if i["id_proveedor"] == "7")
+
+        # cantidad_comprada/estado quedan correctos vía el flujo normal;
+        # monto_comprado se fuerza a NULL después, a mano, para simular el
+        # caso que registrar_compra_item por sí solo nunca produce.
+        registrar_compra_item(pid, self.PROPIETARIO, item_parcial_id, cantidad=4, monto=None)  # parcial: 4/10
+        registrar_compra_item(pid, self.PROPIETARIO, item_comprado_id, cantidad=5, monto=None)  # comprado: 5/5
+
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.execute(
+            "UPDATE items_proyecto SET monto_comprado = NULL WHERE id IN (?, ?)",
+            (item_parcial_id, item_comprado_id),
+        )
+        # Producto eliminado del catálogo DESPUÉS de agregar los ítems --
+        # precio_actual queda NULL, _calcular_totales debe caer a
+        # precio_al_agregar (capturado al agregar, antes del borrado).
+        conexion.execute("DELETE FROM productos WHERE proveedor='EPA' AND id_proveedor IN ('6', '7')")
+        conexion.commit()
+        conexion.close()
+
+        resumen, detalle = self._resumen_y_detalle(pid)
+
+        # La obra sigue teniendo sus dos ítems -- borrar el producto del
+        # catálogo no debe eliminar ni afectar las filas de items_proyecto.
+        self.assertEqual(len(detalle["items"]), 2)
+        self.assertEqual(
+            {i["id"] for i in detalle["items"]}, {item_parcial_id, item_comprado_id}
+        )
+        self.assertEqual(resumen["cantidad_items"], 2)
+
+        item_parcial = next(i for i in detalle["items"] if i["id"] == item_parcial_id)
+        item_comprado = next(i for i in detalle["items"] if i["id"] == item_comprado_id)
+        self.assertEqual(item_parcial["estado"], "parcial")
+        self.assertIsNone(item_parcial["monto_comprado"])
+        self.assertFalse(item_parcial["disponible"])
+        self.assertEqual(item_comprado["estado"], "comprado")
+        self.assertIsNone(item_comprado["monto_comprado"])
+        self.assertFalse(item_comprado["disponible"])
+
+        self.assertEqual(resumen["total_comprado"], detalle["total_comprado"])
+        self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
+        # comprado: 4*940 (parcial, fallback a precio_al_agregar) + 5*1500
+        # (comprado, ídem) = 3760 + 7500 = 11260.
+        self.assertEqual(detalle["total_comprado"], 11260)
+        # pendiente: (10-4)*940 del parcial; el comprado no aporta nada.
+        self.assertEqual(detalle["total_pendiente"], 5640)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
     def test_proyecto_de_otro_propietario_no_se_puede_editar(self):
         proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto privado")
 
