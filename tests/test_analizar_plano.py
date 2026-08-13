@@ -202,6 +202,79 @@ class PruebaAnalizarPlano(unittest.TestCase):
         self.assertEqual(resultado["plano_nombre_archivo"], "segundo.pdf")
         self.assertEqual(resultado["plano_analisis"]["cantidad_laminas"], 7)
 
+    # ANALISIS_INCIDENTE_MEMORIA_RENDER.md: logging estructurado alrededor
+    # del análisis (tamaño, duración, láminas, éxito/fallo).
+
+    def test_log_de_exito_incluye_tamano_duracion_y_laminas(self):
+        with self.assertLogs("proyecta_api", level="INFO") as registro:
+            analizar_plano(
+                self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf",
+                tamano_bytes=12345,
+            )
+
+        lineas_analisis = [linea for linea in registro.output if "ANALISIS_PLANO" in linea]
+        self.assertEqual(len(lineas_analisis), 1)
+        linea = lineas_analisis[0]
+        self.assertIn("tamano_bytes=12345", linea)
+        self.assertIn("resultado=exito", linea)
+        self.assertIn(f"laminas={ANALISIS_DE_PRUEBA['cantidad_laminas']}", linea)
+        self.assertIn("duracion_ms=", linea)
+        self.assertIn(f"proyecto_id={self.proyecto['id']}", linea)
+
+    def test_sin_tamano_bytes_el_log_no_inventa_un_valor(self):
+        with self.assertLogs("proyecta_api", level="INFO") as registro:
+            analizar_plano(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf")
+
+        linea = next(linea for linea in registro.output if "ANALISIS_PLANO" in linea)
+        self.assertIn("tamano_bytes=None", linea)
+
+    def test_un_fallo_en_el_analisis_se_registra_y_se_propaga_sin_alterarse(self):
+        self._patch_executor.stop()
+        self._patch_executor = mock.patch("api.repositorio_proyectos._EXECUTOR_PLANOS")
+        executor_falso = self._patch_executor.start()
+        futuro_falso = mock.MagicMock()
+        futuro_falso.result.side_effect = ValueError("PDF corrupto simulado")
+        executor_falso.submit.return_value = futuro_falso
+
+        with self.assertLogs("proyecta_api", level="INFO") as registro:
+            with self.assertRaises(ValueError) as contexto:
+                analizar_plano(
+                    self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf",
+                    tamano_bytes=999,
+                )
+
+        # La excepción original se propaga tal cual -- el logging nunca la
+        # reemplaza ni la envuelve en otra cosa (mismo contrato de antes).
+        self.assertEqual(str(contexto.exception), "PDF corrupto simulado")
+
+        linea = next(linea for linea in registro.output if "ANALISIS_PLANO" in linea)
+        self.assertIn("tamano_bytes=999", linea)
+        self.assertIn("resultado=fallo", linea)
+        self.assertIn("error=ValueError", linea)
+
+    def test_un_fallo_en_el_analisis_no_dana_el_proyecto_ya_guardado(self):
+        # El plano_analisis exitoso de setUp no debe perderse ni corromperse
+        # si una llamada POSTERIOR (ej. reemplazar el plano) falla.
+        self._patch_executor.stop()
+        self._patch_executor = mock.patch("api.repositorio_proyectos._EXECUTOR_PLANOS")
+        executor_falso = self._patch_executor.start()
+        futuro_falso = mock.MagicMock()
+        futuro_falso.result.side_effect = RuntimeError("boom")
+        executor_falso.submit.return_value = futuro_falso
+
+        with self.assertLogs("proyecta_api", level="INFO"):
+            with self.assertRaises(RuntimeError):
+                analizar_plano(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "otro.pdf")
+
+        conexion = sqlite3.connect(self.ruta_db)
+        fila = conexion.execute(
+            "SELECT plano_nombre_archivo FROM proyectos WHERE id = ?", (self.proyecto["id"],)
+        ).fetchone()
+        conexion.close()
+        # Nunca se llegó al UPDATE -- el nombre de archivo sigue siendo NULL
+        # (setUp de esta clase no sube ningún plano antes de cada prueba).
+        self.assertIsNone(fila[0])
+
 
 class PruebaEliminarPlano(unittest.TestCase):
     PROPIETARIO = "propietario-plano-test"

@@ -1649,14 +1649,21 @@ def reemplazar_item(proyecto_id, propietario_id, item_id, proveedor_nuevo, id_pr
     return proyecto_actualizado
 
 
-def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
+def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo, tamano_bytes=None):
     """Corre lectura_planos sobre un PDF ya guardado en disco (ver el
     router: el archivo subido se escribe a un temporal antes de llamar
     acá) y guarda el resultado -- niveles, espacios, cuadros de
     puertas/ventanas/acabados, cómputo estructural y las láminas que
     todos ellos referencian -- como JSON en la fila del proyecto (ver
     FLUJO_PRESUPUESTO_DESDE_PLANO_V1.md). El PDF en sí no se guarda, solo
-    el análisis ya estructurado."""
+    el análisis ya estructurado.
+
+    `tamano_bytes` es opcional (default None) -- solo el router HTTP lo
+    conoce de verdad (lo midió mientras escribía el temporal a disco);
+    un caller que llame esta función directo (scripts, pruebas) no tiene
+    por qué inventarlo. Se usa únicamente para el log estructurado de
+    abajo (ver ANALISIS_INCIDENTE_MEMORIA_RENDER.md) -- nunca se guarda
+    en la base ni afecta el resultado."""
     conexion = conectar()
     fila = conexion.execute(
         "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
@@ -1672,12 +1679,33 @@ def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
     # pipe), no trabajo de CPU -- libera el GIL mientras espera, que es
     # justo lo que permite que el resto de la app siga respondiendo
     # mientras tanto (ver INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md).
+    #
+    # El try/except de acá abajo es SOLO para loguear -- nunca absorbe la
+    # excepción. Antes de esto, un PDF que hacía fallar el análisis
+    # (corrupto, protegido, un extractor con un bug) no dejaba ningún
+    # rastro propio: la petición terminaba en 422 (ver el router), pero
+    # nada decía cuánto había tardado en fallar, de qué tamaño era el
+    # archivo, ni qué tipo de error fue -- exactamente el tipo de dato
+    # que hace falta para diagnosticar un incidente real sin poder
+    # reproducirlo a mano (ver ANALISIS_INCIDENTE_MEMORIA_RENDER.md).
     inicio = time.perf_counter()
-    analisis = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf).result()
+    try:
+        analisis = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf).result()
+    except Exception as error:
+        duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
+        conexion.close()
+        _logger.info(
+            f"ANALISIS_PLANO id={_id_peticion()} proyecto_id={proyecto_id} "
+            f"tamano_bytes={tamano_bytes} duracion_ms={duracion_ms} resultado=fallo "
+            f"error={type(error).__name__}"
+        )
+        raise
+
     duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
     _logger.info(
         f"ANALISIS_PLANO id={_id_peticion()} proyecto_id={proyecto_id} "
-        f"duracion_ms={duracion_ms} laminas={analisis.get('cantidad_laminas')}"
+        f"tamano_bytes={tamano_bytes} duracion_ms={duracion_ms} resultado=exito "
+        f"laminas={analisis.get('cantidad_laminas')}"
     )
 
     ahora = _ahora()
