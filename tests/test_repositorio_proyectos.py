@@ -30,6 +30,7 @@ from api.repositorio_proyectos import (
     eliminar_proyecto,
     listar_proyectos,
     obtener_proyecto,
+    registrar_compra_item,
     reemplazar_item,
 )
 
@@ -590,6 +591,161 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
 
         eliminar_proyecto(pid1, self.PROPIETARIO)
         eliminar_proyecto(pid2, self.PROPIETARIO)
+
+    # INVESTIGACION_TOTAL_COMPRADO_INCONSISTENTE.md: las pruebas de acá
+    # abajo cubren exactamente lo que la prueba anterior NO cubría --
+    # 'parcial' y monto_comprado real -- que es lo que hizo que
+    # listar_proyectos() y obtener_proyecto() (que sí usa
+    # _calcular_totales()) devolvieran cifras distintas para la misma obra
+    # en producción. Cada una compara ambos caminos directamente en vez de
+    # solo fijar un número, para que una futura regresión en cualquiera de
+    # los dos falle la prueba aunque el número "parezca" razonable.
+
+    def _resumen_y_detalle(self, proyecto_id):
+        resumen = next(r for r in listar_proyectos(self.PROPIETARIO) if r["id"] == proyecto_id)
+        detalle = obtener_proyecto(proyecto_id, propietario_id=self.PROPIETARIO)
+        return resumen, detalle
+
+    def test_listar_proyectos_coincide_con_detalle_obra_sin_compras(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg",
+             "categoria": "Construcción", "precio": 5000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra sin compras")
+        pid = proyecto["id"]
+        agregar_item(pid, self.PROPIETARIO, "EPA", "1", 4)  # 4*5000 pendiente, nada comprado
+
+        resumen, detalle = self._resumen_y_detalle(pid)
+
+        self.assertEqual(resumen["total_comprado"], 0)
+        self.assertEqual(detalle["total_comprado"], 0)
+        self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
+        self.assertEqual(resumen["total_pendiente"], 20000)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_listar_proyectos_coincide_con_detalle_compra_parcial_con_monto_real(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg",
+             "categoria": "Construcción", "precio": 5000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra con compra parcial")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 10)
+        item_id = proyecto["items"][0]["id"]
+
+        # Compra 4 de 10, a un monto real (17000) distinto de 4*5000=20000
+        # -- descuento real negociado con el proveedor.
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=4, monto=17000)
+
+        resumen, detalle = self._resumen_y_detalle(pid)
+
+        self.assertEqual(detalle["items"][0]["estado"], "parcial")
+        self.assertEqual(resumen["total_comprado"], detalle["total_comprado"])
+        self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
+        # comprado = el monto real registrado, NUNCA 4*5000 recalculado.
+        self.assertEqual(detalle["total_comprado"], 17000)
+        # pendiente = lo que falta (6) a precio de catálogo.
+        self.assertEqual(detalle["total_pendiente"], 30000)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_listar_proyectos_coincide_con_detalle_compra_completa_sin_monto_explicito(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Cerámica 60x60",
+             "categoria": "Acabados", "precio": 8000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra con compra completa sin monto")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "2", 3)
+        item_id = proyecto["items"][0]["id"]
+
+        # Sin `monto` -- se estima como cantidad x precio de catálogo.
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=3, monto=None)
+
+        resumen, detalle = self._resumen_y_detalle(pid)
+
+        self.assertEqual(detalle["items"][0]["estado"], "comprado")
+        self.assertEqual(resumen["total_comprado"], detalle["total_comprado"])
+        self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
+        self.assertEqual(detalle["total_comprado"], 24000)  # 3*8000 estimado
+        self.assertEqual(detalle["total_pendiente"], 0)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_listar_proyectos_coincide_con_detalle_varias_compras_parciales_acumuladas(self):
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "3", "nombre": "Varilla #4",
+             "categoria": "Construcción", "precio": 1000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra con varias compras del mismo ítem")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "3", 10)
+        item_id = proyecto["items"][0]["id"]
+
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=3, monto=2700)  # parcial: 3/10
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=4, monto=None)  # parcial: 7/10, 4*1000 estimado
+        # Pide 5 pero solo quedan 3 pendientes -- registrar_compra_item
+        # recorta la cantidad efectiva a lo que falta (ver su docstring),
+        # sin recortar el monto que el caller ya indicó.
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=5, monto=2500)
+
+        resumen, detalle = self._resumen_y_detalle(pid)
+
+        self.assertEqual(detalle["items"][0]["estado"], "comprado")
+        self.assertEqual(detalle["items"][0]["cantidad_comprada"], 10)
+        self.assertEqual(resumen["total_comprado"], detalle["total_comprado"])
+        self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
+        self.assertEqual(detalle["total_comprado"], 9200)  # 2700 + 4000 + 2500
+        self.assertEqual(detalle["total_pendiente"], 0)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_listar_proyectos_coincide_con_detalle_mezcla_realista(self):
+        """Los cuatro estados relevantes en una sola obra -- el caso que
+        reprodujo la inconsistencia original (obra 257 en desarrollo
+        local): pendiente, parcial con monto real, comprado sin monto
+        explícito, y descartado, todos junto."""
+
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg",
+             "categoria": "Construcción", "precio": 5000},
+            {"proveedor": "EPA", "id_proveedor": "2", "nombre": "Cerámica 60x60",
+             "categoria": "Acabados", "precio": 8000},
+            {"proveedor": "EPA", "id_proveedor": "3", "nombre": "Varilla #4",
+             "categoria": "Construcción", "precio": 1000},
+            {"proveedor": "EPA", "id_proveedor": "4", "nombre": "Pintura 1gal",
+             "categoria": "Acabados", "precio": 15000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra mezcla realista")
+        pid = proyecto["id"]
+
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 6)  # queda pendiente: 6*5000=30000
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "2", 3)  # se compra completa
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "3", 10)  # se compra parcial
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "4", 2)  # se descarta
+
+        id_comprado = next(i["id"] for i in proyecto["items"] if i["id_proveedor"] == "2")
+        id_parcial = next(i["id"] for i in proyecto["items"] if i["id_proveedor"] == "3")
+        id_descartado = next(i["id"] for i in proyecto["items"] if i["id_proveedor"] == "4")
+
+        registrar_compra_item(pid, self.PROPIETARIO, id_comprado, cantidad=3, monto=22500)  # 3*8000=24000 en catálogo, pagó menos
+        registrar_compra_item(pid, self.PROPIETARIO, id_parcial, cantidad=4, monto=3800)  # 4/10, monto real
+        actualizar_item(pid, self.PROPIETARIO, id_descartado, {"estado": "descartado"})
+
+        resumen, detalle = self._resumen_y_detalle(pid)
+
+        self.assertEqual(resumen["total_comprado"], detalle["total_comprado"])
+        self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
+        cantidad_activos_en_detalle = sum(1 for i in detalle["items"] if i["estado"] != "descartado")
+        self.assertEqual(resumen["cantidad_items"], cantidad_activos_en_detalle)
+        self.assertEqual(resumen["cantidad_items"], 3)
+        # comprado: 22500 (real, no 24000) + 3800 (parcial real) = 26300
+        self.assertEqual(detalle["total_comprado"], 26300)
+        # pendiente: 30000 (ítem 1, intacto) + 6*1000 (6 de 10 varillas que faltan) = 36000
+        self.assertEqual(detalle["total_pendiente"], 36000)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
 
     def test_proyecto_de_otro_propietario_no_se_puede_editar(self):
         proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto privado")

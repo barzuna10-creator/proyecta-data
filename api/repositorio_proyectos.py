@@ -366,13 +366,29 @@ def listar_proyectos(propietario_id, incluir_archivados=False):
     # RELEASE_CANDIDATE.md (rendimiento): antes hacía 1 consulta para la
     # lista + 1 consulta extra POR proyecto (vía _obtener_items, con su
     # propio JOIN a productos) solo para sumar total_pendiente/
-    # total_comprado -- un N+1 clásico. Ahora es una sola consulta
-    # agregada: mismo fallback de precio que _calcular_totales()
-    # (precio_actual del catálogo si existe, si no precio_al_agregar, si
-    # no 0 -- ver COALESCE) y mismo criterio de qué cuenta como
-    # pendiente/comprado/descartado. Cubierto por
-    # test_listar_proyectos_totales_con_estados_y_precios_mixtos, que fija
-    # el resultado exacto de la versión N+1 anterior como referencia.
+    # total_comprado -- un N+1 clásico. Es una sola consulta agregada,
+    # pero el criterio de cada CASE tiene que replicar _calcular_totales()
+    # exactamente -- incluyendo 'parcial' y el monto real registrado -- no
+    # solo los tres estados que existían cuando se escribió el N+1 fix.
+    #
+    # INVESTIGACION_TOTAL_COMPRADO_INCONSISTENTE.md: la versión anterior
+    # solo sumaba estado='comprado' a precio de catálogo ACTUAL, ignorando
+    # 'parcial' por completo y descartando cualquier monto_comprado real
+    # ya registrado -- listar_proyectos() y obtener_proyecto() (que sí usa
+    # _calcular_totales()) podían devolver cifras muy distintas para la
+    # misma obra. _calcular_totales() es la fuente de verdad (su propio
+    # docstring ya lo decía: "la ÚNICA función que lo calcula"); acá se
+    # replica su lógica en SQL, no al revés, porque monto_comprado es la
+    # plata real que se pagó y no debe recalcularse contra un precio de
+    # catálogo que pudo cambiar desde la compra.
+    #
+    # Cubierto por test_listar_proyectos_totales_con_estados_y_precios_mixtos
+    # (casos originales) y test_listar_proyectos_coincide_con_detalle_* (
+    # 'parcial', monto real, varias compras parciales sobre el mismo ítem,
+    # compra sin monto explícito, obra sin compras) -- estas últimas
+    # comparan directamente contra _calcular_totales() vía obtener_proyecto()
+    # para que un futuro cambio en cualquiera de las dos implementaciones
+    # que las desincronice haga fallar la prueba, no silenciosamente.
     conexion = conectar()
 
     condicion = "" if incluir_archivados else "AND p.estado != 'archivado'"
@@ -383,12 +399,20 @@ def listar_proyectos(propietario_id, incluir_archivados=False):
             p.id, p.nombre, p.cliente, p.estado, p.fecha_objetivo, p.fecha_actualizacion,
             COUNT(CASE WHEN i.estado != 'descartado' THEN i.id END) AS cantidad_items,
             COALESCE(SUM(
-                CASE WHEN i.estado = 'pendiente'
-                THEN i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0) END
+                CASE
+                    WHEN i.estado = 'pendiente'
+                    THEN i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0)
+                    WHEN i.estado = 'parcial'
+                    THEN MAX(i.cantidad - i.cantidad_comprada, 0) * COALESCE(pr.precio, i.precio_al_agregar, 0)
+                END
             ), 0) AS total_pendiente,
             COALESCE(SUM(
-                CASE WHEN i.estado = 'comprado'
-                THEN i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0) END
+                CASE
+                    WHEN i.estado = 'comprado'
+                    THEN COALESCE(i.monto_comprado, i.cantidad * COALESCE(pr.precio, i.precio_al_agregar, 0))
+                    WHEN i.estado = 'parcial'
+                    THEN COALESCE(i.monto_comprado, i.cantidad_comprada * COALESCE(pr.precio, i.precio_al_agregar, 0))
+                END
             ), 0) AS total_comprado
         FROM proyectos p
         LEFT JOIN items_proyecto i ON i.proyecto_id = p.id
