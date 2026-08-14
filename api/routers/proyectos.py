@@ -6,10 +6,29 @@ from pydantic import BaseModel, Field, field_validator
 
 from api.identidad import obtener_propietario_id
 from api import repositorio_proyectos as repo
+from api.observabilidad import logger as _logger, id_de_peticion_actual as _id_peticion
 
 router = APIRouter(prefix="/proyectos", tags=["proyectos"])
 
-TAMANO_MAXIMO_PLANO_BYTES = 300 * 1024 * 1024  # generoso: planos reales de referencia pesan 48-110 MB
+# NO es un mecanismo de protección de memoria -- se investigó y se
+# descartó explícitamente como tal (ver ANALISIS_INCIDENTE_MEMORIA_RENDER.md
+# y su adenda de recalibración). Medido con los dos planos reales de
+# referencia: el ESTRUCTURAL, de solo 48MB, pica en ~649MB de RSS en el
+# proceso hijo -- más que el ARQUITECTÓNICO de 105MB, que pica en
+# ~409MB. El tamaño del archivo en bytes no predice el riesgo de
+# memoria en este pipeline -- lo que importa es qué tan densa es la
+# información que los extractores sacan de las páginas que matchean
+# (cuadros, tablas, cómputo estructural), no el tamaño del PDF en disco.
+# Ningún valor de este límite puede garantizar memoria seguro sin
+# rechazar también archivos chicos legítimos -- por eso se mantiene en
+# su valor histórico (generoso, pensado para rechazar subidas absurdas
+# por error, no para acotar memoria) mientras se investiga un mecanismo
+# de aislamiento real (proceso hijo con límite de memoria propio,
+# servicio separado, o degradar solo la petición del análisis sin
+# arrastrar el contenedor -- ver la investigación de aislamiento en
+# curso). Si volvés a tocar este número, no lo calibres contra memoria:
+# ya se demostró que no funciona así.
+TAMANO_MAXIMO_PLANO_BYTES = 300 * 1024 * 1024
 
 
 def _no_vacio(valor):
@@ -412,10 +431,11 @@ def subir_plano(
     if archivo.content_type != "application/pdf":
         raise HTTPException(status_code=422, detail="El archivo debe ser un PDF.")
 
-    # Sin streaming a propósito: lectura_planos necesita una ruta en disco
-    # (fitz.open(ruta)), y los dos planos de referencia usados para
-    # calibrar todo lectura_planos pesan 48-110 MB -- muy por debajo de
-    # cualquier límite razonable de memoria para un archivo temporal.
+    # El archivo se escribe a disco en fragmentos de 1MB -- el proceso
+    # principal nunca lo tiene completo en memoria a la vez (ver
+    # ANALISIS_INCIDENTE_MEMORIA_RENDER.md: el pico de memoria real de un
+    # plano no está acá, está en el proceso hijo que lo analiza más
+    # abajo, en repo.analizar_plano()).
     archivo_temporal = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     try:
         try:
@@ -423,14 +443,26 @@ def subir_plano(
             while fragmento := archivo.file.read(1024 * 1024):
                 tamano += len(fragmento)
                 if tamano > TAMANO_MAXIMO_PLANO_BYTES:
-                    raise HTTPException(status_code=413, detail="El PDF es demasiado grande.")
+                    _logger.info(
+                        f"PLANO_RECHAZADO_POR_TAMANO id={_id_peticion()} proyecto_id={proyecto_id} "
+                        f"tamano_bytes={tamano} limite_bytes={TAMANO_MAXIMO_PLANO_BYTES}"
+                    )
+                    limite_mb = TAMANO_MAXIMO_PLANO_BYTES // (1024 * 1024)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"El PDF supera el tamaño máximo soportado ({limite_mb} MB). "
+                            "Probá comprimirlo o dividirlo en partes más chicas."
+                        ),
+                    )
                 archivo_temporal.write(fragmento)
         finally:
             archivo_temporal.close()
 
         try:
             proyecto = repo.analizar_plano(
-                proyecto_id, propietario_id, archivo_temporal.name, archivo.filename
+                proyecto_id, propietario_id, archivo_temporal.name, archivo.filename,
+                tamano_bytes=tamano,
             )
         except HTTPException:
             raise
