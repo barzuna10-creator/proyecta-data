@@ -17,7 +17,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from api.repositorio_proyectos import (
-    actualizar_item, agregar_item, crear_proyecto, eliminar_item, obtener_proyecto,
+    actualizar_item, agregar_item, crear_proyecto, eliminar_item, listar_proyectos,
+    obtener_proyecto,
 )
 from api.routers.proyectos import (
     AgregarItemRequest,
@@ -310,6 +311,38 @@ class PruebaEndpointsCompras(BasePruebaIntegracion):
         self.assertEqual(despues["monto_comprado"], antes["monto_comprado"])
         self.assertEqual(despues["estado"], antes["estado"])
         self.assertEqual(despues["estado"], "pendiente")
+
+    def test_registrar_compra_con_monto_infinito_devuelve_422_sin_cambios(self):
+        """AUDITORIA_COMPRAS_P0.md, hallazgo P0 (no finitos): monto no
+        tiene límite superior (`le`) en RegistrarCompraRequest, a
+        diferencia de cantidad -- Pydantic deja pasar +Infinity (ver
+        PruebaP0ValoresNoFinitos en test_compras_p0.py, verificado contra
+        el propio modelo). La defensa real está en repositorio_proyectos,
+        no en el router: acá se confirma que ese ValueError también llega
+        como 422 (nunca 500 por el OverflowError que producía antes al
+        intentar redondear un total infinito) y que el ítem queda intacto."""
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg", "precio": 5000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto rechazo por monto infinito")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 10)
+        item_id = proyecto["items"][0]["id"]
+
+        antes = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)
+
+        with self.assertRaises(HTTPException) as contexto:
+            registrar_compra_item_router(
+                pid, item_id, RegistrarCompraRequest(cantidad=1, monto=float("inf")),
+                propietario_id=self.PROPIETARIO,
+            )
+        self.assertEqual(contexto.exception.status_code, 422)
+        self.assertNotEqual(contexto.exception.status_code, 500)
+
+        despues = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)
+        self.assertEqual(despues, antes)
+        proyectos = listar_proyectos(self.PROPIETARIO)
+        self.assertEqual([proyecto["id"] for proyecto in proyectos], [pid])
 
     def test_flujo_real_agrupar_generar_orden_y_registrar_compra(self):
         self._insertar_productos([

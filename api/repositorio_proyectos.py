@@ -886,10 +886,20 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
     texto libre para el número de factura/comprobante -- carga manual
     asistida, todavía sin lectura automática de ningún formato."""
 
-    if cantidad is None or cantidad <= 0:
-        raise ValueError("La cantidad comprada debe ser mayor a cero")
-    if monto is not None and monto < 0:
-        raise ValueError("El monto no puede ser negativo")
+    # AUDITORIA_COMPRAS_P0.md, hallazgo P0 (no finitos): NaN e Infinity
+    # pasan sin problema los chequeos de rango de arriba -- toda comparación
+    # contra NaN da False (así que "cantidad <= 0" nunca lo atrapa), e
+    # Infinity SÍ es un REAL válido para SQLite (a diferencia de NaN, que el
+    # propio driver de sqlite3 convierte en NULL al bindearlo). Un
+    # monto=Infinity committeaba sin error y solo explotaba después, en
+    # _calcular_totales()/listar_proyectos() (OverflowError al redondear),
+    # ya con el dato corrupto persistido. Se rechaza acá, antes de abrir
+    # conexión, para que ningún caller -- HTTP o interno -- dependa
+    # únicamente de los límites de Pydantic del router.
+    if cantidad is None or not math.isfinite(cantidad) or cantidad <= 0:
+        raise ValueError("La cantidad comprada debe ser un número finito mayor a cero")
+    if monto is not None and (not math.isfinite(monto) or monto < 0):
+        raise ValueError("El monto debe ser un número finito no negativo")
 
     conexion = conectar()
     try:

@@ -9,6 +9,8 @@ from api.repositorio_proyectos import (
     agregar_item,
     crear_proyecto,
     generar_orden_compra,
+    listar_proyectos,
+    obtener_proyecto,
     registrar_compra_item,
     reemplazar_item,
 )
@@ -265,6 +267,36 @@ class PruebaP0NumeracionOrdenes(BaseComprasP0):
             " ".join(str(valor) for valor in registrar_log.call_args.args),
         )
 
+    def test_sufijo_ascii_excesivamente_largo_se_ignora_sin_bloquear(self):
+        pid, _ = self._proyecto_item()
+        # Puramente ASCII y decimal (pasa isascii()+isdecimal()), pero
+        # supera el límite de conversión int(str) de CPython (por defecto
+        # 4300 dígitos) -- el try/except alrededor de int(sufijo) es lo
+        # único que lo cubre, no el filtro de caracteres.
+        numero_gigante = f"OC-{pid}-" + ("9" * 5000)
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.execute(
+            """
+            INSERT INTO ordenes_compra (
+                proyecto_id, proveedor, numero, fecha_creacion, monto_total, snapshot_json
+            ) VALUES (?, 'EPA', ?, '2026-01-01', 0, '[]')
+            """,
+            (pid, numero_gigante),
+        )
+        conexion.commit()
+        conexion.close()
+
+        with mock.patch.object(repositorio._logger, "info") as registrar_log:
+            compras = generar_orden_compra(pid, self.PROPIETARIO, "EPA")
+
+        numeros = {orden["numero"] for orden in compras["ordenes_generadas"]}
+        self.assertIn(f"OC-{pid}-1", numeros)
+        registrar_log.assert_called_once_with(
+            "ORDEN_COMPRA_NUMERO_NO_ESTANDAR_IGNORADO proyecto_id=%s cantidad=%s",
+            pid,
+            1,
+        )
+
     def test_compra_concurrente_confirma_antes_y_la_orden_usa_la_vista_actualizada(self):
         self._producto("comprado", "Material comprado", precio=100)
         self._producto("pendiente", "Material pendiente", precio=200)
@@ -498,7 +530,6 @@ class PruebaP0ComprasEstrictas(BaseComprasP0):
                 )
         self.assertEqual(self._snapshot_transaccional(pid), antes)
 
-
 class PruebaP0ReemplazoAtomico(BaseComprasP0):
     def _dos_productos(self):
         self._producto("1", "Origen")
@@ -586,6 +617,61 @@ class PruebaP0ReemplazoAtomico(BaseComprasP0):
             with self.assertRaises(KeyboardInterrupt):
                 reemplazar_item(pid, self.PROPIETARIO, origen_id, "EPA", "2")
         self.assertEqual(self._snapshot_transaccional(pid), antes)
+
+
+class PruebaP0ValoresNoFinitos(BaseComprasP0):
+    """AUDITORIA_COMPRAS_P0.md, hallazgo P0 (no finitos): NaN e Infinity
+    burlan los chequeos de rango normales -- toda comparación contra NaN
+    da False, y +Infinity sí es un REAL válido para SQLite (a diferencia
+    de NaN, que el driver de sqlite3 convierte en NULL al bindearlo).
+    Antes de este fix, un monto=Infinity commiteaba sin error y solo
+    rompía después, en _calcular_totales()/listar_proyectos()."""
+
+    VALORES_NO_FINITOS = (float("nan"), float("inf"), float("-inf"))
+
+    def test_cantidad_no_finita_se_rechaza_antes_de_cualquier_cambio(self):
+        pid, item_id = self._proyecto_item(cantidad=10)
+        antes = self._snapshot_transaccional(pid)
+        for valor in self.VALORES_NO_FINITOS:
+            with self.assertRaises(ValueError):
+                registrar_compra_item(pid, self.PROPIETARIO, item_id, valor, monto=100)
+            self.assertEqual(self._snapshot_transaccional(pid), antes)
+
+    def test_monto_no_finito_se_rechaza_antes_de_cualquier_cambio(self):
+        pid, item_id = self._proyecto_item(cantidad=10)
+        antes = self._snapshot_transaccional(pid)
+        for valor in self.VALORES_NO_FINITOS:
+            with self.assertRaises(ValueError):
+                registrar_compra_item(pid, self.PROPIETARIO, item_id, 1, monto=valor)
+            self.assertEqual(self._snapshot_transaccional(pid), antes)
+
+    def test_rechazo_no_finito_ocurre_antes_de_abrir_conexion(self):
+        pid, item_id = self._proyecto_item(cantidad=10)
+        with mock.patch.object(repositorio, "conectar") as conectar_mock:
+            for valor in self.VALORES_NO_FINITOS:
+                with self.assertRaises(ValueError):
+                    registrar_compra_item(pid, self.PROPIETARIO, item_id, valor)
+                with self.assertRaises(ValueError):
+                    registrar_compra_item(pid, self.PROPIETARIO, item_id, 1, monto=valor)
+        conectar_mock.assert_not_called()
+
+    def test_rechazo_no_finito_no_rompe_detalle_ni_listado(self):
+        pid, item_id = self._proyecto_item(cantidad=10)
+        antes = self._snapshot_transaccional(pid)
+
+        for valor in self.VALORES_NO_FINITOS:
+            with self.assertRaises(ValueError):
+                registrar_compra_item(pid, self.PROPIETARIO, item_id, 1, monto=valor)
+
+            self.assertEqual(self._snapshot_transaccional(pid), antes)
+
+            proyecto = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)
+            self.assertIsNotNone(proyecto)
+            self.assertEqual(proyecto["items"][0]["estado"], "pendiente")
+            self.assertEqual(proyecto["items"][0]["cantidad_comprada"], 0)
+
+            resumenes = listar_proyectos(self.PROPIETARIO)
+            self.assertTrue(any(resumen["id"] == pid for resumen in resumenes))
 
 
 if __name__ == "__main__":
