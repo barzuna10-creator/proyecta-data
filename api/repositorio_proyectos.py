@@ -719,11 +719,27 @@ def _mayor_sufijo_numero_valido(conexion, proyecto_id):
         "SELECT numero FROM ordenes_compra WHERE proyecto_id = ?", (proyecto_id,)
     ):
         prefijo = f"OC-{proyecto_id}-"
-        sufijo = numero[len(prefijo):] if isinstance(numero, str) and numero.startswith(prefijo) else None
-        if sufijo is None or not sufijo.isdigit():
+        sufijo = (
+            numero[len(prefijo):]
+            if isinstance(numero, str) and numero.startswith(prefijo)
+            else None
+        )
+        if (
+            not sufijo
+            or not sufijo.isascii()
+            or not sufijo.isdecimal()
+        ):
             ignorados += 1
             continue
-        mayor = max(mayor, int(sufijo))
+        try:
+            valor = int(sufijo)
+        except (TypeError, ValueError):
+            # También cubre límites defensivos del intérprete para cadenas
+            # de miles de dígitos. Un valor histórico extraño nunca debe
+            # impedir generar una orden nueva.
+            ignorados += 1
+            continue
+        mayor = max(mayor, valor)
 
     if ignorados:
         _logger.info(
@@ -765,32 +781,47 @@ def generar_orden_compra(proyecto_id, propietario_id, proveedor):
     (después del runner atómico de PR #1), que además decide cómo
     aplicarla de forma segura ante datos ya duplicados en producción."""
 
-    proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
-    if proyecto is None:
-        return None
-
-    grupo = next(
-        (g for g in _agrupar_por_proveedor(proyecto["items"]) if g["proveedor"] == proveedor),
-        None,
-    )
-    if grupo is None:
-        raise ValueError(f"No hay materiales pendientes de {proveedor} en este proyecto")
-
-    items_snapshot = [
-        {
-            "nombre": item["nombre"],
-            "cantidad": item["cantidad_pendiente"],
-            "precio_unitario": (
-                item["precio_actual"] if item["precio_actual"] is not None
-                else (item["precio_al_agregar"] or 0)
-            ),
-        }
-        for item in grupo["items"]
-    ]
-
     conexion = conectar()
     try:
         conexion.execute("BEGIN IMMEDIATE")
+        proyecto = conexion.execute(
+            "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+            (proyecto_id, propietario_id),
+        ).fetchone()
+        if proyecto is None:
+            conexion.rollback()
+            return None
+
+        # La vista comercial completa se obtiene después de tomar el write
+        # lock. Así una compra que confirmó antes del lock ya está reflejada
+        # en pendientes, cantidades, precios y subtotal de esta orden.
+        items = _obtener_items(conexion, proyecto_id)
+        grupo = next(
+            (
+                grupo
+                for grupo in _agrupar_por_proveedor(items)
+                if grupo["proveedor"] == proveedor
+            ),
+            None,
+        )
+        if grupo is None:
+            raise ValueError(
+                f"No hay materiales pendientes de {proveedor} en este proyecto"
+            )
+
+        items_snapshot = [
+            {
+                "nombre": item["nombre"],
+                "cantidad": item["cantidad_pendiente"],
+                "precio_unitario": (
+                    item["precio_actual"]
+                    if item["precio_actual"] is not None
+                    else (item["precio_al_agregar"] or 0)
+                ),
+            }
+            for item in grupo["items"]
+        ]
+
         siguiente = _mayor_sufijo_numero_valido(conexion, proyecto_id) + 1
         numero = f"OC-{proyecto_id}-{siguiente}"
         conexion.execute(
@@ -884,12 +915,13 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
         if cantidad_pendiente <= 0:
             raise ValueError("Este ítem ya está completamente comprado")
 
-        if math.isclose(
+        cantidades_equivalentes = math.isclose(
             cantidad,
             cantidad_pendiente,
             rel_tol=TOLERANCIA_CANTIDAD_RELATIVA,
             abs_tol=TOLERANCIA_CANTIDAD_ABSOLUTA,
-        ):
+        )
+        if cantidades_equivalentes:
             # Prácticamente iguales -- normaliza solo la representación
             # binaria (ver tolerancias declaradas arriba), nunca un
             # exceso real: usa cantidad_pendiente tal cual, no `cantidad`.
@@ -902,7 +934,16 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
             cantidad_efectiva = cantidad
 
         monto_efectivo = monto if monto is not None else round(cantidad_efectiva * precio, 2)
-        nueva_cantidad_comprada = round((item["cantidad_comprada"] or 0) + cantidad_efectiva, 4)
+        # SQLite REAL y el contrato del API no declaran una escala máxima.
+        # No se redondea prematuramente: cantidades menores a 0.0001 siguen
+        # asociadas a su monto. Si la compra cierra el pendiente, fijar el
+        # total exacto evita residuos binarios y mantiene estado/cantidad
+        # coherentes.
+        nueva_cantidad_comprada = (
+            item["cantidad"]
+            if cantidades_equivalentes
+            else (item["cantidad_comprada"] or 0) + cantidad_efectiva
+        )
         nuevo_monto_comprado = round((item["monto_comprado"] or 0) + monto_efectivo, 2)
         nuevo_estado = "comprado" if nueva_cantidad_comprada >= item["cantidad"] else "parcial"
 
