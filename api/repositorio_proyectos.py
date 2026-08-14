@@ -1,4 +1,5 @@
 import json
+import math
 import multiprocessing
 import secrets
 import time
@@ -701,13 +702,68 @@ def obtener_compras(proyecto_id, propietario_id):
     }
 
 
+def _mayor_sufijo_numero_valido(conexion, proyecto_id):
+    """Mayor sufijo numérico de `ordenes_compra.numero` ya usado por este
+    proyecto, siguiendo exactamente el formato `OC-{proyecto_id}-{n}`.
+    Cualquier fila cuyo `numero` no siga ese formato exacto (no debería
+    ocurrir con datos generados por esta misma aplicación, pero nunca se
+    asume) se ignora para el cálculo -- se registra únicamente la
+    CANTIDAD ignorada, nunca el valor de `numero` en sí ni ningún otro
+    dato comercial de la orden, para no filtrar información de negocio a
+    los logs. 0 si no hay ninguna fila válida -- el próximo número
+    empieza en 1."""
+
+    mayor = 0
+    ignorados = 0
+    for (numero,) in conexion.execute(
+        "SELECT numero FROM ordenes_compra WHERE proyecto_id = ?", (proyecto_id,)
+    ):
+        prefijo = f"OC-{proyecto_id}-"
+        sufijo = numero[len(prefijo):] if isinstance(numero, str) and numero.startswith(prefijo) else None
+        if sufijo is None or not sufijo.isdigit():
+            ignorados += 1
+            continue
+        mayor = max(mayor, int(sufijo))
+
+    if ignorados:
+        _logger.info(
+            "ORDEN_COMPRA_NUMERO_NO_ESTANDAR_IGNORADO proyecto_id=%s cantidad=%s",
+            proyecto_id,
+            ignorados,
+        )
+    return mayor
+
+
 def generar_orden_compra(proyecto_id, propietario_id, proveedor):
     """Genera un documento de orden de compra nuevo con TODO lo
     pendiente de `proveedor` en este momento -- inmutable una vez creado
     (mismo criterio que presupuesto_congelado: un evento histórico, no un
     estado que se edita). Generar una orden no cambia el estado de
     ningún ítem -- es un documento para enviarle al proveedor, no un
-    registro de que ya se compró (eso lo hace registrar_compra_item)."""
+    registro de que ya se compró (eso lo hace registrar_compra_item).
+
+    AUDITORIA_COMPRAS_P0.md, hallazgo P0-1 (corregido, sin cambio de
+    esquema): el número ya NO se calcula con `SELECT COUNT(*)` fuera de
+    cualquier lock de escritura -- calcular el mayor sufijo existente e
+    insertar la orden nueva corren dentro de la MISMA transacción
+    `BEGIN IMMEDIATE`. SQLite solo permite un escritor a la vez y
+    `BEGIN IMMEDIATE` toma ese lock de inmediato (no en el primer
+    INSERT), así que dos llamadas concurrentes quedan serializadas por
+    el propio motor: la segunda espera a que la primera termine (commit
+    o rollback) antes de leer el máximo, así que ve el número que la
+    primera ya insertó y nunca puede repetirlo.
+
+    Riesgo residual documentado a propósito: esta función por sí sola
+    hace que dos llamadas a través de ella nunca choquen, pero la base
+    de datos en sí NO tiene ningún `UNIQUE INDEX` sobre
+    `(proyecto_id, numero)` -- una escritura externa que no pase por
+    esta función (una migración futura, un script a mano, un bug en
+    otro código que inserte directo en `ordenes_compra`) podría insertar
+    un duplicado sin que SQLite lo impida. Esa garantía de base de datos
+    -- el índice único -- se evaluó en la revisión anterior y se dejó
+    fuera de este hotfix a propósito, para un PR de esquema posterior
+    (después del runner atómico de PR #1), que además decide cómo
+    aplicarla de forma segura ante datos ya duplicados en producción."""
 
     proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
     if proyecto is None:
@@ -719,12 +775,6 @@ def generar_orden_compra(proyecto_id, propietario_id, proveedor):
     )
     if grupo is None:
         raise ValueError(f"No hay materiales pendientes de {proveedor} en este proyecto")
-
-    conexion = conectar()
-    cantidad_previas = conexion.execute(
-        "SELECT COUNT(*) FROM ordenes_compra WHERE proyecto_id = ?", (proyecto_id,)
-    ).fetchone()[0]
-    numero = f"OC-{proyecto_id}-{cantidad_previas + 1}"
 
     items_snapshot = [
         {
@@ -738,20 +788,45 @@ def generar_orden_compra(proyecto_id, propietario_id, proveedor):
         for item in grupo["items"]
     ]
 
-    conexion.execute(
-        """
-        INSERT INTO ordenes_compra (proyecto_id, proveedor, numero, fecha_creacion, monto_total, snapshot_json)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            proyecto_id, proveedor, numero, _ahora(), grupo["subtotal"],
-            json.dumps(items_snapshot, ensure_ascii=False),
-        ),
-    )
-    conexion.commit()
-    conexion.close()
+    conexion = conectar()
+    try:
+        conexion.execute("BEGIN IMMEDIATE")
+        siguiente = _mayor_sufijo_numero_valido(conexion, proyecto_id) + 1
+        numero = f"OC-{proyecto_id}-{siguiente}"
+        conexion.execute(
+            """
+            INSERT INTO ordenes_compra (
+                proyecto_id, proveedor, numero, fecha_creacion, monto_total, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proyecto_id, proveedor, numero, _ahora(), grupo["subtotal"],
+                json.dumps(items_snapshot, ensure_ascii=False),
+            ),
+        )
+        conexion.commit()
+    except BaseException:
+        conexion.rollback()
+        raise
+    finally:
+        conexion.close()
 
     return obtener_compras(proyecto_id, propietario_id)
+
+
+# AUDITORIA_COMPRAS_P0.md, hallazgo P0-2: cantidad/cantidad_comprada son
+# columnas REAL (float64) -- restar dos floats acumulados a lo largo de
+# varios registros parciales puede dar un resultado que matemáticamente
+# "debería" ser exacto (ej. 10.0 - 9.9) pero en binario no lo es
+# (0.09999999999999964, no 0.1). Sin tolerancia, una solicitud por
+# exactamente lo que falta se rechazaba por "exceder" un pendiente que
+# en realidad era el mismo número con ruido de representación. Esta
+# tolerancia existe exclusivamente para el ruido binario de float64;
+# no representa una tolerancia comercial. Es absoluta y no escala con la
+# cantidad: incluso cerca del máximo permitido por el API (1 000 000), un
+# exceso real no se vuelve aceptable por ser proporcionalmente pequeño.
+TOLERANCIA_CANTIDAD_RELATIVA = 0.0
+TOLERANCIA_CANTIDAD_ABSOLUTA = 1e-9
 
 
 def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=None, fecha=None, comprobante_referencia=None):
@@ -766,10 +841,15 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
     monto_comprado utilizable sin importar si el usuario lo indicó a
     mano.
 
-    Si `cantidad` excede lo que todavía falta por comprar, se recorta a
-    lo pendiente -- un error de dedo (1000 en vez de 100) no debe poder
-    dejar cantidad_comprada por encima de cantidad, un estado que el
-    resto del sistema no sabría interpretar con sentido.
+    Si `cantidad` excede lo que todavía falta por comprar más allá de
+    las tolerancias estrictas documentadas arriba, se rechaza el registro completo.
+    Nunca se cambia silenciosamente la cantidad que el usuario indicó ni
+    se asocia su monto a una cantidad distinta -- la única normalización
+    permitida es cuando `cantidad` y `cantidad_pendiente` son
+    prácticamente iguales (dentro de esa tolerancia): ahí se usa
+    exactamente `cantidad_pendiente` como cantidad efectiva, para que el
+    ítem quede en 0 pendiente exacto en vez de arrastrar un residuo de
+    punto flotante del tamaño de la tolerancia misma.
 
     `comprobante_referencia` (ver COMPRAS.md, integración de facturas):
     texto libre para el número de factura/comprobante -- carga manual
@@ -781,55 +861,73 @@ def registrar_compra_item(proyecto_id, propietario_id, item_id, cantidad, monto=
         raise ValueError("El monto no puede ser negativo")
 
     conexion = conectar()
+    try:
+        conexion.execute("BEGIN IMMEDIATE")
+        item = conexion.execute(
+            """
+            SELECT i.id, i.cantidad, i.cantidad_comprada, i.monto_comprado, i.precio_al_agregar,
+                   pr.precio AS precio_actual
+            FROM items_proyecto i
+            JOIN proyectos p ON p.id = i.proyecto_id
+            LEFT JOIN productos pr ON pr.proveedor = i.proveedor AND pr.id_proveedor = i.id_proveedor
+            WHERE i.id = ? AND i.proyecto_id = ? AND p.propietario_id = ?
+            """,
+            (item_id, proyecto_id, propietario_id),
+        ).fetchone()
 
-    item = conexion.execute(
-        """
-        SELECT i.id, i.cantidad, i.cantidad_comprada, i.monto_comprado, i.precio_al_agregar,
-               pr.precio AS precio_actual
-        FROM items_proyecto i
-        JOIN proyectos p ON p.id = i.proyecto_id
-        LEFT JOIN productos pr ON pr.proveedor = i.proveedor AND pr.id_proveedor = i.id_proveedor
-        WHERE i.id = ? AND i.proyecto_id = ? AND p.propietario_id = ?
-        """,
-        (item_id, proyecto_id, propietario_id),
-    ).fetchone()
+        if item is None:
+            conexion.rollback()
+            return None
 
-    if item is None:
+        precio = item["precio_actual"] if item["precio_actual"] is not None else (item["precio_al_agregar"] or 0)
+        cantidad_pendiente = max(item["cantidad"] - (item["cantidad_comprada"] or 0), 0)
+        if cantidad_pendiente <= 0:
+            raise ValueError("Este ítem ya está completamente comprado")
+
+        if math.isclose(
+            cantidad,
+            cantidad_pendiente,
+            rel_tol=TOLERANCIA_CANTIDAD_RELATIVA,
+            abs_tol=TOLERANCIA_CANTIDAD_ABSOLUTA,
+        ):
+            # Prácticamente iguales -- normaliza solo la representación
+            # binaria (ver tolerancias declaradas arriba), nunca un
+            # exceso real: usa cantidad_pendiente tal cual, no `cantidad`.
+            cantidad_efectiva = cantidad_pendiente
+        elif cantidad > cantidad_pendiente:
+            raise ValueError(
+                f"La cantidad solicitada ({cantidad}) excede la cantidad pendiente ({cantidad_pendiente})"
+            )
+        else:
+            cantidad_efectiva = cantidad
+
+        monto_efectivo = monto if monto is not None else round(cantidad_efectiva * precio, 2)
+        nueva_cantidad_comprada = round((item["cantidad_comprada"] or 0) + cantidad_efectiva, 4)
+        nuevo_monto_comprado = round((item["monto_comprado"] or 0) + monto_efectivo, 2)
+        nuevo_estado = "comprado" if nueva_cantidad_comprada >= item["cantidad"] else "parcial"
+
+        conexion.execute(
+            """
+            UPDATE items_proyecto
+            SET cantidad_comprada = ?, monto_comprado = ?, fecha_compra = ?,
+                estado = ?, comprobante_tipo = 'manual',
+                comprobante_referencia = COALESCE(?, comprobante_referencia)
+            WHERE id = ?
+            """,
+            (
+                nueva_cantidad_comprada, nuevo_monto_comprado, fecha or _ahora(),
+                nuevo_estado, comprobante_referencia, item_id,
+            ),
+        )
+        conexion.execute(
+            "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?", (_ahora(), proyecto_id)
+        )
+        conexion.commit()
+    except BaseException:
+        conexion.rollback()
+        raise
+    finally:
         conexion.close()
-        return None
-
-    precio = item["precio_actual"] if item["precio_actual"] is not None else (item["precio_al_agregar"] or 0)
-    cantidad_pendiente = max(item["cantidad"] - (item["cantidad_comprada"] or 0), 0)
-    cantidad_efectiva = min(cantidad, cantidad_pendiente)
-
-    if cantidad_efectiva <= 0:
-        conexion.close()
-        raise ValueError("Este ítem ya está completamente comprado")
-
-    monto_efectivo = monto if monto is not None else round(cantidad_efectiva * precio, 2)
-
-    nueva_cantidad_comprada = round((item["cantidad_comprada"] or 0) + cantidad_efectiva, 4)
-    nuevo_monto_comprado = round((item["monto_comprado"] or 0) + monto_efectivo, 2)
-    nuevo_estado = "comprado" if nueva_cantidad_comprada >= item["cantidad"] else "parcial"
-
-    conexion.execute(
-        """
-        UPDATE items_proyecto
-        SET cantidad_comprada = ?, monto_comprado = ?, fecha_compra = ?,
-            estado = ?, comprobante_tipo = 'manual',
-            comprobante_referencia = COALESCE(?, comprobante_referencia)
-        WHERE id = ?
-        """,
-        (
-            nueva_cantidad_comprada, nuevo_monto_comprado, fecha or _ahora(),
-            nuevo_estado, comprobante_referencia, item_id,
-        ),
-    )
-    conexion.execute(
-        "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?", (_ahora(), proyecto_id)
-    )
-    conexion.commit()
-    conexion.close()
 
     return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
 
@@ -1167,89 +1265,123 @@ def eliminar_item(proyecto_id, propietario_id, item_id):
 
 
 def reemplazar_item(proyecto_id, propietario_id, item_id, proveedor_nuevo, id_proveedor_nuevo, cantidad=None):
-    """Reemplaza un ítem por otro elegido a mano -- combina eliminar +
-    agregar_item(origen='manual') en una sola operación, para poder
-    registrar UN evento 'seleccion_reemplazada' con el producto ANTERIOR
-    (lo que sugirió el motor) y el NUEVO (lo que eligió el usuario) en la
-    misma fila. Dos llamadas separadas (eliminar_item + agregar_item, que
-    es como funcionaba el frontend antes de esto) no permiten reconstruir
-    esa relación de forma confiable si hay varias decisiones pendientes
-    al mismo tiempo -- no hay ninguna clave que diga "este alta reemplaza
-    a esa baja en particular".
+    """Reemplaza un ítem por otro elegido a mano en una sola transacción.
+
+    El origen y el destino se validan bajo el mismo write lock antes de
+    borrar o insertar. Solo se conserva el evento histórico específico
+    ``seleccion_reemplazada``: no se llama a agregar_item ni se genera un
+    alta independiente que pueda sugerir que fueron dos decisiones.
 
     `cantidad`, si no se da, conserva la cantidad del ítem reemplazado."""
 
     conexion = conectar()
+    try:
+        conexion.execute("BEGIN IMMEDIATE")
+        proyecto = conexion.execute(
+            "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+            (proyecto_id, propietario_id),
+        ).fetchone()
+        if not proyecto:
+            conexion.rollback()
+            return None
 
-    proyecto = conexion.execute(
-        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
-        (proyecto_id, propietario_id),
-    ).fetchone()
-    if not proyecto:
+        item_previo = conexion.execute(
+            """
+            SELECT cantidad, revisado, origen, confianza_match, proveedor, id_proveedor,
+                   categoria_al_agregar, texto_original, fecha_agregado,
+                   cantidad_comprada, monto_comprado, fecha_compra,
+                   comprobante_tipo, comprobante_referencia
+            FROM items_proyecto WHERE id = ? AND proyecto_id = ?
+            """,
+            (item_id, proyecto_id),
+        ).fetchone()
+        if item_previo is None:
+            conexion.rollback()
+            return None
+
+        if (
+            (item_previo["cantidad_comprada"] or 0) != 0
+            or item_previo["monto_comprado"] is not None
+            or item_previo["fecha_compra"] is not None
+            or item_previo["comprobante_tipo"] is not None
+            or item_previo["comprobante_referencia"] is not None
+        ):
+            raise ValueError("No se puede reemplazar un ítem con compras registradas")
+
+        destino = conexion.execute(
+            """
+            SELECT id FROM items_proyecto
+            WHERE proyecto_id = ? AND proveedor = ? AND id_proveedor = ?
+            """,
+            (proyecto_id, proveedor_nuevo, id_proveedor_nuevo),
+        ).fetchone()
+        if destino is not None:
+            raise ValueError("El producto de reemplazo ya existe en el proyecto")
+
+        producto = conexion.execute(
+            """
+            SELECT nombre, marca, categoria, precio, url_imagen, url_producto
+            FROM productos WHERE proveedor = ? AND id_proveedor = ?
+            """,
+            (proveedor_nuevo, id_proveedor_nuevo),
+        ).fetchone()
+        if producto is None:
+            raise ValueError("Producto no encontrado en el catálogo")
+
+        cantidad_final = cantidad if cantidad is not None else item_previo["cantidad"]
+        ahora = _ahora()
+        cursor = conexion.execute(
+            "DELETE FROM items_proyecto WHERE id = ? AND proyecto_id = ?", (item_id, proyecto_id)
+        )
+        if cursor.rowcount == 0:
+            conexion.rollback()
+            return None
+
+        conexion.execute(
+            """
+            INSERT INTO items_proyecto (
+                proyecto_id, proveedor, id_proveedor, cantidad,
+                nombre_al_agregar, marca_al_agregar, categoria_al_agregar,
+                precio_al_agregar, url_imagen_al_agregar, url_producto_al_agregar,
+                fecha_agregado, partida, origen, revisado
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', 1)
+            """,
+            (
+                proyecto_id, proveedor_nuevo, id_proveedor_nuevo, cantidad_final,
+                producto["nombre"], producto["marca"], producto["categoria"],
+                producto["precio"], producto["url_imagen"], producto["url_producto"],
+                ahora, _sugerir_partida(producto["categoria"]),
+            ),
+        )
+        conexion.execute(
+            "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?", (ahora, proyecto_id)
+        )
+
+        es_reemplazo_de_sugerencia = (
+            not item_previo["revisado"]
+            and item_previo["origen"] == "plano"
+            and bool(item_previo["confianza_match"])
+        )
+        _eventos.registrar_evento(
+            conexion, _eventos.TIPO_SELECCION_REEMPLAZADA,
+            usuario_id=propietario_id, proyecto_id=proyecto_id, item_id=item_id,
+            proveedor=proveedor_nuevo, id_proveedor=id_proveedor_nuevo,
+            proveedor_anterior=item_previo["proveedor"], id_proveedor_anterior=item_previo["id_proveedor"],
+            categoria=item_previo["categoria_al_agregar"], origen=item_previo["origen"],
+            confianza_match=item_previo["confianza_match"], texto_material=item_previo["texto_original"],
+            tiempo_hasta_decision_segundos=(
+                _eventos.segundos_desde(item_previo["fecha_agregado"])
+                if es_reemplazo_de_sugerencia else None
+            ),
+        )
+        conexion.commit()
+    except BaseException:
+        conexion.rollback()
+        raise
+    finally:
         conexion.close()
-        return None
 
-    item_previo = conexion.execute(
-        """
-        SELECT cantidad, revisado, origen, confianza_match, proveedor, id_proveedor,
-               categoria_al_agregar, texto_original, fecha_agregado
-        FROM items_proyecto WHERE id = ? AND proyecto_id = ?
-        """,
-        (item_id, proyecto_id),
-    ).fetchone()
-    if item_previo is None:
-        conexion.close()
-        return None
-
-    cantidad_final = cantidad if cantidad is not None else item_previo["cantidad"]
-
-    cursor = conexion.execute(
-        "DELETE FROM items_proyecto WHERE id = ? AND proyecto_id = ?", (item_id, proyecto_id)
-    )
-    if cursor.rowcount == 0:
-        conexion.close()
-        return None
-
-    conexion.execute(
-        "UPDATE proyectos SET fecha_actualizacion = ? WHERE id = ?", (_ahora(), proyecto_id)
-    )
-    conexion.commit()
-    conexion.close()
-
-    # Reutiliza agregar_item() en vez de duplicar su lógica de guardado
-    # (mismo criterio que ya usa generar_cotizacion_automatica) -- esto
-    # también registra su propio evento item_agregado (origen='manual'),
-    # que es correcto y esperado: es un alta real, independiente del
-    # evento de reemplazo que se registra abajo.
-    proyecto_actualizado = agregar_item(
-        proyecto_id, propietario_id, proveedor_nuevo, id_proveedor_nuevo,
-        cantidad=cantidad_final, origen="manual",
-    )
-    if proyecto_actualizado is None:
-        return None
-
-    es_reemplazo_de_sugerencia = (
-        not item_previo["revisado"]
-        and item_previo["origen"] == "plano"
-        and bool(item_previo["confianza_match"])
-    )
-
-    conexion = conectar()
-    _eventos.registrar_evento(
-        conexion, _eventos.TIPO_SELECCION_REEMPLAZADA,
-        usuario_id=propietario_id, proyecto_id=proyecto_id, item_id=item_id,
-        proveedor=proveedor_nuevo, id_proveedor=id_proveedor_nuevo,
-        proveedor_anterior=item_previo["proveedor"], id_proveedor_anterior=item_previo["id_proveedor"],
-        categoria=item_previo["categoria_al_agregar"], origen=item_previo["origen"],
-        confianza_match=item_previo["confianza_match"], texto_material=item_previo["texto_original"],
-        tiempo_hasta_decision_segundos=(
-            _eventos.segundos_desde(item_previo["fecha_agregado"]) if es_reemplazo_de_sugerencia else None
-        ),
-    )
-    conexion.commit()
-    conexion.close()
-
-    return proyecto_actualizado
+    return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
 
 
 def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):

@@ -683,12 +683,14 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
         proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "3", 10)
         item_id = proyecto["items"][0]["id"]
 
+        # Cobertura válida: tres compras parciales que acumulan exactamente
+        # a la cantidad total (3+4+3=10), ninguna excede lo pendiente en
+        # el momento de registrarse -- ver, por separado,
+        # test_registrar_compra_que_excede_lo_pendiente_en_medio_de_acumulacion_no_cambia_nada
+        # para el caso de rechazo.
         registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=3, monto=2700)  # parcial: 3/10
         registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=4, monto=None)  # parcial: 7/10, 4*1000 estimado
-        # Pide 5 pero solo quedan 3 pendientes -- registrar_compra_item
-        # recorta la cantidad efectiva a lo que falta (ver su docstring),
-        # sin recortar el monto que el caller ya indicó.
-        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=5, monto=2500)
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=3, monto=2500)  # completa: 10/10
 
         resumen, detalle = self._resumen_y_detalle(pid)
 
@@ -698,6 +700,42 @@ class PruebaFlujoCompletoCotizacion(BasePruebaIntegracion):
         self.assertEqual(resumen["total_pendiente"], detalle["total_pendiente"])
         self.assertEqual(detalle["total_comprado"], 9200)  # 2700 + 4000 + 2500
         self.assertEqual(detalle["total_pendiente"], 0)
+
+        eliminar_proyecto(pid, self.PROPIETARIO)
+
+    def test_registrar_compra_que_excede_lo_pendiente_en_medio_de_acumulacion_no_cambia_nada(self):
+        """Hotfix P0 (AUDITORIA_COMPRAS_P0.md): un intento que excede lo
+        pendiente se rechaza completo, incluso cuando el ítem ya tiene
+        una acumulación parcial previa real -- esa acumulación previa
+        debe quedar exactamente intacta, no solo "no perderse del todo"."""
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "3", "nombre": "Varilla #4",
+             "categoria": "Construcción", "precio": 1000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Obra con acumulacion y rechazo")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "3", 10)
+        item_id = proyecto["items"][0]["id"]
+
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=3, monto=2700, comprobante_referencia="FAC-A")  # 3/10
+        registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=4, monto=None)  # 7/10, 4*1000 estimado
+
+        antes = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)["items"][0]
+        self.assertEqual(antes["estado"], "parcial")
+        self.assertEqual(antes["cantidad_comprada"], 7)
+
+        # Solo quedan 3 pendientes -- pedir 5 debe rechazarse entero.
+        with self.assertRaises(ValueError):
+            registrar_compra_item(pid, self.PROPIETARIO, item_id, cantidad=5, monto=2500)
+
+        despues = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)["items"][0]
+        self.assertEqual(despues["cantidad_comprada"], antes["cantidad_comprada"])
+        self.assertEqual(despues["monto_comprado"], antes["monto_comprado"])
+        self.assertEqual(despues["estado"], antes["estado"])
+        self.assertEqual(despues["fecha_compra"], antes["fecha_compra"])
+        self.assertEqual(despues["comprobante_referencia"], antes["comprobante_referencia"])
+        self.assertEqual(despues["comprobante_tipo"], antes["comprobante_tipo"])
+        self.assertEqual(despues["comprobante_referencia"], "FAC-A")  # no se pisó ni se perdió
 
         eliminar_proyecto(pid, self.PROPIETARIO)
 
@@ -1166,9 +1204,9 @@ class PruebaInstrumentacionDeEventos(BasePruebaIntegracion):
         self.assertEqual(evento["id_proveedor"], "2")
         self.assertEqual(evento["confianza_match"], "media")
         self.assertIsNotNone(evento["tiempo_hasta_decision_segundos"])
-        # También debe existir el alta del producto nuevo (agregar_item
-        # normal, origen='manual') -- el reemplazo no lo reemplaza a él.
-        self.assertIn("item_agregado", [e["tipo"] for e in eventos])
+        # El hotfix ejecuta el reemplazo de forma indivisible y conserva
+        # solo su evento específico; no simula un segundo alta separada.
+        self.assertEqual([e["tipo"] for e in eventos].count("item_agregado"), 1)
 
     def test_reemplazar_conserva_la_cantidad_original_si_no_se_da_una_nueva(self):
         self._insertar_productos([

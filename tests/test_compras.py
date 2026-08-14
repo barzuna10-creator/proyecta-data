@@ -17,6 +17,7 @@ from api.repositorio_proyectos import (
     generar_orden_compra,
     obtener_compras,
     obtener_control_costos,
+    obtener_proyecto,
     registrar_compra_item,
 )
 from tests.test_repositorio_proyectos import BasePruebaIntegracion
@@ -172,13 +173,26 @@ class PruebaRegistrarCompraItem(BasePruebaIntegracion):
 
         self.assertEqual(proyecto["items"][0]["monto_comprado"], 48500)
 
-    def test_cantidad_que_excede_lo_pendiente_se_recorta(self):
+    def test_cantidad_que_excede_lo_pendiente_se_rechaza_sin_cambios(self):
+        """Hotfix P0 (AUDITORIA_COMPRAS_P0.md): un error de dedo (1000 en
+        vez de 100) ya no se recorta en silencio a lo pendiente -- se
+        rechaza la operación completa con ValueError, y el ítem queda
+        exactamente como estaba antes del intento."""
         pid, item_id = self._item_de_prueba(precio=5000, cantidad=10)
-        proyecto = registrar_compra_item(pid, self.PROPIETARIO, item_id, 1000)  # error de dedo
+        antes = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)["items"][0]
 
-        item = proyecto["items"][0]
-        self.assertEqual(item["cantidad_comprada"], 10)  # recortado a la cantidad real del ítem
-        self.assertEqual(item["estado"], "comprado")
+        with self.assertRaises(ValueError):
+            registrar_compra_item(pid, self.PROPIETARIO, item_id, 1000)  # error de dedo
+
+        despues = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)["items"][0]
+        self.assertEqual(despues["cantidad_comprada"], antes["cantidad_comprada"])
+        self.assertEqual(despues["monto_comprado"], antes["monto_comprado"])
+        self.assertEqual(despues["estado"], antes["estado"])
+        self.assertEqual(despues["fecha_compra"], antes["fecha_compra"])
+        self.assertEqual(despues["comprobante_referencia"], antes["comprobante_referencia"])
+        self.assertEqual(despues["comprobante_tipo"], antes["comprobante_tipo"])
+        self.assertEqual(despues["estado"], "pendiente")
+        self.assertEqual(despues["cantidad_comprada"], 0)
 
     def test_comprobante_referencia_se_guarda(self):
         pid, item_id = self._item_de_prueba()

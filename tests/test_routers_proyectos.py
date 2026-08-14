@@ -16,7 +16,9 @@ import unittest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from api.repositorio_proyectos import actualizar_item, agregar_item, crear_proyecto, eliminar_item
+from api.repositorio_proyectos import (
+    actualizar_item, agregar_item, crear_proyecto, eliminar_item, obtener_proyecto,
+)
 from api.routers.proyectos import (
     AgregarItemRequest,
     ActualizarItemRequest,
@@ -278,6 +280,36 @@ class PruebaEndpointsCompras(BasePruebaIntegracion):
                 propietario_id=self.PROPIETARIO,
             )
         self.assertEqual(contexto.exception.status_code, 404)
+
+    def test_registrar_compra_que_excede_lo_pendiente_devuelve_422_sin_cambios(self):
+        """Hotfix P0 (AUDITORIA_COMPRAS_P0.md): registrar_compra_item()
+        rechaza con ValueError cuando cantidad > pendiente -- contrato de
+        router ya existente (except ValueError -> HTTPException 422),
+        acá se confirma explícitamente para este caso concreto: nunca un
+        500, y el ítem queda intacto."""
+        self._insertar_productos([
+            {"proveedor": "EPA", "id_proveedor": "1", "nombre": "Cemento Gris 42.5kg", "precio": 5000},
+        ])
+        proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto rechazo por exceso")
+        pid = proyecto["id"]
+        proyecto = agregar_item(pid, self.PROPIETARIO, "EPA", "1", 10)
+        item_id = proyecto["items"][0]["id"]
+
+        antes = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)["items"][0]
+
+        with self.assertRaises(HTTPException) as contexto:
+            registrar_compra_item_router(
+                pid, item_id, RegistrarCompraRequest(cantidad=1000),
+                propietario_id=self.PROPIETARIO,
+            )
+        self.assertEqual(contexto.exception.status_code, 422)
+        self.assertNotEqual(contexto.exception.status_code, 500)
+
+        despues = obtener_proyecto(pid, propietario_id=self.PROPIETARIO)["items"][0]
+        self.assertEqual(despues["cantidad_comprada"], antes["cantidad_comprada"])
+        self.assertEqual(despues["monto_comprado"], antes["monto_comprado"])
+        self.assertEqual(despues["estado"], antes["estado"])
+        self.assertEqual(despues["estado"], "pendiente")
 
     def test_flujo_real_agrupar_generar_orden_y_registrar_compra(self):
         self._insertar_productos([
