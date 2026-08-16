@@ -27,3 +27,8 @@ database/proyecta.db-wal
 # meterlos a git repetiría el mismo problema que tiene proyecta.db, solo
 # que multiplicado por cada respaldo.
 database/respaldos/
+
+# Lockfile de exclusión mutua de database/respaldar_db.py (fcntl.flock) --
+# se crea junto a BASE_DATOS (database/ en local), nunca debe versionarse.
+# Sin path prefix a propósito: sigue a BASE_DATOS sea cual sea su directorio.
+.respaldo_sqlite.lock
