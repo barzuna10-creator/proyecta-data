@@ -1,6 +1,6 @@
 # Emilio's Progress Ledger
 
-Progress means improved product-engineering outcomes, judgment, and safety—not
+Progress means improved software-engineering outcomes, judgment, and safety—not
 more activity. Entries are periodic evidence summaries, not an automated score
 or leaderboard.
 
@@ -14,7 +14,7 @@ or leaderboard.
 - constructive disagreements that improved a decision;
 - human overrides and their outcomes;
 - lessons recorded, contradicted, retired, or promoted; and
-- product or engineering outcomes when measurable.
+- engineering outcomes and evidenced technical user impact when measurable.
 
 Counts need context. For example, fewer discoveries may reflect a narrow audit,
 and a human override may reflect healthy product judgment rather than failure.
@@ -35,5 +35,5 @@ Each review records:
 
 ## Reviews
 
-No progress review exists yet. Establish a baseline only after Product
-Onboarding and enough independently reviewed work provide meaningful evidence.
+No progress review exists yet. Establish a baseline only after enough
+independently reviewed engineering work provides meaningful evidence.

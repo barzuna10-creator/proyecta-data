@@ -1,4 +1,4 @@
-# Zentra Product Knowledge Map
+# Zentra Technical Knowledge Map
 
 This directory is Emilio's navigation layer to Zentra evidence. It should stay
 small: reference authoritative sources, record freshness and contradictions,
@@ -15,7 +15,7 @@ For current implementation:
 4. current technical documentation; and
 5. older documentation.
 
-For product direction:
+For product and business direction, when it is technically relevant:
 
 1. explicit current human-approved product vision;
 2. accepted principles and RFCs;
@@ -24,7 +24,7 @@ For product direction:
 
 Every assertion in the knowledge map has exactly one explicit label:
 
-- **FACT:** current behavior or state verified directly against the evidence
+- **FACT:** current technical behavior or state verified directly against the evidence
   hierarchy. A FACT cites its source, verification method, and verification
   date. Documentation alone cannot establish a current implementation FACT when
   stronger evidence is available but has not been checked.
@@ -35,10 +35,10 @@ Every assertion in the knowledge map has exactly one explicit label:
   evidence or human confirmation is missing. An ASSUMPTION names what would
   confirm or reject it, who can resolve it, and the risk of being wrong. It must
   never be presented as settled product knowledge.
-- **INTENT:** current product direction explicitly approved by the authorized
-  human decision-maker. An INTENT cites the approving decision, authority, and
-  date. A roadmap, RFC, repeated behavior, or Emilio recommendation is not
-  INTENT unless its current approval is established.
+- **INTENT:** a current technical or product requirement explicitly approved by
+  the authorized human decision-maker. An INTENT cites the approving decision,
+  authority, and date. A roadmap, RFC, repeated behavior, or Emilio
+  recommendation is not INTENT unless its current approval is established.
 
 ## Category changes
 
@@ -60,46 +60,51 @@ stronger evidence, and ask José when product intent remains ambiguous.
 
 ## Map sections
 
-Product Onboarding will populate a concise map covering:
+Technical onboarding and Discovery will maintain a concise map covering:
 
-- what Zentra is, target users, value proposition, and product stage;
-- product direction and what Zentra should not become;
-- core user journeys;
+- Zentra's current software boundaries and repository topology;
+- backend, frontend, API, database, integration, and deployment architecture;
+- technically relevant user journeys and contracts;
 - technical architecture and external boundaries;
-- current capabilities, partial implementations, limitations, risks, UX
-  friction, and test gaps;
-- product principles; and
+- current capabilities, partial implementations, limitations, correctness,
+  reliability, security, performance, technical UX, and test gaps;
+- architectural decisions, regression patterns, repository conventions, and
+  engineering learnings;
+- product intent only where José has explicitly confirmed it and it is needed
+  to understand an engineering decision; and
 - canonical terminology.
 
 `SOURCES.md` is the source registry. Future section files should be created only
 when the onboarding evidence proves one consolidated map is no longer usable.
 
-## Separate Product Onboarding task
+## Technical onboarding and Discovery
 
-Emilio is not fully ready for autonomous Discovery Mode until a separately
-authorized, read-only, independently reviewed onboarding task:
+Discovery Mode is read-only. Authorized technical onboarding or Discovery:
 
 1. inspects available backend, frontend, schema/migrations, tests, CI, history,
-   architecture, product, UX, security, infrastructure, and roadmap evidence;
-2. maps architecture, capabilities, and core user journeys;
+   architecture, technical UX, security, infrastructure, and relevant product
+   evidence;
+2. maps architecture, capabilities, contracts, and technical user journeys;
 3. identifies stale or conflicting documentation and important gaps;
 4. labels every mapped assertion as FACT, INFERENCE, ASSUMPTION, or INTENT and
    supplies the evidence, reasoning, confirmation requirement, or approving
    decision required by that label;
 5. records category changes and contradictions, and produces a confirmation
    queue for ASSUMPTIONS or ambiguous INTENT requiring José's decision;
-6. produces an onboarding report; and
+6. produces an evidence-based technical report; and
 7. proposes reviewed updates to this map and `SOURCES.md`.
 
-This identity task creates the mechanism only; it does not perform onboarding.
+The initial Product Onboarding report remains useful technical evidence, but it
+does not grant Emilio product-management authority and must be refreshed when
+stronger or newer technical evidence conflicts with it.
 
 ## Readiness gate
 
-Full Discovery readiness requires approved identity and safety, completed
-onboarding, mapped journeys/architecture/current state, documented or resolved
-major contradictions, and José's review of important product-intent assumptions.
-Until then Emilio may inspect and learn but stays conservative about strong
-product recommendations.
+Discovery readiness requires approved identity and safety, authorized evidence,
+mapped technical journeys/architecture/current state, and documented or
+resolved major contradictions. Emilio may inspect and learn, but does not make
+product or business decisions. Ambiguous product intent required for an
+engineering decision goes to José.
 
 ## Maintenance
 

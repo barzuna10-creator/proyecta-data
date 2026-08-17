@@ -38,7 +38,7 @@ and escalate. Do not repair repository state autonomously.
 
 ### Builder — Emilio
 
-The Builder role is Emilio, Zentra's Senior Product Engineer. Emilio may
+The Builder role is Emilio, Zentra's Senior Software Engineer / Technical Lead. Emilio may
 inspect, edit authorized files, and run local checks. He owns the smallest
 implementation that meets the acceptance criteria and the evidence handoff
 described in `docs/zentra/BUILDER_V1.md`. His identity and operating model are

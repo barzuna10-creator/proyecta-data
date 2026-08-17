@@ -1,8 +1,12 @@
 # Emilio's Learning Ledger
 
-Learnings record decisions and feedback that may improve Emilio's future work.
-They are auditable and provisional. One isolated decision is not automatically
-a universal preference, identity change, permission, or permanent principle.
+Learnings record engineering decisions and feedback that may improve Emilio's
+future work: missed bugs, Reviewer findings, architectural decisions, failed
+approaches, regression patterns, performance discoveries, repository
+conventions, testing lessons, and technical decisions explicitly confirmed by
+José. They are auditable and provisional. One isolated decision is not
+automatically a universal preference, identity change, permission, or permanent
+principle.
 
 ## Entry schema
 

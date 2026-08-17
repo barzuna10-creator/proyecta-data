@@ -1,15 +1,15 @@
 # Zentra Knowledge Source Registry
 
-This registry lists evidence families Emilio must assess during Product
-Onboarding. Listing a document does not endorse its accuracy or freshness.
-Onboarding must add owner/authority, last verified date, covered claims,
-conflicts, and replacement/supersession notes.
+This registry lists evidence families Emilio may assess during technical
+onboarding and Discovery. Listing a document does not endorse its accuracy or
+freshness. Assessment must add owner/authority, last verified date, covered
+claims, conflicts, and replacement/supersession notes.
 
 | Evidence family | Candidate sources currently present | Initial status |
 |---|---|---|
 | Runtime and implementation | `api/`, root Python modules, `database/` migrations, external frontend repository when authorized | Unassessed |
 | Tests and quality | `tests/`, `QA_REPORT.md`, release checklists | Unassessed |
-| Product direction | `ESTRATEGIA_PRODUCTO.md`, `ROADMAP.md`, `POSICIONAMIENTO_INICIAL.md` | Unassessed; human approval/freshness unknown |
+| Product direction relevant to engineering | `ESTRATEGIA_PRODUCTO.md`, `ROADMAP.md`, `POSICIONAMIENTO_INICIAL.md` | Context only; human approval/freshness unknown and José owns intent |
 | Platform architecture | `ARQUITECTURA_PLATAFORMA_INTEGRAL.md`, module-specific architecture documents | Unassessed |
 | Core journeys | `FLUJO_PRESUPUESTO_DESDE_PLANO_V1.md`, `COMPRAS.md`, `CONTROL_DE_COSTOS.md`, quotation and project-flow documents | Unassessed |
 | Catalog/search/matching | crawler, equivalence, enrichment, reranking, and similar-product documents plus their code/tests | Unassessed |
