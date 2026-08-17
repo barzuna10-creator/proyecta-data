@@ -19,7 +19,7 @@ from capa_intencion import detectar_concepto, PALABRAS_CONTEXTO_NORMALIZADAS
 from similares import obtener_similares as _obtener_similares_motor, LIMITE_DEFECTO as _LIMITE_SIMILARES_DEFECTO
 from presupuestos import calcular_presupuesto as _calcular_presupuesto_motor
 from especificaciones import unidad_comercial as _unidad_comercial
-from database.respaldar_db import respaldar as _respaldar_db
+from database.respaldar_db import CODIGO_LOCK_OCUPADO, respaldar as _respaldar_db
 from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migraciones_pendientes
 
 # Investigación "no such table: usuarios" en producción: nada, en ningún
@@ -59,7 +59,17 @@ def _bucle_arranque_en_segundo_plano():
     _aplicar_migraciones_pendientes()
     while True:
         try:
-            _respaldar_db()
+            resultado = _respaldar_db()
+            if resultado == CODIGO_LOCK_OCUPADO:
+                _logger.warning(
+                    "RESPALDO estado=omitido codigo=%s causa=lock_ocupado",
+                    resultado,
+                )
+            elif resultado != 0:
+                _logger.error(
+                    "RESPALDO estado=fallido codigo=%s",
+                    resultado,
+                )
         except Exception:
             _logger.exception("Falló el respaldo automático de la base de datos.")
         time.sleep(INTERVALO_RESPALDO_SEGUNDOS)
