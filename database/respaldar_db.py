@@ -56,6 +56,20 @@ publica mediante un `os.replace()` durable. La retención ocurre después de
 publicar y solo considera copias comprobadas: nunca se borra un punto de
 recuperación existente para intentar crear otro que todavía puede fallar.
 
+Hallazgo posterior (revisión previa a mergear a producción): `.backup()`
+copia el flag de journal_mode del origen tal cual, así que el temporal
+quedaba marcado WAL aunque nadie se lo pidió -- cada `integrity_check`
+posterior (acá mismo, o en cada purga futura sobre CUALQUIER respaldo
+histórico ya marcado WAL) le creaba `-shm`/`-wal` huérfanos, ya que
+`os.replace()` solo renombra el archivo base, nunca sus sidecars. Dos
+capas de arreglo, no una sola: `_copiar_online()` normaliza el temporal a
+`journal_mode=DELETE` inmediatamente después de `.backup()` (nunca antes
+-- backup() pisaría el cambio), y toda inspección de un archivo SQLite
+estático (temporal ya cerrado, o un respaldo histórico durante la
+retención) usa `immutable=1` -- así ni siquiera un archivo heredado de
+antes de este fix, todavía marcado WAL, genera sidecars nuevos al
+validarlo. La base viva de origen nunca usa `immutable=1` (sí cambia).
+
 Uso:
     PYTHONPATH=. .venv/bin/python3 database/respaldar_db.py
     PYTHONPATH=. .venv/bin/python3 database/respaldar_db.py --mantener 10
@@ -114,12 +128,13 @@ TABLAS_FUNDACIONALES_ZENTRA = frozenset({
 })
 
 
-def _uri_solo_lectura(ruta):
-    return f"{Path(ruta).resolve().as_uri()}?mode=ro"
+def _uri_solo_lectura(ruta, inmutable=False):
+    sufijo = "&immutable=1" if inmutable else ""
+    return f"{Path(ruta).resolve().as_uri()}?mode=ro{sufijo}"
 
 
-def _conectar_solo_lectura(ruta):
-    return sqlite3.connect(_uri_solo_lectura(ruta), uri=True)
+def _conectar_solo_lectura(ruta, inmutable=False):
+    return sqlite3.connect(_uri_solo_lectura(ruta, inmutable=inmutable), uri=True)
 
 
 def _huella_esquema(conexion):
@@ -145,10 +160,23 @@ def _validar_conexion_sqlite(conexion):
 
 
 def _inspeccionar_sqlite(ruta, huella_esperada=None):
+    """Valida un archivo SQLite estático -- el temporal recién copiado
+    (cerrado, nadie más lo toca) o un respaldo histórico ya publicado.
+    Nunca se usa sobre la base viva de origen (esa usa su propia conexión
+    en respaldar(), sin `immutable=1` -- ver ahí por qué).
+
+    `immutable=1`: le dice a SQLite que el archivo no va a cambiar bajo
+    ningún concepto mientras dure la conexión -- cierto acá porque ambos
+    casos son archivos ya cerrados/publicados. Sin esto, abrir un archivo
+    cuyo header quedó marcado WAL (heredado del origen vía `.backup()`, o
+    de un respaldo histórico previo al fix del leak de sidecars) le crea
+    `-shm`/`-wal` huérfanos en cada inspección -- exactamente lo que este
+    modo evita, sin tocar ni un byte del contenido ni del resultado de
+    integrity_check."""
     ruta = Path(ruta)
     if ruta.stat().st_size <= 0:
         raise ValueError("el archivo SQLite está vacío")
-    conexion = _conectar_solo_lectura(ruta)
+    conexion = _conectar_solo_lectura(ruta, inmutable=True)
     try:
         huella = _validar_conexion_sqlite(conexion)
     finally:
@@ -187,8 +215,30 @@ def _es_respaldo_valido(ruta):
     siendo restaurable. Exige nombre canónico, SQLite íntegra y las tablas que
     identifican el esquema fundacional de Zentra, evitando contar cualquier
     SQLite ajena que casualmente contenga una tabla.
+
+    Antes de abrir con `immutable=1` (ver _inspeccionar_sqlite), revisa el
+    -wal asociado. `immutable=1` le dice a SQLite que el archivo no va a
+    cambiar bajo ningún concepto -- si el -wal existe y pesa más de 0
+    bytes, hay una transacción confirmada que todavía no se plegó al
+    archivo base, y SQLite no garantiza nada sobre lo que se lea en ese
+    modo (podría ser una versión vieja de los datos, o un error). Ese
+    respaldo se clasifica como no autónomo: no cuenta para retención, y
+    -- al no entrar nunca en _respaldos_validos() -- tampoco se purga
+    jamás, ni él ni sus sidecars, sin importar cuán ajustado esté
+    `mantener`. Un -wal presente mide 0 bytes es harina de otro costal:
+    no hay nada pendiente, el archivo base ya es autónomo y se valida
+    normalmente con immutable=1 más abajo.
     """
+    ruta = Path(ruta)
     if _timestamp_canonico(ruta) is None:
+        return False
+    wal, _shm = _sidecars_wal(ruta)
+    if wal.exists() and wal.stat().st_size > 0:
+        print(
+            f"⚠️ Respaldo histórico {ruta.name}: WAL no vacío -- no es "
+            "autónomo, se excluye de la retención automática (no cuenta "
+            "como válido; no se purga ni él ni sus sidecars)."
+        )
         return False
     try:
         huella = _inspeccionar_sqlite(ruta)
@@ -239,13 +289,28 @@ def _fsync_directorio(ruta):
         os.close(descriptor)
 
 
+def _sidecars_wal(ruta):
+    return (Path(f"{ruta}-wal"), Path(f"{ruta}-shm"))
+
+
 def _eliminar_temporal_propio(temporal):
+    """Limpia únicamente rutas derivadas del temporal propio (nunca otro
+    archivo). Cada ruta (base, -wal, -shm) se intenta en su propio
+    try/except -- que falle borrar una no debe impedir intentar las
+    otras dos (ej. el proceso muere justo entre borrar la base y sus
+    sidecars; el próximo _eliminar_temporal_propio de OTRA corrida nunca
+    va a intentar limpiar el nombre de esta, así que vale la pena que
+    esta corrida se lleve puesto todo lo que pueda antes de salir)."""
     if temporal is None:
         return
-    try:
-        Path(temporal).unlink(missing_ok=True)
-    except OSError as error:
-        print(f"❌ No se pudo limpiar el temporal propio: {type(error).__name__}")
+    for ruta in (Path(temporal),) + _sidecars_wal(temporal):
+        try:
+            ruta.unlink(missing_ok=True)
+        except OSError as error:
+            print(
+                f"❌ No se pudo limpiar {ruta.name} del temporal propio: "
+                f"{type(error).__name__}"
+            )
 
 
 def _copiar_online(conexion_origen, temporal):
@@ -253,6 +318,24 @@ def _copiar_online(conexion_origen, temporal):
     try:
         conexion_destino = sqlite3.connect(str(temporal))
         conexion_origen.backup(conexion_destino)
+        # .backup() copia la página 1 del origen tal cual -- incluido el
+        # flag de journal_mode. Si el origen está en WAL (como la base
+        # real, ver db.py), el temporal queda marcado WAL en su propio
+        # header aunque nadie se lo pidió acá. Cualquier apertura
+        # posterior (integrity_check de este mismo temporal, o su futura
+        # validación como respaldo publicado en cada purga) le crearía
+        # -shm/-wal huérfanos -- os.replace() más abajo solo renombra el
+        # archivo base, nunca sus sidecars, así que quedarían huérfanos
+        # bajo el nombre temporal descartado para siempre. Normalizar acá
+        # DESPUÉS de backup() (antes no sirve -- backup() pisaría
+        # cualquier cambio previo al copiar la página 1) deja la copia en
+        # modo journal normal, sin sidecars, sin cambiar ni un byte del
+        # contenido.
+        modo = conexion_destino.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        if modo != "delete":
+            raise ValueError(
+                f"no se pudo normalizar journal_mode a delete (quedó en {modo!r})"
+            )
         conexion_destino.commit()
     finally:
         if conexion_destino is not None:
@@ -397,13 +480,27 @@ def _purgar_respaldos_viejos(directorio_respaldos, mantener, respaldo_nuevo):
     cantidad_a_eliminar = max(len(historicos) - cupos_historicos, 0)
     de_mas = historicos[:cantidad_a_eliminar]
     for respaldo in de_mas:
-        try:
-            respaldo.unlink()
-        except OSError as error:
-            print(
-                f"  - no se pudo borrar el respaldo viejo {respaldo.name}: "
-                f"{type(error).__name__}"
-            )
+        # Base, -wal y -shm se intentan de forma independiente -- que
+        # falle borrar una no debe impedir intentar las otras dos (ej. la
+        # base se borra bien pero el -wal falla por permisos: igual hay
+        # que intentar el -shm). Sidecars del MISMO respaldo que se está
+        # purgando, nunca de otro archivo. Pueden existir por haber
+        # quedado marcados WAL antes de este fix (ver _copiar_online), o
+        # por haber sido inspeccionados en una purga anterior a este fix.
+        hubo_fallo = False
+        for ruta in (respaldo,) + _sidecars_wal(respaldo):
+            try:
+                ruta.unlink(missing_ok=True)
+            except OSError as error:
+                hubo_fallo = True
+                print(
+                    f"  - no se pudo borrar {ruta.name} del respaldo viejo "
+                    f"{respaldo.name}: {type(error).__name__}"
+                )
+        if hubo_fallo:
+            # Se detiene la purga acá -- no se intenta el siguiente
+            # respaldo de de_mas. respaldar() reporta retención
+            # incompleta con este False.
             return False
         print(f"  - se borró el respaldo viejo {respaldo.name} (se mantienen los últimos {mantener})")
     return True

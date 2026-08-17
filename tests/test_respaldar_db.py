@@ -533,6 +533,356 @@ class PruebaRetencionSegura(_BaseRespaldarRobusto):
         self.assertTrue(all(ruta.exists() for ruta in anteriores))
 
 
+class PruebaSidecarsWAL(_BaseRespaldarRobusto):
+    """respaldar() copia el ORIGEN con .backup(), que copia también el
+    flag de journal_mode de su header -- si el origen real está en WAL
+    (como db.py), el temporal (y luego el publicado) heredaban ese flag
+    sin que nadie lo pidiera. Cualquier apertura posterior (integrity_check
+    acá mismo, o la validación de retención sobre CUALQUIER respaldo
+    histórico) le creaba -shm/-wal huérfanos, porque os.replace() solo
+    renombra el archivo base. Estas pruebas inspeccionan el directorio con
+    Path.iterdir() crudo a propósito -- _dbs()/_temporales() filtran por
+    glob y son ciegos a -wal/-shm, que es justo lo que hay que ver acá."""
+
+    def _activar_wal_en_origen(self):
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.execute("PRAGMA journal_mode=WAL")
+        conexion.close()
+
+    def _listado_crudo(self):
+        self.directorio_respaldos.mkdir(exist_ok=True)
+        return sorted(p.name for p in self.directorio_respaldos.iterdir())
+
+    def _sidecars_en_listado(self):
+        return [n for n in self._listado_crudo() if n.endswith("-wal") or n.endswith("-shm")]
+
+    def test_respaldo_exitoso_no_deja_sidecars_wal_shm(self):
+        self._activar_wal_en_origen()
+        self.assertEqual(respaldar_db.respaldar(), 0)
+        self.assertEqual(self._sidecars_en_listado(), [])
+
+    def test_fallo_de_validacion_no_deja_sidecars(self):
+        self._activar_wal_en_origen()
+        inspeccion_real = respaldar_db._inspeccionar_sqlite
+
+        def falla_temporal(ruta, huella_esperada=None):
+            if str(ruta).endswith(".tmp"):
+                raise ValueError("integridad simulada")
+            return inspeccion_real(ruta, huella_esperada)
+
+        with mock.patch.object(respaldar_db, "_inspeccionar_sqlite", side_effect=falla_temporal):
+            self.assertEqual(respaldar_db.respaldar(), 1)
+        self.assertEqual(self._listado_crudo(), [])
+
+    def _crear_temporal_con_sidecars_reales_y_fallar(self, temporal, error):
+        Path(temporal).write_bytes(b"contenido base simulado")
+        Path(f"{temporal}-wal").write_bytes(b"contenido wal simulado")
+        Path(f"{temporal}-shm").write_bytes(b"x" * 32768)
+        raise error
+
+    def test_keyboard_interrupt_limpia_base_wal_y_shm_reales(self):
+        self._activar_wal_en_origen()
+        efecto = lambda conexion, temporal: self._crear_temporal_con_sidecars_reales_y_fallar(
+            temporal, KeyboardInterrupt()
+        )
+        with mock.patch.object(respaldar_db, "_copiar_online", side_effect=efecto):
+            with self.assertRaises(KeyboardInterrupt):
+                respaldar_db.respaldar()
+        self.assertEqual(self._listado_crudo(), [])
+
+    def test_system_exit_limpia_base_wal_y_shm_reales(self):
+        self._activar_wal_en_origen()
+        efecto = lambda conexion, temporal: self._crear_temporal_con_sidecars_reales_y_fallar(
+            temporal, SystemExit(9)
+        )
+        with mock.patch.object(respaldar_db, "_copiar_online", side_effect=efecto):
+            with self.assertRaises(SystemExit):
+                respaldar_db.respaldar()
+        self.assertEqual(self._listado_crudo(), [])
+
+    def test_respaldo_publicado_journal_mode_es_exactamente_delete(self):
+        self._activar_wal_en_origen()
+        self.assertEqual(respaldar_db.respaldar(), 0)
+        publicado = self._dbs()[0]
+        conexion = sqlite3.connect(str(publicado))
+        modo = conexion.execute("PRAGMA journal_mode").fetchone()[0]
+        conexion.close()
+        self.assertEqual(modo, "delete")
+
+    def test_fallo_normalizar_journal_mode_limpia_temporal(self):
+        # Simula que PRAGMA journal_mode=DELETE "no pega" -- respaldar_db
+        # debe verificar el resultado devuelto, no confiar ciegamente en
+        # que el PRAGMA hizo lo que pidió. sqlite3.Connection es un tipo
+        # inmutable (no se puede parchear su método directo en CPython
+        # 3.14+) -- se intercepta con una subclase real vía el parámetro
+        # `factory` de sqlite3.connect(), inyectada solo para la conexión
+        # del temporal (nunca para el origen ni para otras rutas).
+        self._activar_wal_en_origen()
+
+        class _ConexionQueMiente(sqlite3.Connection):
+            def execute(self, sql, *parametros):
+                resultado = super().execute(sql, *parametros)
+                if sql == "PRAGMA journal_mode=DELETE":
+                    class _CursorFalso:
+                        def fetchone(self_c):
+                            return ("wal",)
+                    return _CursorFalso()
+                return resultado
+
+        conectar_real = sqlite3.connect
+
+        def connect_controlado(ruta, *args, **kwargs):
+            if str(ruta).endswith(".db.tmp"):
+                kwargs.setdefault("factory", _ConexionQueMiente)
+            return conectar_real(ruta, *args, **kwargs)
+
+        salida = io.StringIO()
+        with mock.patch.object(respaldar_db.sqlite3, "connect", side_effect=connect_controlado), \
+             redirect_stdout(salida):
+            self.assertEqual(respaldar_db.respaldar(), 1)
+        self.assertIn("etapa=copia", salida.getvalue())
+        self.assertEqual(self._listado_crudo(), [])
+
+    def test_fallo_real_antes_de_normalizar_limpia_temporal_y_sidecars(self):
+        # Reforzada: acá el fallo no es un valor de retorno mentiroso --
+        # es una excepción real lanzada mientras se intenta normalizar,
+        # con el temporal ya en un estado parcial real (base + -wal +
+        # -shm, como podría dejar un error de I/O genuino a mitad de la
+        # transición de journal_mode). Confirma que los tres se limpian
+        # y que no se publica ningún respaldo final.
+        self._activar_wal_en_origen()
+        conectar_real = sqlite3.connect
+
+        def connect_controlado(ruta, *args, **kwargs):
+            if str(ruta).endswith(".db.tmp"):
+                ruta_str = str(ruta)
+
+                class _ConexionQueFallaAlNormalizar(sqlite3.Connection):
+                    def execute(self, sql, *parametros):
+                        if sql == "PRAGMA journal_mode=DELETE":
+                            Path(f"{ruta_str}-wal").write_bytes(
+                                b"estado parcial de journal_mode"
+                            )
+                            Path(f"{ruta_str}-shm").write_bytes(b"x" * 32768)
+                            raise sqlite3.OperationalError("fallo de I/O real simulado")
+                        return super().execute(sql, *parametros)
+
+                kwargs.setdefault("factory", _ConexionQueFallaAlNormalizar)
+            return conectar_real(ruta, *args, **kwargs)
+
+        salida = io.StringIO()
+        with mock.patch.object(respaldar_db.sqlite3, "connect", side_effect=connect_controlado), \
+             redirect_stdout(salida):
+            self.assertEqual(respaldar_db.respaldar(), 1)
+        self.assertIn("etapa=copia", salida.getvalue())
+        self.assertEqual(self._listado_crudo(), [])
+
+    def test_historico_con_wal_de_cero_bytes_se_valida_sin_crear_sidecars(self):
+        # Header marcado WAL, pero el -wal presente pesa 0 bytes -- nada
+        # pendiente, el archivo base es autónomo y se valida con
+        # immutable=1 sin que aparezcan sidecars nuevos.
+        historico = self._crear_respaldo_valido("proyecta_20200101_000000.db")
+        conexion = sqlite3.connect(str(historico))
+        conexion.execute("PRAGMA journal_mode=WAL")
+        conexion.close()
+        wal, shm = respaldar_db._sidecars_wal(historico)
+        wal.write_bytes(b"")
+        shm.unlink(missing_ok=True)
+
+        antes = self._listado_crudo()
+        self.assertTrue(respaldar_db._es_respaldo_valido(historico))
+        despues = self._listado_crudo()
+
+        self.assertEqual(antes, despues)
+        self.assertEqual(wal.stat().st_size, 0)
+
+    def test_historico_con_transaccion_solo_en_wal_no_es_valido_y_queda_intacto(self):
+        # Una transacción confirmada que todavía no se plegó al archivo
+        # base: -wal presente y > 0 bytes. immutable=1 leería el archivo
+        # base solo, ignorando esa transacción -- inseguro. Se clasifica
+        # como no autónomo, no cuenta para retención, y no se toca ni él
+        # ni sus sidecars sin importar qué tan ajustado esté `mantener`.
+        #
+        # Cerrar la conexión escritora dispara un checkpoint automático
+        # que pliega el WAL de vuelta al archivo base y lo vacía -- lo
+        # opuesto a lo que este escenario necesita. La política que se
+        # prueba acá es puramente de tamaño de archivo (ver
+        # _es_respaldo_valido), no interpreta el contenido del WAL, así
+        # que sintetizar bytes no vacíos en el -wal reproduce exactamente
+        # la condición real sin pelear contra el checkpoint automático.
+        historico = self._crear_respaldo_valido("proyecta_20200101_000000.db")
+        wal, shm = respaldar_db._sidecars_wal(historico)
+        wal.write_bytes(b"frames de una transaccion confirmada, sin plegar")
+        shm.write_bytes(b"x" * 32768)
+
+        self.assertGreater(wal.stat().st_size, 0)
+
+        salida = io.StringIO()
+        with redirect_stdout(salida):
+            es_valido = respaldar_db._es_respaldo_valido(historico)
+        self.assertFalse(es_valido)
+        self.assertIn(historico.name, salida.getvalue())
+        self.assertIn("WAL no vacío", salida.getvalue())
+
+        db_antes = historico.read_bytes()
+        wal_antes = wal.read_bytes()
+
+        # mantener=1 con OTRO respaldo válido de por medio -- si el
+        # histórico contara como válido, sería el primero en purgarse.
+        self._crear_respaldo_valido("proyecta_20200101_000001.db")
+        self.assertEqual(respaldar_db.respaldar(mantener=1), 0)
+
+        self.assertTrue(historico.exists())
+        self.assertTrue(wal.exists())
+        self.assertTrue(shm.exists())
+        self.assertEqual(historico.read_bytes(), db_antes)
+        self.assertEqual(wal.read_bytes(), wal_antes)
+
+    def test_fallo_al_borrar_base_igual_intenta_wal_y_shm(self):
+        self._activar_wal_en_origen()
+        unlink_real = Path.unlink
+
+        def unlink_controlado(ruta, *args, **kwargs):
+            if str(ruta).endswith(".db.tmp"):
+                raise OSError("permiso denegado simulado en la base")
+            return unlink_real(ruta, *args, **kwargs)
+
+        efecto = lambda conexion, temporal: self._crear_temporal_con_sidecars_reales_y_fallar(
+            temporal, sqlite3.OperationalError("disk full simulado")
+        )
+        with mock.patch.object(respaldar_db, "_copiar_online", side_effect=efecto), \
+             mock.patch.object(Path, "unlink", unlink_controlado):
+            self.assertEqual(respaldar_db.respaldar(), 1)
+
+        restantes = self._listado_crudo()
+        self.assertEqual(len(restantes), 1)
+        self.assertTrue(restantes[0].endswith(".db.tmp"))
+
+    def test_fallo_al_borrar_wal_igual_intenta_shm(self):
+        self._activar_wal_en_origen()
+        unlink_real = Path.unlink
+
+        def unlink_controlado(ruta, *args, **kwargs):
+            if str(ruta).endswith(".db.tmp-wal"):
+                raise OSError("permiso denegado simulado en el wal")
+            return unlink_real(ruta, *args, **kwargs)
+
+        efecto = lambda conexion, temporal: self._crear_temporal_con_sidecars_reales_y_fallar(
+            temporal, sqlite3.OperationalError("disk full simulado")
+        )
+        with mock.patch.object(respaldar_db, "_copiar_online", side_effect=efecto), \
+             mock.patch.object(Path, "unlink", unlink_controlado):
+            self.assertEqual(respaldar_db.respaldar(), 1)
+
+        restantes = self._listado_crudo()
+        self.assertEqual(len(restantes), 1)
+        self.assertTrue(restantes[0].endswith(".db.tmp-wal"))
+
+    def test_purga_nunca_toca_conjunto_con_wal_no_vacio(self):
+        historico = self._crear_respaldo_valido("proyecta_20200101_000000.db")
+        wal, shm = respaldar_db._sidecars_wal(historico)
+        wal.write_bytes(b"frames de una transaccion confirmada, sin plegar")
+        shm.write_bytes(b"x" * 32768)
+        self.assertGreater(wal.stat().st_size, 0)
+
+        # mantener=1: con el respaldo nuevo que se va a crear, cualquier
+        # histórico "válido" quedaría sin cupo y se purgaría.
+        self.assertEqual(respaldar_db.respaldar(mantener=1), 0)
+
+        self.assertTrue(historico.exists())
+        self.assertTrue(wal.exists())
+        self.assertTrue(shm.exists())
+
+    def test_purgar_respaldo_elimina_sus_sidecars_asociados(self):
+        viejo = self._crear_respaldo_valido("proyecta_20200101_000000.db")
+        # sidecars "heredados" (de antes de este fix) del respaldo que se
+        # va a purgar -- deben desaparecer junto con el .db.
+        Path(f"{viejo}-wal").write_bytes(b"")
+        Path(f"{viejo}-shm").write_bytes(b"x" * 32768)
+        self._crear_respaldo_valido("proyecta_20200101_000001.db")
+
+        self.assertEqual(respaldar_db.respaldar(mantener=1), 0)
+
+        self.assertFalse(viejo.exists())
+        self.assertFalse(Path(f"{viejo}-wal").exists())
+        self.assertFalse(Path(f"{viejo}-shm").exists())
+
+    def test_fallo_al_borrar_base_durante_purga_igual_intenta_wal_y_shm(self):
+        viejo = self._crear_respaldo_valido("proyecta_20200101_000000.db")
+        Path(f"{viejo}-wal").write_bytes(b"")
+        Path(f"{viejo}-shm").write_bytes(b"x" * 32768)
+        unlink_real = Path.unlink
+
+        def unlink_controlado(ruta, *args, **kwargs):
+            if ruta == viejo:
+                raise OSError("permiso denegado simulado en la base de purga")
+            return unlink_real(ruta, *args, **kwargs)
+
+        salida = io.StringIO()
+        with mock.patch.object(Path, "unlink", unlink_controlado), redirect_stdout(salida):
+            self.assertEqual(respaldar_db.respaldar(mantener=1), 0)
+
+        self.assertIn("Respaldo correcto, etapa=purga retención incompleta", salida.getvalue())
+        self.assertTrue(viejo.exists())  # falló borrar la base -- sigue ahí
+        self.assertFalse(Path(f"{viejo}-wal").exists())  # pero igual se intentó el wal
+        self.assertFalse(Path(f"{viejo}-shm").exists())  # y el shm
+
+    def test_fallo_al_borrar_wal_durante_purga_igual_intenta_shm(self):
+        viejo = self._crear_respaldo_valido("proyecta_20200101_000000.db")
+        Path(f"{viejo}-wal").write_bytes(b"")
+        Path(f"{viejo}-shm").write_bytes(b"x" * 32768)
+        ruta_wal = f"{viejo}-wal"
+        unlink_real = Path.unlink
+
+        def unlink_controlado(ruta, *args, **kwargs):
+            if str(ruta) == ruta_wal:
+                raise OSError("permiso denegado simulado en el wal de purga")
+            return unlink_real(ruta, *args, **kwargs)
+
+        salida = io.StringIO()
+        with mock.patch.object(Path, "unlink", unlink_controlado), redirect_stdout(salida):
+            self.assertEqual(respaldar_db.respaldar(mantener=1), 0)
+
+        self.assertIn("Respaldo correcto, etapa=purga retención incompleta", salida.getvalue())
+        self.assertFalse(viejo.exists())  # la base sí se pudo borrar
+        self.assertTrue(Path(ruta_wal).exists())  # el wal falló -- sigue ahí
+        self.assertFalse(Path(f"{viejo}-shm").exists())  # pero igual se intentó el shm
+
+    def test_tras_fallo_de_purga_no_purga_otro_respaldo(self):
+        primero = self._crear_respaldo_valido("proyecta_20200101_000000.db")
+        segundo = self._crear_respaldo_valido("proyecta_20200101_000001.db")
+        unlink_real = Path.unlink
+
+        def unlink_controlado(ruta, *args, **kwargs):
+            if ruta == primero:
+                raise OSError("permiso denegado simulado")
+            return unlink_real(ruta, *args, **kwargs)
+
+        salida = io.StringIO()
+        with mock.patch.object(Path, "unlink", unlink_controlado), redirect_stdout(salida):
+            self.assertEqual(respaldar_db.respaldar(mantener=1), 0)
+
+        self.assertIn("Respaldo correcto, etapa=purga retención incompleta", salida.getvalue())
+        self.assertTrue(primero.exists())  # falló, sigue ahí
+        self.assertTrue(segundo.exists())  # ni siquiera se intentó -- la purga se detuvo
+
+    def test_purga_no_toca_sidecars_ni_temporales_de_otros_archivos(self):
+        self._crear_respaldo_valido("proyecta_20200101_000001.db")
+        ajeno_wal = self.directorio_respaldos / "algo_no_relacionado.db-wal"
+        ajeno_shm = self.directorio_respaldos / "algo_no_relacionado.db-shm"
+        ajeno_wal.write_bytes(b"dato")
+        ajeno_shm.write_bytes(b"dato")
+        temporal_ajeno = self.directorio_respaldos / ".otro_proceso.db.tmp"
+        temporal_ajeno.write_bytes(b"dato")
+        self._crear_respaldo_valido("proyecta_20200101_000000.db")
+
+        self.assertEqual(respaldar_db.respaldar(mantener=2), 0)
+
+        self.assertTrue(ajeno_wal.exists())
+        self.assertTrue(ajeno_shm.exists())
+        self.assertTrue(temporal_ajeno.exists())
+
+
 class PruebaObservabilidadScheduler(unittest.TestCase):
     def _ejecutar_una_iteracion(self, resultado):
         import api.main as api_main
