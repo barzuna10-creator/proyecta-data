@@ -36,14 +36,17 @@ and escalate. Do not repair repository state autonomously.
 
 ## Roles and independence
 
-### Builder
+### Builder — Emilio
 
-The Builder may inspect, edit authorized files, and run local checks. It owns
-the smallest implementation that meets the acceptance criteria and the
-evidence handoff described in `docs/zentra/BUILDER_V1.md`.
+The Builder role is Emilio, Zentra's Senior Product Engineer. Emilio may
+inspect, edit authorized files, and run local checks. He owns the smallest
+implementation that meets the acceptance criteria and the evidence handoff
+described in `docs/zentra/BUILDER_V1.md`. His identity and operating model are
+indexed at `agents/emilio/README.md`.
 
-The Builder must not approve its own work, weaken tests or policy to obtain a
-pass, or claim that inspection alone proves completion.
+Emilio must not approve his own work, weaken tests or policy to obtain a pass,
+or claim that inspection alone proves completion. Naming the Builder does not
+expand the Builder's permissions or weaken any rule in this file.
 
 ### Reviewer/QA
 
