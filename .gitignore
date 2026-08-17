@@ -32,3 +32,11 @@ database/respaldos/
 # se crea junto a BASE_DATOS (database/ en local), nunca debe versionarse.
 # Sin path prefix a propósito: sigue a BASE_DATOS sea cual sea su directorio.
 .respaldo_sqlite.lock
+
+# proyecta-web/ ya no es un gitlink -- era una referencia de submódulo sin
+# .gitmodules, rota desde el commit inicial del backend (nunca hubo un
+# .gitmodules real; el puntero se actualizaba a mano y dejó de mantenerse
+# después de cdeca8c1). El frontend real vive en su propio checkout local
+# independiente, con su propio remoto -- esta ruta nunca debe volver a
+# entrar acá.
+/proyecta-web/
