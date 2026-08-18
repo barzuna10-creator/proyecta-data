@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import json
 import os
 import threading
@@ -168,6 +169,66 @@ LIMITE_CANDIDATOS_RERANKING = 300
 def inicio():
     return {
         "mensaje": "Bienvenido a Proyecta CR"
+    }
+
+
+# MASTER_ROADMAP.md, NOW #1: antes de esto, "/" respondía 200 sin tocar la
+# base de datos -- un monitor de uptime (o el propio Render) reportaba
+# "sano" con la base caída o con el catálogo vacío (PRODUCTION_READINESS_
+# REVIEW.md, hallazgo A5). Los dos chequeos que importan para decidir si el
+# backend puede servir tráfico de verdad: ¿la base responde? ¿hay productos
+# que buscar? Cualquier otra cosa (desglose por proveedor, precios
+# inválidos, paridad del índice FTS) ya vive en herramientas_desarrollo/
+# verificar_catalogo.py -- un diagnóstico para un humano, no algo que un
+# probe de salud dispare en cada llamada.
+#
+# El cuerpo de la respuesta nunca incluye la excepción real, la ruta de la
+# base de datos, ni ningún dato de producto -- solo estados fijos
+# ("ok"/"error"/"empty"), para que un fallo de conectividad no filtre
+# infraestructura interna a quien golpee el endpoint público. El detalle
+# real de la excepción sí queda en el log del servidor (_logger), para
+# poder diagnosticar sin exponerlo por HTTP.
+@app.get("/health")
+def salud():
+    estado_bd = "ok"
+    estado_catalogo = "unknown"
+
+    try:
+        conexion = conectar()
+        try:
+            conexion.execute("SELECT 1")
+            fila = conexion.execute("SELECT COUNT(*) AS total FROM productos").fetchone()
+            estado_catalogo = "ok" if fila["total"] > 0 else "empty"
+        finally:
+            conexion.close()
+    except Exception:
+        _logger.exception("HEALTH_CHECK estado=fallido causa=conexion_o_consulta")
+        estado_bd = "error"
+
+    saludable = estado_bd == "ok" and estado_catalogo == "ok"
+
+    cuerpo = {
+        "status": "ok" if saludable else "degraded",
+        "checks": {"database": estado_bd, "catalog": estado_catalogo},
+    }
+
+    return JSONResponse(content=cuerpo, status_code=200 if saludable else 503)
+
+
+# MASTER_ROADMAP.md, NOW #1: identidad de despliegue, deliberadamente
+# separada de /health -- un backend puede estar "sano" (base conectada,
+# catálogo con productos) y aun así correr un commit viejo o equivocado; y
+# viceversa, saber qué commit corre no dice nada sobre si puede servir
+# tráfico. Nunca toca la base -- debe poder responder incluso cuando
+# /health reporta degradado. RENDER_GIT_COMMIT es la variable que Render
+# expone en runtime con el SHA del commit desplegado (documentado por
+# Render); "unknown" es la respuesta segura y explícita cuando no está
+# seteada (ej. en local o en otra plataforma), en vez de inventar un valor.
+@app.get("/version")
+def version():
+    return {
+        "version": app.version,
+        "commit": os.environ.get("RENDER_GIT_COMMIT", "unknown"),
     }
 
 
