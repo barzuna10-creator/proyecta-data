@@ -37,6 +37,11 @@ services:
     plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn api.main:app --host 0.0.0.0 --port $PORT --workers 1"
+    # MASTER_ROADMAP.md, NOW #1: sin esto, Render no tiene forma de saber
+    # si la instancia realmente puede servir tráfico (base conectada,
+    # catálogo con productos) más allá de que el proceso siga vivo -- ver
+    # api/main.py GET /health.
+    healthCheckPath: /health
     envVars:
       - key: PYTHONPATH
         value: .
