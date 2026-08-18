@@ -1769,6 +1769,28 @@ def recuperar_analisis_interrumpidos():
 
 
 def eliminar_plano(proyecto_id, propietario_id):
+    """Corrección de revisión (Mission #002, hallazgo P1 de Emma): antes,
+    esto limpiaba plano_nombre_archivo/plano_analisis/plano_fecha_analisis
+    pero dejaba plano_estado/plano_procesamiento_id intactos -- si el
+    usuario borraba un plano mientras seguía 'procesando' en segundo
+    plano, dos cosas fallaban: (1) el callback tardío de ESE análisis
+    (ver _completar_analisis_plano) todavía encontraba el mismo token, así
+    que su UPDATE guardado por token SÍ pisaba, resucitando el plano recién
+    borrado con el resultado viejo; (2) el usuario quedaba bloqueado por
+    _reclamar el slot de análisis (ver iniciar_analisis_plano) hasta que
+    ese análisis huérfano terminara o el watchdog lo diera por vencido a
+    los TIMEOUT_ANALISIS_SEGUNDOS, aunque ya no le quedara ningún plano
+    que mostrar como resultado.
+
+    Limpiar plano_procesamiento_id acá invalida el token de inmediato --
+    cualquier callback o timeout tardío para ESE token deja de encontrar
+    coincidencia (WHERE ... AND plano_procesamiento_id = ?), así que su
+    UPDATE se vuelve no-op, sin necesidad de coordinarse con el hilo que
+    lo esté corriendo. Limpiar plano_estado a NULL (no 'error' ni ningún
+    otro valor) es el estado correcto: "nunca se subió un plano" es
+    exactamente lo que queda después de este borrado, y además libera al
+    usuario del reclamo de concurrencia en el mismo instante -- puede
+    iniciar un análisis nuevo de inmediato, sin esperar nada."""
     conexion = conectar()
     fila = conexion.execute(
         "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
@@ -1782,7 +1804,9 @@ def eliminar_plano(proyecto_id, propietario_id):
     conexion.execute(
         """
         UPDATE proyectos
-        SET plano_nombre_archivo = NULL, plano_analisis = NULL, plano_fecha_analisis = NULL, fecha_actualizacion = ?
+        SET plano_nombre_archivo = NULL, plano_analisis = NULL, plano_fecha_analisis = NULL,
+            plano_estado = NULL, plano_procesamiento_id = NULL, plano_error_mensaje = NULL,
+            fecha_actualizacion = ?
         WHERE id = ?
         """,
         (_ahora(), proyecto_id),

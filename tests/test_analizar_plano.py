@@ -517,6 +517,14 @@ class PruebaEliminarPlano(unittest.TestCase):
         self.assertIsNone(resultado["plano_analisis"])
         self.assertIsNone(resultado["plano_fecha_analisis"])
 
+    def test_limpia_tambien_el_estado_asincronico(self):
+        """Corrección de revisión (Mission #002, hallazgo P1 de Emma):
+        antes, borrar un plano ya 'listo' dejaba plano_estado='listo'
+        colgando -- inconsistente con plano_analisis=NULL."""
+        resultado = eliminar_plano(self.proyecto["id"], self.PROPIETARIO)
+        self.assertIsNone(resultado["plano_estado"])
+        self.assertIsNone(resultado["plano_error_mensaje"])
+
     def test_no_borra_nada_mas_del_proyecto(self):
         resultado = eliminar_plano(self.proyecto["id"], self.PROPIETARIO)
         self.assertEqual(resultado["nombre"], "Proyecto con plano")
@@ -535,6 +543,142 @@ class PruebaEliminarPlano(unittest.TestCase):
         ).fetchone()
         conexion.close()
         self.assertIsNotNone(fila[0])
+
+
+class PruebaEliminarPlanoDuranteProcesando(unittest.TestCase):
+    """Corrección de revisión (Mission #002, hallazgo P1 de Emma):
+    eliminar_plano() mientras un análisis todavía está 'procesando' --
+    antes de esta corrección, el token viejo seguía siendo válido, así
+    que (1) un resultado tardío podía resucitar el plano recién borrado,
+    y (2) el usuario quedaba bloqueado por el reclamo de concurrencia
+    hasta que ese análisis huérfano terminara."""
+
+    PROPIETARIO = "propietario-plano-eliminar-durante"
+
+    def setUp(self):
+        self.ruta_db = _crear_db_temporal()
+        import db
+        self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
+        self._patch_db.start()
+        self.proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto a medio analizar")
+
+    def tearDown(self):
+        self._patch_db.stop()
+        os.remove(self.ruta_db)
+
+    def _token_actual(self):
+        conexion = sqlite3.connect(self.ruta_db)
+        conexion.row_factory = sqlite3.Row
+        token = conexion.execute(
+            "SELECT plano_procesamiento_id FROM proyectos WHERE id = ?", (self.proyecto["id"],)
+        ).fetchone()["plano_procesamiento_id"]
+        conexion.close()
+        return token
+
+    def test_eliminar_limpia_estado_y_token_mientras_procesa(self):
+        parche, futuro = _mockear_executor(invocar_callback_sincrono=False)
+        try:
+            iniciar_analisis_plano(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf")
+        finally:
+            parche.stop()
+            repo._TEMPORIZADORES_ANALISIS.clear()
+
+        resultado = eliminar_plano(self.proyecto["id"], self.PROPIETARIO)
+
+        self.assertIsNone(resultado["plano_estado"])
+        self.assertIsNone(self._token_actual())
+
+    def test_callback_tardio_no_resucita_un_plano_borrado(self):
+        """El análisis seguía en curso cuando el usuario borró el plano;
+        el callback llega DESPUÉS, con el token viejo. Su UPDATE guardado
+        por token debe volverse no-op -- nada debe reaparecer."""
+        parche, futuro = _mockear_executor(resultado=ANALISIS_DE_PRUEBA, invocar_callback_sincrono=False)
+        try:
+            iniciar_analisis_plano(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf")
+            token_viejo = self._token_actual()
+        finally:
+            parche.stop()
+
+        eliminar_plano(self.proyecto["id"], self.PROPIETARIO)
+
+        # El callback llega tarde, con el token que ya no coincide con
+        # nada (eliminar_plano lo dejó en NULL).
+        repo._completar_analisis_plano(self.proyecto["id"], token_viejo, "planos.pdf", futuro)
+
+        proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertIsNone(proyecto["plano_estado"])
+        self.assertIsNone(proyecto["plano_analisis"])
+        self.assertIsNone(proyecto["plano_nombre_archivo"])
+
+    def test_timeout_tardio_no_resucita_un_plano_borrado(self):
+        """Mismo caso que arriba, pero con el watchdog en vez del
+        callback normal -- también debe volverse no-op contra el token ya
+        invalidado."""
+        parche, futuro = _mockear_executor(invocar_callback_sincrono=False)
+        try:
+            iniciar_analisis_plano(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf")
+            token_viejo = self._token_actual()
+        finally:
+            parche.stop()
+            repo._TEMPORIZADORES_ANALISIS.clear()
+
+        eliminar_plano(self.proyecto["id"], self.PROPIETARIO)
+
+        with mock.patch("api.repositorio_proyectos._reciclar_executor_planos") as reciclar_falso:
+            repo._manejar_timeout_analisis(self.proyecto["id"], token_viejo)
+            # No estaba genuinamente colgado desde la perspectiva de ESTE
+            # proyecto -- ya se borró -- así que no debe intentar reciclar
+            # el executor por un token que ya nadie reclama.
+            reciclar_falso.assert_not_called()
+
+        proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertIsNone(proyecto["plano_estado"])
+
+    def test_puede_iniciar_un_analisis_nuevo_inmediatamente_despues_de_eliminar(self):
+        """El reclamo de concurrencia (ver iniciar_analisis_plano) no debe
+        seguir bloqueando al usuario por un análisis que ya borró."""
+        parche, futuro = _mockear_executor(invocar_callback_sincrono=False)
+        try:
+            iniciar_analisis_plano(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "primero.pdf")
+        finally:
+            parche.stop()
+            repo._TEMPORIZADORES_ANALISIS.clear()
+
+        eliminar_plano(self.proyecto["id"], self.PROPIETARIO)
+
+        parche2, futuro2 = _mockear_executor(invocar_callback_sincrono=False)
+        try:
+            # No debe levantar AnalisisPlanoEnCurso.
+            resultado = iniciar_analisis_plano(
+                self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "segundo.pdf"
+            )
+            self.assertIsNotNone(resultado)
+            proyecto, _future_nuevo = resultado
+            self.assertEqual(proyecto["plano_estado"], "procesando")
+        finally:
+            parche2.stop()
+            repo._TEMPORIZADORES_ANALISIS.clear()
+
+    def test_puede_iniciar_un_analisis_nuevo_en_otro_proyecto_despues_de_eliminar(self):
+        parche, futuro = _mockear_executor(invocar_callback_sincrono=False)
+        try:
+            iniciar_analisis_plano(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "primero.pdf")
+        finally:
+            parche.stop()
+            repo._TEMPORIZADORES_ANALISIS.clear()
+
+        eliminar_plano(self.proyecto["id"], self.PROPIETARIO)
+
+        otro_proyecto = crear_proyecto(self.PROPIETARIO, "Segundo proyecto")
+        parche2, futuro2 = _mockear_executor(invocar_callback_sincrono=False)
+        try:
+            resultado = iniciar_analisis_plano(
+                otro_proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "segundo.pdf"
+            )
+            self.assertIsNotNone(resultado)
+        finally:
+            parche2.stop()
+            repo._TEMPORIZADORES_ANALISIS.clear()
 
 
 class _ArchivoFalso:
