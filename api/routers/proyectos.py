@@ -2,6 +2,7 @@ import os
 import tempfile
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from api.identidad import obtener_propietario_id
@@ -396,8 +397,23 @@ def registrar_compra_item(
 def subir_plano(
     proyecto_id: int,
     archivo: UploadFile = File(...),
+    asincronico: bool = False,
     propietario_id: str = Depends(obtener_propietario_id),
 ):
+    """Mission #002 (Plan Processing Stability): `asincronico` (query
+    param) es el interruptor de compatibilidad -- ver HANDOFF para la
+    secuencia completa de deploy sin ventana rota.
+
+    `asincronico=False` (default, clientes que todavía no migraron):
+    mismo contrato observable que antes de esta misión -- bloquea y
+    devuelve 200 con el proyecto ya analizado -- salvo que ahora tiene un
+    techo real de repo.TIMEOUT_ANALISIS_SEGUNDOS en vez de esperar sin
+    límite (ver repo.analizar_plano_sincrono).
+
+    `asincronico=True` (frontend nuevo, ver PlanoEdificio.tsx): responde
+    202 de inmediato con plano_estado='procesando'; el cliente consulta
+    GET /proyectos/{id} (sin cambios de ruta) hasta que plano_estado deje
+    de ser 'procesando'."""
     if archivo.content_type != "application/pdf":
         raise HTTPException(status_code=422, detail="El archivo debe ser un PDF.")
 
@@ -418,8 +434,19 @@ def subir_plano(
             archivo_temporal.close()
 
         try:
-            proyecto = repo.analizar_plano(
-                proyecto_id, propietario_id, archivo_temporal.name, archivo.filename
+            if asincronico:
+                resultado = repo.iniciar_analisis_plano(
+                    proyecto_id, propietario_id, archivo_temporal.name, archivo.filename
+                )
+                proyecto = resultado[0] if resultado is not None else None
+            else:
+                proyecto = repo.analizar_plano_sincrono(
+                    proyecto_id, propietario_id, archivo_temporal.name, archivo.filename
+                )
+        except repo.AnalisisPlanoEnCurso:
+            raise HTTPException(
+                status_code=429,
+                detail="Ya tenés un plano en análisis. Esperá a que termine antes de subir otro.",
             )
         except HTTPException:
             raise
@@ -433,6 +460,9 @@ def subir_plano(
 
     if not proyecto:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    if asincronico:
+        return JSONResponse(content=proyecto, status_code=202)
 
     return proyecto
 

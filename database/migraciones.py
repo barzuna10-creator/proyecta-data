@@ -81,6 +81,7 @@ import database.agregar_seleccion_automatica as _m_seleccion_automatica
 import database.agregar_eventos as _m_eventos
 import database.agregar_control_costos as _m_control_costos
 import database.agregar_compras as _m_compras
+import database.agregar_plano_estado as _m_plano_estado
 
 # agregar_autenticacion primero, a propósito, fuera del orden histórico
 # real de introducción: no depende de proyectos/productos/nada de las
@@ -119,6 +120,10 @@ MIGRACIONES = [
     # mismo criterio que el resto de las ALTER TABLE sin urgencia de
     # arranque (ver database/agregar_compras.py).
     ("agregar_compras", _m_compras.main),
+    # Depende de agregar_plano_proyecto (extiende las mismas columnas de
+    # plano en proyectos) -- va justo después de esa por dependencia
+    # directa, sin urgencia de arranque (ver database/agregar_plano_estado.py).
+    ("agregar_plano_estado", _m_plano_estado.main),
 ]
 
 

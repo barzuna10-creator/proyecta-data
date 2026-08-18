@@ -1,7 +1,11 @@
+import functools
 import json
 import math
 import multiprocessing
+import os
 import secrets
+import signal
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -46,6 +50,98 @@ import eventos as _eventos
 # real.
 _CONTEXTO_PROCESOS = multiprocessing.get_context("spawn")
 _EXECUTOR_PLANOS = ProcessPoolExecutor(max_workers=1, mp_context=_CONTEXTO_PROCESOS)
+_LOCK_EXECUTOR_PLANOS = threading.Lock()
+
+# Mission #002 (Plan Processing Stability): verificado directo contra
+# producción -- un plano de 105MB (35% del límite de TAMANO_MAXIMO_
+# PLANO_BYTES) ya devuelve 502 a los 43s hoy (ver HANDOFF de esta
+# misión), muy por debajo de cualquier timeout que se le pudiera poner a
+# .result(). Un timeout interno por sí solo no alcanza -- lo que hace
+# falta es que la petición HTTP nunca dependa de que el análisis termine.
+TIMEOUT_ANALISIS_SEGUNDOS = 120
+
+MENSAJE_ERROR_GENERICO = "No se pudo leer el PDF. Verificá que no esté dañado o protegido."
+MENSAJE_ERROR_TIMEOUT = "El análisis tardó demasiado. Probá con un archivo más liviano o contactá soporte."
+MENSAJE_ERROR_INTERRUPCION = "El proceso se interrumpió (reinicio del servidor). Subí el plano de nuevo."
+
+
+class AnalisisPlanoEnCurso(Exception):
+    """El usuario ya tiene un análisis de plano corriendo (en este u otro
+    proyecto) -- ver _reclamar_slot_analisis. Mapea a 429 en el router."""
+
+
+# token de plano_procesamiento_id -> threading.Timer. Solo vive en memoria
+# de ESTE proceso a propósito: si el proceso se reinicia, cualquier timer
+# pendiente desaparece con él, pero eso está bien -- recuperar_analisis_
+# interrumpidos() (llamado al arrancar, ver api/main.py) ya cubre ese
+# caso marcando 'error' cualquier plano_estado='procesando' huérfano.
+_TEMPORIZADORES_ANALISIS = {}
+_LOCK_TEMPORIZADORES = threading.Lock()
+
+
+def _armar_watchdog(proyecto_id, token):
+    temporizador = threading.Timer(
+        TIMEOUT_ANALISIS_SEGUNDOS, _manejar_timeout_analisis, args=(proyecto_id, token)
+    )
+    temporizador.daemon = True
+    with _LOCK_TEMPORIZADORES:
+        _TEMPORIZADORES_ANALISIS[token] = temporizador
+    temporizador.start()
+
+
+def _cancelar_watchdog(token):
+    with _LOCK_TEMPORIZADORES:
+        temporizador = _TEMPORIZADORES_ANALISIS.pop(token, None)
+    if temporizador is not None:
+        temporizador.cancel()
+
+
+def _reciclar_executor_planos():
+    """Best-effort, no una garantía -- ver HANDOFF de Mission #002 para
+    la verificación empírica que sustenta este diseño.
+
+    Verificado directo (no en la documentación de la librería estándar,
+    que no lo aclara): ProcessPoolExecutor.shutdown(wait=False,
+    cancel_futures=True) NO mata un proceso hijo que ya está corriendo --
+    cancela únicamente trabajo todavía encolado sin empezar, y detiene el
+    hilo administrador para que no acepte trabajo nuevo. El proceso hijo
+    atascado sigue vivo y consumiendo su núcleo/memoria hasta que algo lo
+    mate de verdad.
+
+    Por eso acá se rastrea el PID real del proceso hijo (ejecutor.
+    _processes -- atributo interno, no público, de ProcessPoolExecutor;
+    no hay alternativa pública en la librería estándar para este caso
+    puntual) y se le manda SIGKILL directo, verificado empíricamente que
+    sí lo mata. `_processes` se lee con getattr() por las dudas: si una
+    versión futura de Python le cambia el nombre, esto no debe romper el
+    resto del reciclaje -- en el peor caso, no se manda el SIGKILL, pero
+    igual se arma un pool nuevo y se sigue aceptando trabajo nuevo."""
+    global _EXECUTOR_PLANOS
+
+    with _LOCK_EXECUTOR_PLANOS:
+        viejo = _EXECUTOR_PLANOS
+        pids = [proceso.pid for proceso in getattr(viejo, "_processes", {}).values()]
+
+        viejo.shutdown(wait=False, cancel_futures=True)
+
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                _logger.warning(f"ANALISIS_PLANO worker_matado pid={pid} causa=timeout")
+            except ProcessLookupError:
+                pass
+            except Exception:
+                _logger.exception(f"ANALISIS_PLANO no_se_pudo_matar_worker pid={pid}")
+
+        _EXECUTOR_PLANOS = ProcessPoolExecutor(max_workers=1, mp_context=_CONTEXTO_PROCESOS)
+
+
+def apagar_executor_planos():
+    """Lee el executor ACTUAL (no una referencia guardada al importar --
+    _reciclar_executor_planos() puede haber reemplazado el objeto en
+    cualquier momento, ver arriba) y lo apaga. Llamado desde el shutdown
+    de la app (ver api/main.py)."""
+    _EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
 
 
 def _procesar_plano_pdf(ruta_pdf):
@@ -460,6 +556,11 @@ def obtener_proyecto(proyecto_id=None, propietario_id=None, token=None):
     proyecto = dict(fila)
     items = _obtener_items(conexion, proyecto["id"])
     conexion.close()
+
+    # Token interno de Mission #002 (ver iniciar_analisis_plano) -- solo
+    # existe para que un resultado/timeout tardío de un intento viejo no
+    # pise uno más nuevo. No le sirve al cliente para nada, no se expone.
+    proyecto.pop("plano_procesamiento_id", None)
 
     total_pendiente, total_comprado = _calcular_totales(items)
 
@@ -1435,53 +1536,261 @@ def reemplazar_item(proyecto_id, propietario_id, item_id, proveedor_nuevo, id_pr
     return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
 
 
-def analizar_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
-    """Corre lectura_planos sobre un PDF ya guardado en disco (ver el
-    router: el archivo subido se escribe a un temporal antes de llamar
-    acá) y guarda el resultado -- niveles, espacios, cuadros de
-    puertas/ventanas/acabados, cómputo estructural y las láminas que
-    todos ellos referencian -- como JSON en la fila del proyecto (ver
-    FLUJO_PRESUPUESTO_DESDE_PLANO_V1.md). El PDF en sí no se guarda, solo
-    el análisis ya estructurado."""
-    conexion = conectar()
-    fila = conexion.execute(
-        "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
-        (proyecto_id, propietario_id),
-    ).fetchone()
+def iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
+    """Mission #002 (Plan Processing Stability): reemplaza el antiguo
+    analizar_plano(), que bloqueaba la petición HTTP hasta que el
+    análisis terminaba -- verificado directo contra producción, un plano
+    de apenas 105MB (35% del límite permitido) ya devuelve 502 a los 43s
+    (ver HANDOFF). Ningún timeout interno evita eso: la única forma de
+    que la subida nunca falle por esto es que la petición HTTP no espere
+    al análisis en absoluto.
 
-    if not fila:
+    Encola el trabajo pesado (igual que antes, mismo _EXECUTOR_PLANOS,
+    mismo _procesar_plano_pdf, sin cambios de comportamiento del lector)
+    y devuelve de inmediato -- (proyecto, future). El proyecto ya queda
+    con plano_estado='procesando'; quien llama decide qué hacer con el
+    future (ver analizar_plano_sincrono(), para clientes que todavía no
+    migraron al flujo asíncrono, y api/routers/proyectos.py para el
+    flujo asíncrono nuevo).
+
+    Devuelve None si el proyecto no existe o no es del usuario. Levanta
+    AnalisisPlanoEnCurso si el usuario ya tiene otro análisis
+    'procesando' -- en cualquier proyecto, no solo este -- para no
+    encolar un segundo trabajo silenciosamente (ver Mission #002: límite
+    de concurrencia por usuario)."""
+    conexion = conectar()
+    try:
+        conexion.execute("BEGIN IMMEDIATE")
+        fila = conexion.execute(
+            "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
+            (proyecto_id, propietario_id),
+        ).fetchone()
+        if not fila:
+            conexion.rollback()
+            return None
+
+        en_curso = conexion.execute(
+            "SELECT COUNT(*) AS total FROM proyectos WHERE propietario_id = ? AND plano_estado = 'procesando'",
+            (propietario_id,),
+        ).fetchone()
+        if en_curso["total"] > 0:
+            conexion.rollback()
+            raise AnalisisPlanoEnCurso()
+
+        token = secrets.token_urlsafe(16)
+        conexion.execute(
+            """
+            UPDATE proyectos
+            SET plano_estado = 'procesando', plano_procesamiento_id = ?, plano_error_mensaje = NULL
+            WHERE id = ?
+            """,
+            (token, proyecto_id),
+        )
+        conexion.commit()
+    finally:
         conexion.close()
+
+    _logger.info(f"ANALISIS_PLANO id={_id_peticion()} proyecto_id={proyecto_id} estado=encolado token={token}")
+
+    future = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf)
+    # Armar el watchdog ANTES de enganchar el callback -- si el future ya
+    # está resuelto en el momento de add_done_callback() (nunca pasa en
+    # producción, donde el trabajo real siempre tarda; sí puede pasar con
+    # un future ya resuelto en una prueba), el callback corre SINCRÓNICO
+    # dentro de add_done_callback() y llama _cancelar_watchdog() de
+    # inmediato -- con este orden, siempre encuentra el timer ya armado
+    # para cancelar, en vez de dejarlo huérfano corriendo 120s de más.
+    _armar_watchdog(proyecto_id, token)
+    future.add_done_callback(
+        functools.partial(_completar_analisis_plano, proyecto_id, token, nombre_archivo)
+    )
+
+    return obtener_proyecto(proyecto_id, propietario_id=propietario_id), future
+
+
+def _completar_analisis_plano(proyecto_id, token, nombre_archivo, future):
+    """Callback de future.add_done_callback() -- corre en el hilo
+    administrador interno de _EXECUTOR_PLANOS, NUNCA en un hilo de
+    petición HTTP (ver Mission #002). Es la única función que persiste el
+    resultado final (éxito o error) -- tanto el flujo asíncrono como
+    analizar_plano_sincrono() (clientes viejos) dependen de que ESTA
+    función, y solo ella, escriba el resultado, para no tener dos rutas
+    de guardado que puedan desincronizarse.
+
+    El filtro `AND plano_procesamiento_id = ?` en ambos UPDATE evita que
+    el resultado de un intento viejo pise el estado de uno más nuevo (ej.
+    el usuario borró el plano y subió otro mientras este todavía
+    procesaba) -- si el proyecto ya tiene un token distinto, rowcount
+    queda en 0 y este resultado simplemente se descarta."""
+    _cancelar_watchdog(token)
+
+    conexion = conectar()
+    try:
+        try:
+            analisis = future.result()
+        except Exception:
+            _logger.exception(f"ANALISIS_PLANO fallo proyecto_id={proyecto_id} token={token}")
+            conexion.execute(
+                """
+                UPDATE proyectos SET plano_estado = 'error', plano_error_mensaje = ?
+                WHERE id = ? AND plano_procesamiento_id = ?
+                """,
+                (MENSAJE_ERROR_GENERICO, proyecto_id, token),
+            )
+            conexion.commit()
+            return
+
+        ahora = _ahora()
+        conexion.execute(
+            """
+            UPDATE proyectos
+            SET plano_nombre_archivo = ?, plano_analisis = ?, plano_fecha_analisis = ?,
+                plano_estado = 'listo', plano_error_mensaje = NULL, fecha_actualizacion = ?
+            WHERE id = ? AND plano_procesamiento_id = ?
+            """,
+            (nombre_archivo, json.dumps(analisis), ahora, ahora, proyecto_id, token),
+        )
+        conexion.commit()
+        _logger.info(
+            f"ANALISIS_PLANO completado proyecto_id={proyecto_id} token={token} "
+            f"laminas={analisis.get('cantidad_laminas')}"
+        )
+    finally:
+        conexion.close()
+
+
+def _manejar_timeout_analisis(proyecto_id, token):
+    """Dispara TIMEOUT_ANALISIS_SEGUNDOS después de encolar (ver
+    _armar_watchdog) si _completar_analisis_plano() no canceló este timer
+    antes -- o sea, el análisis sigue corriendo mucho más de lo normal.
+
+    El filtro `AND plano_estado = 'procesando'` evita pisar un resultado
+    que haya llegado justo antes de que este timer disparara (carrera
+    inofensiva: si ya está 'listo' o 'error', rowcount queda en 0 y no se
+    hace nada más). Si SÍ éramos los primeros en marcarlo -- rowcount==1,
+    de verdad estaba colgado -- se intenta liberar el worker atascado
+    (ver _reciclar_executor_planos, best-effort, no garantizado)."""
+    conexion = conectar()
+    try:
+        cursor = conexion.execute(
+            """
+            UPDATE proyectos SET plano_estado = 'error', plano_error_mensaje = ?
+            WHERE id = ? AND plano_procesamiento_id = ? AND plano_estado = 'procesando'
+            """,
+            (MENSAJE_ERROR_TIMEOUT, proyecto_id, token),
+        )
+        conexion.commit()
+        genuinamente_colgado = cursor.rowcount == 1
+    finally:
+        conexion.close()
+
+    with _LOCK_TEMPORIZADORES:
+        _TEMPORIZADORES_ANALISIS.pop(token, None)
+
+    if genuinamente_colgado:
+        _logger.warning(f"ANALISIS_PLANO timeout proyecto_id={proyecto_id} token={token}")
+        _reciclar_executor_planos()
+
+
+def analizar_plano_sincrono(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
+    """Compatibilidad para clientes que todavía no migraron al flujo
+    asíncrono de Mission #002 (ver api/routers/proyectos.py: parámetro
+    `asincronico`) -- mismo comportamiento observable que el antiguo
+    analizar_plano(): bloquea hasta que el análisis termina y devuelve el
+    proyecto completo. Reutiliza el mismo mecanismo interno
+    (iniciar_analisis_plano + el mismo callback que persiste el
+    resultado) que el flujo asíncrono -- no hay una segunda
+    implementación del análisis, solo una segunda forma de esperar su
+    resultado. Diferencia real con el comportamiento de antes: ahora
+    tiene un techo real (TIMEOUT_ANALISIS_SEGUNDOS) en vez de esperar sin
+    límite."""
+    resultado = iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo)
+    if resultado is None:
         return None
 
-    # .result() bloquea ESTE hilo hasta que el proceso hijo termine, pero
-    # bloquear un hilo esperando a otro proceso es una espera de I/O (un
-    # pipe), no trabajo de CPU -- libera el GIL mientras espera, que es
-    # justo lo que permite que el resto de la app siga respondiendo
-    # mientras tanto (ver INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md).
-    inicio = time.perf_counter()
-    analisis = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf).result()
-    duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
-    _logger.info(
-        f"ANALISIS_PLANO id={_id_peticion()} proyecto_id={proyecto_id} "
-        f"duracion_ms={duracion_ms} laminas={analisis.get('cantidad_laminas')}"
-    )
+    proyecto, future = resultado
 
-    ahora = _ahora()
-    conexion.execute(
-        """
-        UPDATE proyectos
-        SET plano_nombre_archivo = ?, plano_analisis = ?, plano_fecha_analisis = ?, fecha_actualizacion = ?
-        WHERE id = ?
-        """,
-        (nombre_archivo, json.dumps(analisis), ahora, ahora, proyecto_id),
-    )
-    conexion.commit()
-    conexion.close()
+    # Levanta concurrent.futures.TimeoutError o la excepción real del
+    # análisis -- en ambos casos, el router ya mapea cualquier excepción
+    # de esta función a un 422 genérico, mismo contrato que antes de esta
+    # misión. El estado 'error' correspondiente ya lo escribe
+    # _completar_analisis_plano() o _manejar_timeout_analisis(), no acá.
+    future.result(timeout=TIMEOUT_ANALISIS_SEGUNDOS)
 
+    return _esperar_persistencia_callback(proyecto_id, propietario_id)
+
+
+def _esperar_persistencia_callback(proyecto_id, propietario_id, intentos=40, intervalo_segundos=0.05):
+    """future.result() ya haber retornado NO garantiza que
+    _completar_analisis_plano() ya haya terminado de escribir en la base
+    -- concurrent.futures.Future notifica a quien espera en .result()
+    ANTES de invocar los done-callbacks (verificado en el código fuente
+    de concurrent.futures.Future.set_result), así que hay una ventana
+    real, aunque angosta, donde este hilo podría despertar antes de que
+    el callback haya escrito el resultado. Una espera corta y acotada
+    (máximo ~2s) cierra esa ventana sin necesitar una segunda ruta de
+    escritura -- ver _completar_analisis_plano, que sigue siendo la única
+    función que persiste el resultado."""
+    for _ in range(intentos):
+        proyecto = obtener_proyecto(proyecto_id, propietario_id=propietario_id)
+        if proyecto is None or proyecto.get("plano_estado") != "procesando":
+            return proyecto
+        time.sleep(intervalo_segundos)
+
+    # No debería pasar nunca en la práctica -- el future ya terminó, el
+    # callback ya se disparó. Si por lo que sea la escritura no llegó a
+    # tiempo, devolver el estado actual (probablemente todavía
+    # 'procesando') es la opción segura -- nunca colgar el request.
     return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
 
 
+def recuperar_analisis_interrumpidos():
+    """Corre una sola vez al arrancar (ver api/main.py, antes de aceptar
+    tráfico real de planos), después de que las migraciones terminen.
+    Cualquier proyecto en plano_estado='procesando' en este punto es, por
+    definición, huérfano: el Future y su callback vivían en el proceso
+    anterior y no sobreviven un reinicio o redeploy -- sin este sweep, el
+    cliente quedaría consultando el estado para siempre sin que nadie lo
+    actualice nunca (ver Mission #002: recuperación ante restart)."""
+    conexion = conectar()
+    try:
+        cursor = conexion.execute(
+            "UPDATE proyectos SET plano_estado = 'error', plano_error_mensaje = ? WHERE plano_estado = 'procesando'",
+            (MENSAJE_ERROR_INTERRUPCION,),
+        )
+        conexion.commit()
+        afectados = cursor.rowcount
+    finally:
+        conexion.close()
+
+    if afectados:
+        _logger.warning(f"ANALISIS_PLANO recuperados={afectados} causa=reinicio_de_proceso")
+    return afectados
+
+
 def eliminar_plano(proyecto_id, propietario_id):
+    """Corrección de revisión (Mission #002, hallazgo P1 de Emma): antes,
+    esto limpiaba plano_nombre_archivo/plano_analisis/plano_fecha_analisis
+    pero dejaba plano_estado/plano_procesamiento_id intactos -- si el
+    usuario borraba un plano mientras seguía 'procesando' en segundo
+    plano, dos cosas fallaban: (1) el callback tardío de ESE análisis
+    (ver _completar_analisis_plano) todavía encontraba el mismo token, así
+    que su UPDATE guardado por token SÍ pisaba, resucitando el plano recién
+    borrado con el resultado viejo; (2) el usuario quedaba bloqueado por
+    _reclamar el slot de análisis (ver iniciar_analisis_plano) hasta que
+    ese análisis huérfano terminara o el watchdog lo diera por vencido a
+    los TIMEOUT_ANALISIS_SEGUNDOS, aunque ya no le quedara ningún plano
+    que mostrar como resultado.
+
+    Limpiar plano_procesamiento_id acá invalida el token de inmediato --
+    cualquier callback o timeout tardío para ESE token deja de encontrar
+    coincidencia (WHERE ... AND plano_procesamiento_id = ?), así que su
+    UPDATE se vuelve no-op, sin necesidad de coordinarse con el hilo que
+    lo esté corriendo. Limpiar plano_estado a NULL (no 'error' ni ningún
+    otro valor) es el estado correcto: "nunca se subió un plano" es
+    exactamente lo que queda después de este borrado, y además libera al
+    usuario del reclamo de concurrencia en el mismo instante -- puede
+    iniciar un análisis nuevo de inmediato, sin esperar nada."""
     conexion = conectar()
     fila = conexion.execute(
         "SELECT id FROM proyectos WHERE id = ? AND propietario_id = ?",
@@ -1495,7 +1804,9 @@ def eliminar_plano(proyecto_id, propietario_id):
     conexion.execute(
         """
         UPDATE proyectos
-        SET plano_nombre_archivo = NULL, plano_analisis = NULL, plano_fecha_analisis = NULL, fecha_actualizacion = ?
+        SET plano_nombre_archivo = NULL, plano_analisis = NULL, plano_fecha_analisis = NULL,
+            plano_estado = NULL, plano_procesamiento_id = NULL, plano_error_mensaje = NULL,
+            fecha_actualizacion = ?
         WHERE id = ?
         """,
         (_ahora(), proyecto_id),
