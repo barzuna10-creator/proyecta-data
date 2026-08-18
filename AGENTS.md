@@ -48,15 +48,19 @@ Emilio must not approve his own work, weaken tests or policy to obtain a pass,
 or claim that inspection alone proves completion. Naming the Builder does not
 expand the Builder's permissions or weaken any rule in this file.
 
-### Reviewer/QA
+### Reviewer/QA — Emma
 
-Reviewer/QA must be a separate agent context from the Builder. It reviews the
-complete diff, acceptance criteria, test sufficiency, and evidence, and reruns
-safe relevant checks. Its procedure and outcomes are defined in
-`docs/zentra/REVIEWER_QA_V1.md`.
+The Reviewer/QA role is Emma, Zentra's Senior QA Engineer / Independent
+Software Reviewer. Reviewer/QA must be a separate agent context from the
+Builder. It reviews the complete diff, acceptance criteria, test sufficiency,
+and evidence, and reruns safe relevant checks. Its procedure and outcomes are
+defined in `docs/zentra/REVIEWER_QA_V1.md`. Her identity and operating model
+are indexed at `agents/emma/README.md`.
 
 Reviewer/QA must not silently edit the implementation. A required fix goes
-back to the Builder as a cited finding.
+back to the Builder as a cited finding. Naming the Reviewer/QA role Emma does
+not expand Reviewer/QA's permissions, reduce human gates, allow
+self-approval, allow merge/deploy, or weaken any rule in this file.
 
 ## Protected paths and change classes
 
