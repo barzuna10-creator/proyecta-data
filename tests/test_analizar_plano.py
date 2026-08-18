@@ -21,6 +21,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -254,6 +255,114 @@ class PruebaAnalizarPlanoSincrono(unittest.TestCase):
         self.assertNotIn("PDF corrupto interno", proyecto["plano_error_mensaje"] or "")
 
 
+class PruebaLoggingIncidenteMemoria(unittest.TestCase):
+    """ANALISIS_INCIDENTE_MEMORIA_RENDER.md: logging estructurado
+    alrededor del análisis (tamaño, duración, láminas, éxito/fallo) --
+    portado desde el analizar_plano() síncrono de antes de Mission #002
+    al mecanismo actual (iniciar_analisis_plano() encola y arma el
+    callback; _completar_analisis_plano() es quien de verdad emite este
+    log, ya sea que lo dispare el flujo asíncrono o
+    analizar_plano_sincrono() esperándolo). Con
+    invocar_callback_sincrono=True (default de _mockear_executor), el
+    callback corre en el mismo hilo de la prueba, así que assertLogs lo
+    captura sin necesitar hilos reales."""
+
+    PROPIETARIO = "propietario-plano-memoria"
+
+    def setUp(self):
+        self.ruta_db = _crear_db_temporal()
+        import db
+        self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
+        self._patch_db.start()
+        self.proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto con plano")
+
+    def tearDown(self):
+        self._patch_db.stop()
+        os.remove(self.ruta_db)
+
+    def test_log_de_exito_incluye_tamano_duracion_y_laminas(self):
+        parche, futuro = _mockear_executor(resultado=ANALISIS_DE_PRUEBA)
+        try:
+            with self.assertLogs("proyecta_api", level="INFO") as registro:
+                analizar_plano_sincrono(
+                    self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf",
+                    tamano_bytes=12345,
+                )
+        finally:
+            parche.stop()
+
+        lineas_completado = [linea for linea in registro.output if "ANALISIS_PLANO completado" in linea]
+        self.assertEqual(len(lineas_completado), 1)
+        linea = lineas_completado[0]
+        self.assertIn("tamano_bytes=12345", linea)
+        self.assertIn("resultado=exito", linea)
+        self.assertIn(f"laminas={ANALISIS_DE_PRUEBA['cantidad_laminas']}", linea)
+        self.assertIn("duracion_ms=", linea)
+        self.assertIn(f"proyecto_id={self.proyecto['id']}", linea)
+
+    def test_sin_tamano_bytes_el_log_no_inventa_un_valor(self):
+        parche, futuro = _mockear_executor(resultado=ANALISIS_DE_PRUEBA)
+        try:
+            with self.assertLogs("proyecta_api", level="INFO") as registro:
+                analizar_plano_sincrono(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf")
+        finally:
+            parche.stop()
+
+        linea = next(linea for linea in registro.output if "ANALISIS_PLANO completado" in linea)
+        self.assertIn("tamano_bytes=None", linea)
+
+    def test_un_fallo_en_el_analisis_se_registra_y_se_propaga_sin_alterarse(self):
+        parche, futuro = _mockear_executor(excepcion=ValueError("PDF corrupto simulado"))
+        try:
+            with self.assertLogs("proyecta_api", level="INFO") as registro:
+                with self.assertRaises(ValueError) as contexto:
+                    analizar_plano_sincrono(
+                        self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf",
+                        tamano_bytes=999,
+                    )
+        finally:
+            parche.stop()
+
+        # La excepción original se propaga tal cual -- el logging nunca la
+        # reemplaza ni la envuelve en otra cosa (mismo contrato que
+        # analizar_plano_sincrono ya garantiza para clientes viejos).
+        self.assertEqual(str(contexto.exception), "PDF corrupto simulado")
+
+        linea = next(linea for linea in registro.output if "ANALISIS_PLANO fallo" in linea)
+        self.assertIn("tamano_bytes=999", linea)
+        self.assertIn("resultado=fallo", linea)
+        self.assertIn("error=ValueError", linea)
+
+        # La excepción real nunca llega al estado persistido -- mismo
+        # principio de no filtrado que el resto de Mission #002.
+        proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertNotIn("PDF corrupto simulado", proyecto["plano_error_mensaje"] or "")
+
+    def test_un_fallo_en_el_analisis_no_dana_un_plano_ya_guardado_en_otro_proyecto(self):
+        # Un análisis fallido en un proyecto no debe tocar plano_analisis
+        # de NINGÚN otro proyecto -- el UPDATE de _completar_analisis_plano
+        # ya filtra por id + token, esto confirma el aislamiento end-to-end.
+        parche_ok, futuro_ok = _mockear_executor(resultado=ANALISIS_DE_PRUEBA)
+        try:
+            analizar_plano_sincrono(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf")
+        finally:
+            parche_ok.stop()
+
+        otro_proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto que va a fallar")
+        parche_fallo, futuro_fallo = _mockear_executor(excepcion=RuntimeError("boom"))
+        try:
+            with self.assertRaises(RuntimeError):
+                analizar_plano_sincrono(
+                    otro_proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "otro.pdf"
+                )
+        finally:
+            parche_fallo.stop()
+
+        proyecto_ok = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(proyecto_ok["plano_analisis"], ANALISIS_DE_PRUEBA)
+        self.assertEqual(proyecto_ok["plano_estado"], "listo")
+
+
 class PruebaFlujoAsincronico(unittest.TestCase):
     """asincronico=True (ver api/routers/proyectos.py) -- iniciar_analisis_
     plano() nunca bloquea, el estado se consulta por separado."""
@@ -379,7 +488,9 @@ class PruebaFlujoAsincronico(unittest.TestCase):
         conexion.close()
 
         # Ahora dispara el callback del intento VIEJO manualmente.
-        repo._completar_analisis_plano(self.proyecto["id"], token_viejo, "primero.pdf", futuro_viejo)
+        repo._completar_analisis_plano(
+            self.proyecto["id"], token_viejo, "primero.pdf", None, time.perf_counter(), futuro_viejo
+        )
 
         proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
         # Sigue 'procesando' (el estado del intento NUEVO) -- el
@@ -603,7 +714,9 @@ class PruebaEliminarPlanoDuranteProcesando(unittest.TestCase):
 
         # El callback llega tarde, con el token que ya no coincide con
         # nada (eliminar_plano lo dejó en NULL).
-        repo._completar_analisis_plano(self.proyecto["id"], token_viejo, "planos.pdf", futuro)
+        repo._completar_analisis_plano(
+            self.proyecto["id"], token_viejo, "planos.pdf", None, time.perf_counter(), futuro
+        )
 
         proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
         self.assertIsNone(proyecto["plano_estado"])

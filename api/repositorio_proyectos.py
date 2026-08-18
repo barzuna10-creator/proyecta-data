@@ -1536,7 +1536,7 @@ def reemplazar_item(proyecto_id, propietario_id, item_id, proveedor_nuevo, id_pr
     return obtener_proyecto(proyecto_id, propietario_id=propietario_id)
 
 
-def iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
+def iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo, tamano_bytes=None):
     """Mission #002 (Plan Processing Stability): reemplaza el antiguo
     analizar_plano(), que bloqueaba la petición HTTP hasta que el
     análisis terminaba -- verificado directo contra producción, un plano
@@ -1552,6 +1552,14 @@ def iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo
     future (ver analizar_plano_sincrono(), para clientes que todavía no
     migraron al flujo asíncrono, y api/routers/proyectos.py para el
     flujo asíncrono nuevo).
+
+    `tamano_bytes` es opcional (default None) -- solo el router HTTP lo
+    conoce de verdad (lo midió mientras escribía el temporal a disco);
+    un caller que llame esta función directo (scripts, pruebas) no tiene
+    por qué inventarlo. Se propaga hasta el log estructurado que emite
+    _completar_analisis_plano() al terminar (ver
+    ANALISIS_INCIDENTE_MEMORIA_RENDER.md) -- nunca se guarda en la base
+    ni afecta el resultado del análisis.
 
     Devuelve None si el proyecto no existe o no es del usuario. Levanta
     AnalisisPlanoEnCurso si el usuario ya tiene otro análisis
@@ -1590,7 +1598,16 @@ def iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo
     finally:
         conexion.close()
 
-    _logger.info(f"ANALISIS_PLANO id={_id_peticion()} proyecto_id={proyecto_id} estado=encolado token={token}")
+    _logger.info(
+        f"ANALISIS_PLANO id={_id_peticion()} proyecto_id={proyecto_id} estado=encolado "
+        f"token={token} tamano_bytes={tamano_bytes}"
+    )
+
+    # ANALISIS_INCIDENTE_MEMORIA_RENDER.md: el momento en que se encola es
+    # el punto de referencia real para medir cuánto tarda un análisis --
+    # capturado acá, no dentro del callback, porque el callback no tiene
+    # forma propia de saber cuándo arrancó este intento en particular.
+    inicio = time.perf_counter()
 
     future = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf)
     # Armar el watchdog ANTES de enganchar el callback -- si el future ya
@@ -1602,13 +1619,13 @@ def iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo
     # para cancelar, en vez de dejarlo huérfano corriendo 120s de más.
     _armar_watchdog(proyecto_id, token)
     future.add_done_callback(
-        functools.partial(_completar_analisis_plano, proyecto_id, token, nombre_archivo)
+        functools.partial(_completar_analisis_plano, proyecto_id, token, nombre_archivo, tamano_bytes, inicio)
     )
 
     return obtener_proyecto(proyecto_id, propietario_id=propietario_id), future
 
 
-def _completar_analisis_plano(proyecto_id, token, nombre_archivo, future):
+def _completar_analisis_plano(proyecto_id, token, nombre_archivo, tamano_bytes, inicio, future):
     """Callback de future.add_done_callback() -- corre en el hilo
     administrador interno de _EXECUTOR_PLANOS, NUNCA en un hilo de
     petición HTTP (ver Mission #002). Es la única función que persiste el
@@ -1621,15 +1638,28 @@ def _completar_analisis_plano(proyecto_id, token, nombre_archivo, future):
     el resultado de un intento viejo pise el estado de uno más nuevo (ej.
     el usuario borró el plano y subió otro mientras este todavía
     procesaba) -- si el proyecto ya tiene un token distinto, rowcount
-    queda en 0 y este resultado simplemente se descarta."""
+    queda en 0 y este resultado simplemente se descarta.
+
+    `tamano_bytes`/`duracion_ms`/`resultado` en el log estructurado (ver
+    ANALISIS_INCIDENTE_MEMORIA_RENDER.md): antes de esto, un plano que
+    hacía fallar el análisis no dejaba ningún rastro propio más allá del
+    estado 'error' en la base -- nada decía cuánto había tardado en
+    fallar, de qué tamaño era el archivo, ni qué tipo de excepción fue,
+    exactamente el dato que hace falta para diagnosticar un incidente
+    real (ej. de memoria) sin poder reproducirlo a mano."""
     _cancelar_watchdog(token)
 
     conexion = conectar()
     try:
         try:
             analisis = future.result()
-        except Exception:
-            _logger.exception(f"ANALISIS_PLANO fallo proyecto_id={proyecto_id} token={token}")
+        except Exception as error:
+            duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
+            _logger.exception(
+                f"ANALISIS_PLANO fallo proyecto_id={proyecto_id} token={token} "
+                f"tamano_bytes={tamano_bytes} duracion_ms={duracion_ms} "
+                f"resultado=fallo error={type(error).__name__}"
+            )
             conexion.execute(
                 """
                 UPDATE proyectos SET plano_estado = 'error', plano_error_mensaje = ?
@@ -1640,6 +1670,7 @@ def _completar_analisis_plano(proyecto_id, token, nombre_archivo, future):
             conexion.commit()
             return
 
+        duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
         ahora = _ahora()
         conexion.execute(
             """
@@ -1653,6 +1684,7 @@ def _completar_analisis_plano(proyecto_id, token, nombre_archivo, future):
         conexion.commit()
         _logger.info(
             f"ANALISIS_PLANO completado proyecto_id={proyecto_id} token={token} "
+            f"tamano_bytes={tamano_bytes} duracion_ms={duracion_ms} resultado=exito "
             f"laminas={analisis.get('cantidad_laminas')}"
         )
     finally:
@@ -1692,7 +1724,7 @@ def _manejar_timeout_analisis(proyecto_id, token):
         _reciclar_executor_planos()
 
 
-def analizar_plano_sincrono(proyecto_id, propietario_id, ruta_pdf, nombre_archivo):
+def analizar_plano_sincrono(proyecto_id, propietario_id, ruta_pdf, nombre_archivo, tamano_bytes=None):
     """Compatibilidad para clientes que todavía no migraron al flujo
     asíncrono de Mission #002 (ver api/routers/proyectos.py: parámetro
     `asincronico`) -- mismo comportamiento observable que el antiguo
@@ -1703,8 +1735,13 @@ def analizar_plano_sincrono(proyecto_id, propietario_id, ruta_pdf, nombre_archiv
     implementación del análisis, solo una segunda forma de esperar su
     resultado. Diferencia real con el comportamiento de antes: ahora
     tiene un techo real (TIMEOUT_ANALISIS_SEGUNDOS) en vez de esperar sin
-    límite."""
-    resultado = iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo)
+    límite.
+
+    `tamano_bytes` (ver ANALISIS_INCIDENTE_MEMORIA_RENDER.md): se
+    propaga tal cual a iniciar_analisis_plano(), mismo criterio ahí."""
+    resultado = iniciar_analisis_plano(
+        proyecto_id, propietario_id, ruta_pdf, nombre_archivo, tamano_bytes=tamano_bytes
+    )
     if resultado is None:
         return None
 
