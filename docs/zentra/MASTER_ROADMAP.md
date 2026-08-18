@@ -60,17 +60,37 @@ compras → control de costos**.
    evidencia en el repo: réplica fuera del disco local (offsite) y un
    procedimiento/script de restauración verificado. No existe ningún script
    de restauración en `origin/main`.
+4. **Plano upload — infraestructura sin timeout, sin límite de concurrencia
+   por usuario, memoria sin presupuestar** `[REPO-VERIFIED]` — problema de
+   infraestructura/confiabilidad, **distinto** del trabajo de precisión de
+   extracción del Plan Reader (ver NEXT). `_EXECUTOR_PLANOS.submit(...)
+   .result()` (`api/repositorio_proyectos.py:1462`) no tiene `timeout`; nada
+   limita cuántos análisis puede tener un mismo usuario en vuelo a la vez, lo
+   que satura el `ThreadPoolExecutor` síncrono compartido con el resto de la
+   API. Los propios postmortems del repo miden el consumo de memoria de un
+   análisis: `BLOQUEO_PLANOS_PROCESSPOOL.md` documenta "~383MB de RSS" por
+   análisis (línea que justifica `max_workers=1` a propósito), y
+   `INVESTIGACION_BLOQUEO_PRODUCCION_PLANOS.md` documenta un pico de "383
+   MB (archivo de 105 MB -- ~3.6x el tamaño del PDF)" para el plano medido,
+   con un rango de "~383MB-1.1GB medido arriba por análisis" según el
+   tamaño del PDF. Un plano real de un cliente pagante, sin necesidad de
+   nada malicioso, puede agotar la memoria del contenedor para todos los
+   tenants, no solo quien sube el archivo.
 
 ## NEXT
 
-1. Plan Reader quantity reliability.
-2. Expandir el benchmark del Plan Reader más allá de los 2 PDFs actuales —
+1. Expandir el benchmark del Plan Reader más allá de los 2 PDFs actuales —
    confirmado: el benchmark hoy está calibrado solo contra 2 planos reales de
    referencia (`LECTURA_DE_PLANOS_V4_PERFILES_ARQUITECTURA.md`: "sin evidencia
-   de que sea universal a más firmas").
-3. Mejorar catalog coverage/matching, distinguiendo claramente fallas de
+   de que sea universal a más firmas"). La confiabilidad de las cantidades
+   extraídas es, con la evidencia hoy disponible, la misma limitación de
+   cobertura de benchmark — no hay un hallazgo separado y evidenciado sobre
+   "cantidades" en los documentos de discovery del Plan Reader V2 que
+   justifique tratarla como un ítem propio; si aparece evidencia concreta que
+   la distinga, debe registrarse como su propio ítem con su propia cita.
+2. Mejorar catalog coverage/matching, distinguiendo claramente fallas de
    extracción de fallas de catálogo.
-4. Automatizar catalog freshness y detectar catálogo desactualizado — no
+3. Automatizar catalog freshness y detectar catálogo desactualizado — no
    existe ningún mecanismo de este tipo hoy en `origin/main`.
 
 ## LATER
@@ -144,8 +164,9 @@ Espacio para decisiones que requieran a José.
 
 ## MISSION PROTOCOL
 
-`Roadmap → una misión → Emilio → Emma → merge/deploy cuando corresponda →
-verificar → actualizar roadmap → siguiente misión`.
+`Roadmap → una misión → Emilio → Emma → merge/deploy solo cuando corresponda
+y con autorización humana explícita y separada (ver AGENTS.md) → verificar →
+actualizar roadmap → siguiente misión`.
 
 Máximo una misión de implementación activa a la vez. Las investigaciones
 independientes pueden correr en paralelo únicamente cuando no modifican
