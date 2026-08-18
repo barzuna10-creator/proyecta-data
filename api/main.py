@@ -9,7 +9,7 @@ import threading
 import time
 
 from db import conectar
-from api.repositorio_proyectos import _EXECUTOR_PLANOS
+from api.repositorio_proyectos import apagar_executor_planos, recuperar_analisis_interrumpidos
 from api.routers import auth as auth_router, feedback as feedback_router, metricas as metricas_router, proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
 from api.observabilidad import logger as _logger, middleware_logging as _middleware_logging
@@ -58,6 +58,20 @@ INTERVALO_RESPALDO_SEGUNDOS = 6 * 60 * 60  # cada 6 horas
 
 def _bucle_arranque_en_segundo_plano():
     _aplicar_migraciones_pendientes()
+    # Mission #002 (Plan Processing Stability): después de migraciones (la
+    # columna plano_estado tiene que existir ya) y antes del loop de
+    # respaldo -- cualquier plano_estado='procesando' en este punto es
+    # huérfano (el proceso anterior que lo estaba procesando ya no existe,
+    # ver api/repositorio_proyectos.py::recuperar_analisis_interrumpidos).
+    # try/except a propósito, mismo criterio que el try/except del loop de
+    # respaldo más abajo: un fallo acá (ej. las migraciones de proyectos
+    # todavía no terminaron en este proceso) nunca debe impedir que el
+    # resto del arranque -- en particular, el propio loop de respaldo --
+    # siga corriendo.
+    try:
+        recuperar_analisis_interrumpidos()
+    except Exception:
+        _logger.exception("Falló recuperar_analisis_interrumpidos() al arrancar -- el arranque continúa igual.")
     while True:
         try:
             resultado = _respaldar_db()
@@ -90,7 +104,7 @@ async def _lifespan(app: FastAPI):
     # un shutdown limpio -- inofensivo en producción (el orquestador mata
     # el grupo de procesos entero), pero en desarrollo con --reload cada
     # recarga dejaría un proceso huérfano más.
-    _EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
+    apagar_executor_planos()
 
 
 app = FastAPI(
