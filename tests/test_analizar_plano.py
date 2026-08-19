@@ -23,12 +23,15 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from concurrent.futures.process import BrokenProcessPool
 from unittest import mock
 
 from fastapi import HTTPException
 
 from api.repositorio_proyectos import (
     AnalisisPlanoEnCurso,
+    MENSAJE_ERROR_GENERICO,
+    MENSAJE_ERROR_MEMORIA_INSUFICIENTE,
     analizar_plano_sincrono,
     crear_proyecto,
     eliminar_plano,
@@ -470,6 +473,193 @@ class PruebaLogIncluyeMedicionDeMemoria(unittest.TestCase):
         linea = next(linea for linea in registro.output if "ANALISIS_PLANO fallo" in linea)
         self.assertIn("worker_vmrss_kb=", linea)
         self.assertIn("worker_vmhwm_kb=", linea)
+
+
+class PruebaInicializadorWorker(unittest.TestCase):
+    """_inicializar_worker_planos() -- el initializer de RLIMIT_AS que
+    corre dentro de cada proceso worker (ver comentario junto a
+    LIMITE_MEMORIA_WORKER_BYTES). Se prueba llamando la función directo
+    y mockeando resource.setrlimit -- no hace falta un proceso hijo real
+    para probar que arma la llamada correcta, y el comportamiento real de
+    enforcement de RLIMIT_AS en Linux no es algo que esta suite (que
+    corre en macOS/CI) pueda verificar de todos modos."""
+
+    def test_llama_setrlimit_con_el_limite_configurado_para_ambos_soft_y_hard(self):
+        import resource
+        with mock.patch.object(resource, "setrlimit") as setrlimit_falso:
+            repo._inicializar_worker_planos()
+
+        setrlimit_falso.assert_called_once_with(
+            resource.RLIMIT_AS,
+            (repo.LIMITE_MEMORIA_WORKER_BYTES, repo.LIMITE_MEMORIA_WORKER_BYTES),
+        )
+
+    def test_si_setrlimit_falla_no_se_propaga_la_excepcion(self):
+        import resource
+        with mock.patch.object(resource, "setrlimit", side_effect=ValueError("no soportado")):
+            repo._inicializar_worker_planos()  # no debe lanzar
+
+    def test_default_del_limite_es_300_mib(self):
+        self.assertEqual(repo.LIMITE_MEMORIA_WORKER_BYTES, 300 * 1024 * 1024)
+
+
+class PruebaExecutorTieneElInicializadorConectado(unittest.TestCase):
+    """El pool actual y cualquier reemplazo armado por
+    _reciclar_executor_planos() deben tener _inicializar_worker_planos
+    conectado -- si no, el techo de memoria del worker nunca se aplicaría
+    de verdad en producción, aunque la función exista."""
+
+    def test_el_executor_del_modulo_tiene_el_inicializador(self):
+        self.assertIs(
+            getattr(repo._EXECUTOR_PLANOS, "_initializer", None),
+            repo._inicializar_worker_planos,
+        )
+
+    def test_reciclar_arma_un_executor_nuevo_con_el_inicializador(self):
+        executor_original = repo._EXECUTOR_PLANOS
+        try:
+            repo._reciclar_executor_planos()
+            self.assertIsNot(repo._EXECUTOR_PLANOS, executor_original)
+            self.assertIs(
+                getattr(repo._EXECUTOR_PLANOS, "_initializer", None),
+                repo._inicializar_worker_planos,
+            )
+        finally:
+            repo._EXECUTOR_PLANOS.shutdown(wait=False, cancel_futures=True)
+            repo._EXECUTOR_PLANOS = executor_original
+
+
+class PruebaMensajeSegunTipoDeError(unittest.TestCase):
+    """_completar_analisis_plano() distingue MemoryError/BrokenProcessPool
+    (mensaje específico de memoria insuficiente) de cualquier otra
+    excepción (mensaje genérico de siempre) -- ver MENSAJE_ERROR_MEMORIA_
+    INSUFICIENTE junto a los otros mensajes de estado."""
+
+    PROPIETARIO = "propietario-plano-mensaje-memoria"
+
+    def setUp(self):
+        self.ruta_db = _crear_db_temporal()
+        import db
+        self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
+        self._patch_db.start()
+        self.proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto con plano")
+
+    def tearDown(self):
+        self._patch_db.stop()
+        os.remove(self.ruta_db)
+
+    def test_memory_error_usa_el_mensaje_especifico_de_memoria(self):
+        parche, futuro = _mockear_executor(excepcion=MemoryError())
+        try:
+            with self.assertRaises(MemoryError):
+                analizar_plano_sincrono(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "grande.pdf")
+        finally:
+            parche.stop()
+
+        proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(proyecto["plano_estado"], "error")
+        self.assertEqual(proyecto["plano_error_mensaje"], MENSAJE_ERROR_MEMORIA_INSUFICIENTE)
+
+    def test_broken_process_pool_usa_el_mismo_mensaje_de_memoria(self):
+        parche, futuro = _mockear_executor(excepcion=BrokenProcessPool("worker murió"))
+        try:
+            with self.assertRaises(BrokenProcessPool):
+                analizar_plano_sincrono(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "grande.pdf")
+        finally:
+            parche.stop()
+
+        proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(proyecto["plano_estado"], "error")
+        self.assertEqual(proyecto["plano_error_mensaje"], MENSAJE_ERROR_MEMORIA_INSUFICIENTE)
+
+    def test_cualquier_otra_excepcion_sigue_usando_el_mensaje_generico(self):
+        parche, futuro = _mockear_executor(excepcion=ValueError("PDF corrupto"))
+        try:
+            with self.assertRaises(ValueError):
+                analizar_plano_sincrono(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "malo.pdf")
+        finally:
+            parche.stop()
+
+        proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(proyecto["plano_estado"], "error")
+        self.assertEqual(proyecto["plano_error_mensaje"], MENSAJE_ERROR_GENERICO)
+
+
+class PruebaRecuperacionBrokenProcessPool(unittest.TestCase):
+    """iniciar_analisis_plano() ante un BrokenProcessPool en el submit()
+    inicial: recicla el pool y reintenta una vez. Si el reintento
+    también falla, el proyecto queda marcado 'error' (nunca colgado en
+    'procesando' sin watchdog) y la excepción se re-lanza."""
+
+    PROPIETARIO = "propietario-plano-pool-roto"
+
+    def setUp(self):
+        self.ruta_db = _crear_db_temporal()
+        import db
+        self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
+        self._patch_db.start()
+        self.proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto con plano")
+
+    def tearDown(self):
+        self._patch_db.stop()
+        os.remove(self.ruta_db)
+
+    def test_primer_submit_roto_reintenta_tras_reciclar_y_sigue_normal(self):
+        futuro_bueno = _future_falso(resultado=ANALISIS_DE_PRUEBA, invocar_callback_sincrono=False)
+        executor_nuevo = mock.MagicMock()
+        executor_nuevo.submit.return_value = futuro_bueno
+
+        executor_viejo = mock.MagicMock()
+        executor_viejo.submit.side_effect = BrokenProcessPool("worker murió")
+
+        def _reciclar_falso():
+            repo._EXECUTOR_PLANOS = executor_nuevo
+
+        with mock.patch.object(repo, "_EXECUTOR_PLANOS", executor_viejo), \
+             mock.patch.object(repo, "_reciclar_executor_planos", side_effect=_reciclar_falso):
+            resultado = iniciar_analisis_plano(
+                self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf"
+            )
+
+        self.assertIsNotNone(resultado)
+        proyecto, future = resultado
+        self.assertEqual(proyecto["plano_estado"], "procesando")
+        self.assertIs(future, futuro_bueno)
+        executor_viejo.submit.assert_called_once()
+        executor_nuevo.submit.assert_called_once()
+
+    def test_submit_roto_dos_veces_marca_error_y_relanza(self):
+        executor_siempre_roto = mock.MagicMock()
+        executor_siempre_roto.submit.side_effect = BrokenProcessPool("worker murió")
+
+        with mock.patch.object(repo, "_EXECUTOR_PLANOS", executor_siempre_roto), \
+             mock.patch.object(repo, "_reciclar_executor_planos") as reciclar_falso:
+            with self.assertRaises(BrokenProcessPool):
+                iniciar_analisis_plano(
+                    self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf"
+                )
+
+        reciclar_falso.assert_called_once()
+        self.assertEqual(executor_siempre_roto.submit.call_count, 2)
+
+        proyecto = obtener_proyecto(self.proyecto["id"], propietario_id=self.PROPIETARIO)
+        self.assertEqual(proyecto["plano_estado"], "error")
+        self.assertEqual(proyecto["plano_error_mensaje"], MENSAJE_ERROR_MEMORIA_INSUFICIENTE)
+
+    def test_submit_roto_dos_veces_no_deja_ningun_watchdog_corriendo(self):
+        executor_siempre_roto = mock.MagicMock()
+        executor_siempre_roto.submit.side_effect = BrokenProcessPool("worker murió")
+
+        temporizadores_antes = len(repo._TEMPORIZADORES_ANALISIS)
+
+        with mock.patch.object(repo, "_EXECUTOR_PLANOS", executor_siempre_roto), \
+             mock.patch.object(repo, "_reciclar_executor_planos"):
+            with self.assertRaises(BrokenProcessPool):
+                iniciar_analisis_plano(
+                    self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf"
+                )
+
+        self.assertEqual(len(repo._TEMPORIZADORES_ANALISIS), temporizadores_antes)
 
 
 class PruebaFlujoAsincronico(unittest.TestCase):
