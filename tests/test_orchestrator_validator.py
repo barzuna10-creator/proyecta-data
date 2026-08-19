@@ -1,0 +1,1015 @@
+"""Pruebas para orchestrator/validator.py -- el núcleo determinístico de
+Chugel (Zentra Autonomous Engineering V1, Level 2, Increment #4).
+
+No hay LLM, red, subprocess ni I/O involucrado en absoluto: estas pruebas
+ejercitan únicamente validate_mission_record(), la única función pública
+que importa para el contrato de este módulo -- no los helpers privados
+(_check_*), que son detalle de implementación.
+
+Los fixtures de abajo construyen Mission Records completos a mano (no un
+JSON Schema real -- ver orchestrator/validator.py, "Scope note", sobre por
+qué la validación estructural completa es responsabilidad de un futuro
+incremento) para poder probar exactamente los invariantes cruzados que
+orchestrator/MISSION_RECORD.md y la revisión de Emma en Increment #3
+identificaron como fuera del alcance de JSON Schema."""
+
+import copy
+import unittest
+
+from orchestrator.validator import validate_mission_record
+
+
+ARTIFACT_A = {"mode": "commit", "commit_sha": "b" * 40, "patch_path": None, "patch_sha256": None, "patch_byte_size": None}
+ARTIFACT_B = {"mode": "commit", "commit_sha": "c" * 40, "patch_path": None, "patch_sha256": None, "patch_byte_size": None}
+
+
+def _not_requested_gate():
+    return {"status": "not_requested", "requested_at": None, "decided_at": None,
+            "decided_by": None, "decision_ref": None, "approved_for": None}
+
+
+def _minimal_intake_record():
+    """La misión más chica posible: recién creada, en INTAKE, sin ninguna
+    otra evidencia todavía -- debe ser válida igual."""
+    return {
+        "schema_version": "1.0.0",
+        "mission_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "created_at": "2026-08-19T12:00:00Z",
+        "updated_at": "2026-08-19T12:00:00Z",
+        "state": "INTAKE",
+        "state_reason": "fresh mission",
+        "state_history": [
+            {"from_state": None, "to_state": "INTAKE", "at": "2026-08-19T12:00:00Z", "actor": "jose", "reason": "new idea"}
+        ],
+        "intent": {"raw_text": "test idea", "captured_at": "2026-08-19T12:00:00Z"},
+        "mission_definition_history": [],
+        "proposed_scope_changes": [],
+        "human_gates": {
+            "scope_authorization": _not_requested_gate(),
+            "publish_authorization": _not_requested_gate(),
+            "merge_authorization": _not_requested_gate(),
+        },
+        "repository": {"worktree_path": "/tmp/w", "branch": "pending", "base_sha": "0" * 40, "isolation_confirmed": False},
+        "builder_evidence": [],
+        "reviewer_evidence": [],
+        "corrective_cycle_count": 0,
+        "publish": {"commit_sha": None, "pushed_at": None, "pr_url": None, "pr_number": None, "ci_runs": []},
+        "merge": {"merge_commit_sha": None, "merged_at": None},
+        "deploy": {
+            "expected_sha": None, "deploy_confirmed_at": None,
+            "health_check": {"checked_at": None, "status_code": None, "body_summary": None},
+            "version_check": {"checked_at": None, "status_code": None, "body_summary": None},
+        },
+        "budget": {
+            "configured": None, "consumed": {"unit": "tokens", "amount": 0},
+            "per_agent_consumed": {"david": None, "emilio": None, "emma": None}, "exhausted": False,
+        },
+    }
+
+
+def _mission_definition_entry(version=1, source="david_intake", based_on=None):
+    return {
+        "version": version, "outcome": "build a thing", "scope": ["api/thing.py"],
+        "non_goals": [], "acceptance_criteria": ["thing works"],
+        "source": source, "based_on_proposal_id": based_on,
+        "authorized_by": "jose", "authorized_at": "2026-08-19T12:10:00Z",
+        "authorization_decision_ref": "audit:scope-1",
+    }
+
+
+def _builder_entry(attempt=0, artifact=None):
+    return {
+        "attempt": attempt, "invoked_at": "2026-08-19T12:11:00Z",
+        "artifact": artifact or ARTIFACT_A,
+        "changed_files": [{"path": "api/thing.py", "reason": "implement"}],
+        "checks": [{"command": "python3 -m unittest", "working_directory": "/repo", "exit_status": 0, "result": "OK"}],
+        "skipped_checks": [], "risks": [], "assumptions": [],
+        "rollback_notes": "git revert",
+        "safety_confirmation": {
+            "no_existing_work_altered": True, "no_main_change": True, "no_remote_action": True,
+            "no_production_access": True, "no_protected_path_change": True, "complete_diff_inspected": True,
+        },
+        "handoff_document_ref": None,
+        "conclusion": {"text": "done", "label": "INFERENCE"},
+    }
+
+
+def _reviewer_entry(attempt=0, verdict="PASS", start=None, before=None, findings=None):
+    return {
+        "attempt": attempt, "invoked_at": "2026-08-19T12:42:00Z",
+        "artifact_identity_confirmed_at_start": start or ARTIFACT_A,
+        "artifact_identity_confirmed_before_conclusion": before or ARTIFACT_A,
+        "rechecked_commands": [], "findings": findings or [], "verdict": verdict,
+        "blocked_reason": "blocked for testing" if verdict == "BLOCKED" else None,
+    }
+
+
+def _approved_gate(approved_for):
+    return {
+        "status": "approved", "requested_at": "2026-08-19T12:05:00Z",
+        "decided_at": "2026-08-19T12:10:00Z", "decided_by": "jose",
+        "decision_ref": "audit:decision-1", "approved_for": approved_for,
+    }
+
+
+def _authorized_record():
+    """AUTHORIZED: scope approved, worktree not yet created."""
+    record = _minimal_intake_record()
+    record["state"] = "AUTHORIZED"
+    record["state_history"].append(
+        {"from_state": "INTAKE", "to_state": "SCOPE_AWAITING_AUTHORIZATION", "at": "2026-08-19T12:05:00Z", "actor": "david", "reason": "drafted"}
+    )
+    record["state_history"].append(
+        {"from_state": "SCOPE_AWAITING_AUTHORIZATION", "to_state": "AUTHORIZED", "at": "2026-08-19T12:10:00Z", "actor": "jose", "reason": "approved"}
+    )
+    record["state_reason"] = "scope approved"
+    record["mission_definition_history"] = [_mission_definition_entry()]
+    record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 1})
+    return record
+
+
+def _built_and_reviewed_pass_record():
+    """A full legal happy path: AUTHORIZED -> BUILDING -> VERIFYING ->
+    AWAITING_REVIEW -> REVIEWING -> PUBLISH_AWAITING_AUTHORIZATION, verdict PASS."""
+    record = _authorized_record()
+    record["repository"]["isolation_confirmed"] = True
+    for from_s, to_s, actor, reason in [
+        ("AUTHORIZED", "BUILDING", "chugel", "worktree created"),
+        ("BUILDING", "VERIFYING", "chugel", "handoff produced"),
+        ("VERIFYING", "AWAITING_REVIEW", "chugel", "checks ran"),
+        ("AWAITING_REVIEW", "REVIEWING", "chugel", "emma invoked"),
+        ("REVIEWING", "PUBLISH_AWAITING_AUTHORIZATION", "chugel", "pass verdict"),
+    ]:
+        record["state_history"].append({"from_state": from_s, "to_state": to_s, "at": "2026-08-19T12:20:00Z", "actor": actor, "reason": reason})
+    record["state"] = "PUBLISH_AWAITING_AUTHORIZATION"
+    record["state_reason"] = "awaiting publish authorization"
+    record["builder_evidence"] = [_builder_entry(0)]
+    record["reviewer_evidence"] = [_reviewer_entry(0, verdict="PASS")]
+    return record
+
+
+def _completed_record():
+    """Full legal chain through merge/deploy/completion."""
+    record = _built_and_reviewed_pass_record()
+    for from_s, to_s in [
+        ("PUBLISH_AWAITING_AUTHORIZATION", "PUBLISHING"),
+        ("PUBLISHING", "CI_PENDING"),
+        ("CI_PENDING", "MERGE_AWAITING_AUTHORIZATION"),
+        ("MERGE_AWAITING_AUTHORIZATION", "MERGING"),
+        ("MERGING", "MERGED"),
+        ("MERGED", "DEPLOY_PENDING"),
+        ("DEPLOY_PENDING", "VERIFYING_PRODUCTION"),
+        ("VERIFYING_PRODUCTION", "COMPLETED"),
+    ]:
+        record["state_history"].append({"from_state": from_s, "to_state": to_s, "at": "2026-08-19T13:00:00Z", "actor": "chugel", "reason": "advance"})
+    record["state"] = "COMPLETED"
+    record["state_reason"] = "deploy verified"
+    record["human_gates"]["publish_authorization"] = _approved_gate({"commit_sha": "b" * 40})
+    record["human_gates"]["merge_authorization"] = _approved_gate({"head_sha": "b" * 40, "base_sha": "0" * 40})
+    record["publish"] = {"commit_sha": "b" * 40, "pushed_at": "2026-08-19T12:50:00Z", "pr_url": "https://example.test/pr/1", "pr_number": 1,
+                          "ci_runs": [{"run_id": "run-1", "conclusion": "success", "checked_at": "2026-08-19T12:55:00Z"}]}
+    record["merge"] = {"merge_commit_sha": "d" * 40, "merged_at": "2026-08-19T13:00:00Z"}
+    record["deploy"] = {
+        "expected_sha": "d" * 40, "deploy_confirmed_at": "2026-08-19T13:05:00Z",
+        "health_check": {"checked_at": "2026-08-19T13:05:00Z", "status_code": 200, "body_summary": "ok"},
+        "version_check": {"checked_at": "2026-08-19T13:05:00Z", "status_code": 200, "body_summary": "d" * 40},
+    }
+    return record
+
+
+def _corrective_cycle_record():
+    """Legal corrective cycle: initial review CHANGES_REQUIRED, one bounded
+    correction, re-review PASS."""
+    record = _built_and_reviewed_pass_record()
+    record["reviewer_evidence"] = [_reviewer_entry(0, verdict="CHANGES_REQUIRED", findings=[
+        {"id": "F1", "severity": "P2", "summary": "missing test", "file": "x.py", "line_range": "1-2", "category": "testing"}
+    ])]
+    record["state"] = "CORRECTING"
+    record["state_reason"] = "addressing findings"
+    record["state_history"][-1] = {"from_state": "REVIEWING", "to_state": "CHANGES_REQUIRED", "at": "2026-08-19T12:30:00Z", "actor": "chugel", "reason": "changes required"}
+    record["state_history"].append({"from_state": "CHANGES_REQUIRED", "to_state": "CORRECTING", "at": "2026-08-19T12:31:00Z", "actor": "chugel", "reason": "one bounded cycle"})
+    record["corrective_cycle_count"] = 1
+    record["builder_evidence"].append(_builder_entry(1, artifact=ARTIFACT_B))
+    record["state_history"].append({"from_state": "CORRECTING", "to_state": "VERIFYING", "at": "2026-08-19T12:40:00Z", "actor": "chugel", "reason": "re-verify"})
+    record["state_history"].append({"from_state": "VERIFYING", "to_state": "AWAITING_REVIEW", "at": "2026-08-19T12:41:00Z", "actor": "chugel", "reason": "checks ran"})
+    record["state_history"].append({"from_state": "AWAITING_REVIEW", "to_state": "REVIEWING", "at": "2026-08-19T12:42:00Z", "actor": "chugel", "reason": "re-review"})
+    record["state_history"].append({"from_state": "REVIEWING", "to_state": "PUBLISH_AWAITING_AUTHORIZATION", "at": "2026-08-19T12:50:00Z", "actor": "chugel", "reason": "pass"})
+    record["reviewer_evidence"].append(_reviewer_entry(1, verdict="PASS_WITH_NON_BLOCKING_FINDINGS", start=ARTIFACT_B, before=ARTIFACT_B, findings=[
+        {"id": "F2", "severity": "P3", "summary": "nit", "file": "x.py", "line_range": "3", "category": "clarity"}
+    ]))
+    record["state"] = "PUBLISH_AWAITING_AUTHORIZATION"
+    record["state_reason"] = "awaiting publish authorization after correction"
+    return record
+
+
+def error_codes(result):
+    return sorted(e.code for e in result.errors)
+
+
+class PruebaFlujosLegales(unittest.TestCase):
+    """Casos de camino feliz -- deben validar limpio, sin ningún error."""
+
+    def test_intake_minimo_es_valido(self):
+        result = validate_mission_record(_minimal_intake_record())
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_authorized_es_valido(self):
+        result = validate_mission_record(_authorized_record())
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_flujo_build_review_pass_es_valido(self):
+        result = validate_mission_record(_built_and_reviewed_pass_record())
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_ciclo_correctivo_legal_es_valido(self):
+        result = validate_mission_record(_corrective_cycle_record())
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_flujo_merge_deploy_completion_es_valido(self):
+        result = validate_mission_record(_completed_record())
+        self.assertTrue(result.valid, error_codes(result))
+
+
+class PruebaConsistenciaVeredictoSeveridad(unittest.TestCase):
+    """Derivado exactamente de docs/zentra/REVIEWER_QA_V1.md -- ver
+    orchestrator/validator.py::_check_reviewer_verdict_consistency."""
+
+    def test_pass_con_p0_es_invalido(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["findings"] = [
+            {"id": "F1", "severity": "P0", "summary": "critico", "file": None, "line_range": None, "category": "seguridad"}
+        ]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("VERDICT_SEVERITY_MISMATCH_P0", error_codes(result))
+
+    def test_pass_con_p1_es_invalido(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["findings"] = [
+            {"id": "F1", "severity": "P1", "summary": "regresion", "file": None, "line_range": None, "category": "correctness"}
+        ]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("VERDICT_SEVERITY_MISMATCH_PASS", error_codes(result))
+
+    def test_pass_with_non_blocking_con_p2_es_invalido(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["verdict"] = "PASS_WITH_NON_BLOCKING_FINDINGS"
+        record["reviewer_evidence"][0]["findings"] = [
+            {"id": "F1", "severity": "P2", "summary": "mantenibilidad", "file": None, "line_range": None, "category": "maintainability"}
+        ]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("VERDICT_SEVERITY_MISMATCH_NON_BLOCKING", error_codes(result))
+
+    def test_changes_required_sin_p1_p2_es_invalido(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["verdict"] = "CHANGES_REQUIRED"
+        record["reviewer_evidence"][0]["findings"] = []
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("VERDICT_SEVERITY_MISMATCH_CHANGES_REQUIRED", error_codes(result))
+
+    def test_pass_con_findings_vacio_sigue_siendo_valido(self):
+        record = _built_and_reviewed_pass_record()
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+
+class PruebaSecuenciaDeIntentos(unittest.TestCase):
+    def test_duplicado_attempt_cero_en_builder_evidence(self):
+        record = _built_and_reviewed_pass_record()
+        record["builder_evidence"].append(_builder_entry(0))
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("DUPLICATE_ATTEMPT_NUMBER", error_codes(result))
+
+    def test_duplicado_attempt_uno_en_reviewer_evidence(self):
+        # Con la capa estructural (Part A) conectada, reviewer_evidence ya
+        # está acotado por el schema a maxItems: 2 -- una tercera entrada
+        # se rechaza en la capa estructural antes de que la cross-field
+        # (DUPLICATE_ATTEMPT_NUMBER) tenga oportunidad de correr.
+        record = _corrective_cycle_record()
+        record["reviewer_evidence"].append(_reviewer_entry(1, verdict="PASS", start=ARTIFACT_B, before=ARTIFACT_B))
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_MAXITEMS_VIOLATION", error_codes(result))
+
+    def test_intento_correctivo_sin_intento_inicial(self):
+        record = _built_and_reviewed_pass_record()
+        record["builder_evidence"] = [_builder_entry(1)]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("CORRECTIVE_ATTEMPT_WITHOUT_INITIAL", error_codes(result))
+
+
+class PruebaConsistenciaCicloCorrectivo(unittest.TestCase):
+    def test_count_inconsistente_con_evidencia_de_verdad(self):
+        record = _corrective_cycle_record()
+        record["corrective_cycle_count"] = 0  # pero sí existe un builder_evidence attempt=1
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("CORRECTIVE_CYCLE_COUNT_INCONSISTENT", error_codes(result))
+
+    def test_count_uno_sin_intento_correctivo_real(self):
+        record = _built_and_reviewed_pass_record()
+        record["corrective_cycle_count"] = 1
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("CORRECTIVE_CYCLE_COUNT_INCONSISTENT", error_codes(result))
+
+    def test_intento_correctivo_sin_changes_required_previo(self):
+        record = _corrective_cycle_record()
+        record["reviewer_evidence"][0]["verdict"] = "PASS"
+        record["reviewer_evidence"][0]["findings"] = []
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("CORRECTIVE_CYCLE_WITHOUT_TRIGGER", error_codes(result))
+
+
+class PruebaConsistenciaIdentidadDeArtefacto(unittest.TestCase):
+    def test_snapshots_distintos_sin_blocked_es_invalido(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["artifact_identity_confirmed_before_conclusion"] = ARTIFACT_B
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("ARTIFACT_IDENTITY_DRIFT_DURING_REVIEW", error_codes(result))
+
+    def test_snapshots_distintos_con_blocked_es_valido(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["artifact_identity_confirmed_before_conclusion"] = ARTIFACT_B
+        record["reviewer_evidence"][0]["verdict"] = "BLOCKED"
+        record["reviewer_evidence"][0]["findings"] = []
+        record["reviewer_evidence"][0]["blocked_reason"] = "artifact drifted mid-review"
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_emma_reviso_un_artefacto_distinto_al_de_emilio(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["artifact_identity_confirmed_at_start"] = ARTIFACT_B
+        record["reviewer_evidence"][0]["artifact_identity_confirmed_before_conclusion"] = ARTIFACT_B
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("ARTIFACT_IDENTITY_MISMATCH_WITH_BUILDER", error_codes(result))
+
+
+class PruebaAprobacionesObsoletas(unittest.TestCase):
+    def test_merge_authorization_obsoleta(self):
+        record = _completed_record()
+        record["publish"]["commit_sha"] = "e" * 40  # nuevo push después de la aprobación
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STALE_APPROVAL", error_codes(result))
+
+    def test_scope_authorization_obsoleta(self):
+        record = _authorized_record()
+        record["human_gates"]["scope_authorization"]["approved_for"] = {"mission_definition_version": 2}
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STALE_APPROVAL", error_codes(result))
+
+
+class PruebaAutorizacionDeAlcancePorAgente(unittest.TestCase):
+    def test_un_agente_no_puede_autorizar_su_propio_alcance(self):
+        # Con la capa estructural (Part A) conectada, mission_definition_
+        # history[].authorized_by ya está tipado en el schema como
+        # "const": "jose" -- cualquier otro valor se rechaza en la capa
+        # estructural, ANTES de llegar a la capa cross-field. Sigue siendo
+        # rechazado, solo que con un código distinto (más específico y más
+        # temprano) -- la protección real (ningún agente autoriza alcance)
+        # sigue intacta, ahora doblemente reforzada.
+        record = _authorized_record()
+        record["mission_definition_history"][0]["authorized_by"] = "emilio"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_CONST_VIOLATION", error_codes(result))
+
+    def test_versiones_no_monotonicas(self):
+        record = _authorized_record()
+        record["mission_definition_history"].append(_mission_definition_entry(version=3, source="david_replan", based_on="p1"))
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("MISSION_DEFINITION_VERSION_NOT_MONOTONIC", error_codes(result))
+
+    def test_replan_huerfano_sin_propuesta(self):
+        record = _authorized_record()
+        record["mission_definition_history"].append(_mission_definition_entry(version=2, source="david_replan", based_on="does-not-exist"))
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCOPE_VERSION_ORPHANED_PROPOSAL", error_codes(result))
+
+    def test_replan_legal_con_propuesta_aceptada(self):
+        # José's explicit decision (Increment #4 corrective cycle): un
+        # re-plan legítimo requiere que human_gates.scope_authorization
+        # también se actualice para reflejar la versión ACTUAL, no solo
+        # que exista una nueva entrada en mission_definition_history.
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [{
+            "proposal_id": "p1", "proposed_at": "2026-08-19T12:15:00Z", "proposed_by": "david",
+            "label": "INFERENCE", "rationale": "found a related need",
+            "diff_against_current_scope": {"added": ["api/other.py"], "removed": []},
+            "status": "accepted", "decided_by": "jose", "decided_at": "2026-08-19T12:16:00Z",
+            "resulting_mission_definition_version": 2,
+        }]
+        record["mission_definition_history"].append(_mission_definition_entry(version=2, source="david_replan", based_on="p1"))
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+
+class PruebaReplanAutorizacionDeAlcance(unittest.TestCase):
+    """Decisión humana explícita de José (Increment #4, ciclo correctivo):
+    human_gates.scope_authorization representa autorización para la
+    versión de mission_definition ACTUAL/activa, no permanentemente la
+    inicial de david_intake. Cubre exactamente los 8 casos pedidos."""
+
+    def _replan_history_entry(self, version=2, based_on="p1"):
+        return _mission_definition_entry(version=version, source="david_replan", based_on=based_on)
+
+    def _accepted_proposal(self, proposal_id="p1", decided_by="jose", decided_at="2026-08-19T12:16:00Z", resulting_version=2):
+        return {
+            "proposal_id": proposal_id, "proposed_at": "2026-08-19T12:15:00Z", "proposed_by": "david",
+            "label": "INFERENCE", "rationale": "found a related need",
+            "diff_against_current_scope": {"added": ["api/other.py"], "removed": []},
+            "status": "accepted", "decided_by": decided_by, "decided_at": decided_at,
+            "resulting_mission_definition_version": resulting_version,
+        }
+
+    # 1. Initial mission v1 + José approval for v1 -> valid.
+    def test_1_v1_inicial_con_aprobacion_de_v1_es_valido(self):
+        result = validate_mission_record(_authorized_record())
+        self.assertTrue(result.valid, error_codes(result))
+
+    # 2. Legitimate accepted re-plan producing v2 + José approval updated to v2 -> valid.
+    def test_2_replan_legitimo_con_gate_actualizado_a_v2_es_valido(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal()]
+        record["mission_definition_history"].append(self._replan_history_entry())
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    # 3. Re-plan produces v2 but scope authorization still points to v1 -> stale.
+    def test_3_replan_a_v2_pero_gate_sigue_apuntando_a_v1_es_obsoleto(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal()]
+        record["mission_definition_history"].append(self._replan_history_entry())
+        # human_gates.scope_authorization NO se actualiza -- sigue en v1.
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STALE_APPROVAL", error_codes(result))
+
+    # 4. Re-plan v2 accepted by anyone other than José -> invalid.
+    def test_4_propuesta_aceptada_por_alguien_que_no_es_jose(self):
+        # Con la capa estructural (Part A) conectada, proposed_scope_
+        # changes[].decided_by ya está tipado como anyOf[null, const:
+        # "jose"] -- "chugel" se rechaza en la capa estructural, incluso
+        # antes de que exista la oportunidad de evaluar la evidencia
+        # cross-field. La protección real (nadie más que jose decide)
+        # sigue intacta, ahora reforzada en dos capas.
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal(decided_by="chugel")]
+        record["mission_definition_history"].append(self._replan_history_entry())
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_ANYOF_VIOLATION", error_codes(result))
+
+    # 5. Pending/rejected proposal cannot become active mission definition.
+    def test_5a_propuesta_pending_vinculada_a_historial_es_invalida(self):
+        record = _authorized_record()
+        proposal = self._accepted_proposal()
+        proposal["status"] = "pending_human_decision"
+        record["proposed_scope_changes"] = [proposal]
+        record["mission_definition_history"].append(self._replan_history_entry())
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCOPE_VERSION_PROPOSAL_MISMATCH", error_codes(result))
+
+    def test_5b_propuesta_rejected_vinculada_a_historial_es_invalida(self):
+        record = _authorized_record()
+        proposal = self._accepted_proposal()
+        proposal["status"] = "rejected"
+        record["proposed_scope_changes"] = [proposal]
+        record["mission_definition_history"].append(self._replan_history_entry())
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCOPE_VERSION_PROPOSAL_MISMATCH", error_codes(result))
+
+    def test_5c_propuesta_pending_sin_vinculo_a_historial_no_afecta_nada(self):
+        record = _authorized_record()
+        proposal = self._accepted_proposal(proposal_id="p2")
+        proposal["status"] = "pending_human_decision"
+        proposal["decided_by"] = None
+        proposal["decided_at"] = None
+        proposal["resulting_mission_definition_version"] = None
+        record["proposed_scope_changes"] = [proposal]
+        # mission_definition_history se queda solo en v1 -- la propuesta
+        # pendiente nunca se vuelve la definición activa por sí sola.
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    # 6/7/8. Ningún agente puede autorizar un re-plan -- solo jose.
+    def test_6_david_no_puede_autorizar_su_propio_replan(self):
+        # Con la capa estructural (Part A) conectada, mission_definition_
+        # history[].authorized_by ya está tipado como "const": "jose" --
+        # "david" se rechaza en la capa estructural.
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal()]
+        entry = self._replan_history_entry()
+        entry["authorized_by"] = "david"
+        record["mission_definition_history"].append(entry)
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_CONST_VIOLATION", error_codes(result))
+
+    def test_7_chugel_no_puede_autorizarlo(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal()]
+        entry = self._replan_history_entry()
+        entry["authorized_by"] = "chugel"
+        record["mission_definition_history"].append(entry)
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_CONST_VIOLATION", error_codes(result))
+
+    def test_8a_emilio_no_puede_autorizarlo(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal()]
+        entry = self._replan_history_entry()
+        entry["authorized_by"] = "emilio"
+        record["mission_definition_history"].append(entry)
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_CONST_VIOLATION", error_codes(result))
+
+    def test_8b_emma_no_puede_autorizarlo(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal()]
+        entry = self._replan_history_entry()
+        entry["authorized_by"] = "emma"
+        record["mission_definition_history"].append(entry)
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_CONST_VIOLATION", error_codes(result))
+
+    # Auto-desafío adicional: un segundo re-plan (v2 -> v3) deja el gate
+    # obsoleto apuntando a v2 -- debe fallar cerrado igual que v1 -> v2.
+    def test_segundo_replan_deja_obsoleta_la_aprobacion_de_v2(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [
+            self._accepted_proposal(proposal_id="p1", resulting_version=2),
+            self._accepted_proposal(proposal_id="p2", resulting_version=3),
+        ]
+        record["mission_definition_history"].append(self._replan_history_entry(version=2, based_on="p1"))
+        record["mission_definition_history"].append(self._replan_history_entry(version=3, based_on="p2"))
+        # El gate quedó aprobado para v2 (obsoleto -- ahora la versión activa es v3).
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STALE_APPROVAL", error_codes(result))
+
+    def test_segundo_replan_con_gate_actualizado_a_v3_es_valido(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [
+            self._accepted_proposal(proposal_id="p1", resulting_version=2),
+            self._accepted_proposal(proposal_id="p2", resulting_version=3),
+        ]
+        record["mission_definition_history"].append(self._replan_history_entry(version=2, based_on="p1"))
+        record["mission_definition_history"].append(self._replan_history_entry(version=3, based_on="p2"))
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 3})
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+
+class PruebaEvidenciaDeAuditoriaDePropuestaAceptada(unittest.TestCase):
+    """Emma P2 (Increment #4 corrective cycle): una propuesta 'accepted'
+    debe traer su propia evidencia de decisión completa y atribuida a
+    jose, y su resulting_mission_definition_version debe corresponder a
+    una entrada real de mission_definition_history."""
+
+    def _accepted_proposal(self, **overrides):
+        base = {
+            "proposal_id": "p1", "proposed_at": "2026-08-19T12:15:00Z", "proposed_by": "david",
+            "label": "INFERENCE", "rationale": "found a related need",
+            "diff_against_current_scope": {"added": ["api/other.py"], "removed": []},
+            "status": "accepted", "decided_by": "jose", "decided_at": "2026-08-19T12:16:00Z",
+            "resulting_mission_definition_version": 2,
+        }
+        base.update(overrides)
+        return base
+
+    def test_accepted_sin_decided_by_es_invalido(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal(decided_by=None)]
+        record["mission_definition_history"].append(
+            _mission_definition_entry(version=2, source="david_replan", based_on="p1")
+        )
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("PROPOSAL_ACCEPTED_WITHOUT_JOSE_EVIDENCE", error_codes(result))
+
+    def test_accepted_sin_decided_at_es_invalido(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal(decided_at=None)]
+        record["mission_definition_history"].append(
+            _mission_definition_entry(version=2, source="david_replan", based_on="p1")
+        )
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("PROPOSAL_ACCEPTED_WITHOUT_JOSE_EVIDENCE", error_codes(result))
+
+    def test_accepted_con_version_resultante_sin_entrada_real_es_invalido(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._accepted_proposal(resulting_mission_definition_version=2)]
+        # Nunca se agrega la entrada v2 real a mission_definition_history.
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("PROPOSAL_ACCEPTED_WITHOUT_RESULTING_VERSION", error_codes(result))
+
+
+class PruebaFormatCheckerFechaHoraYUri(unittest.TestCase):
+    """Corrección final de Increment #4 (hallazgo P2 de Emma): el schema
+    canónico declara exactamente dos "format": "date-time" (vía
+    #/definitions/timestamp, usado por casi todos los campos *_at) y "uri"
+    (solo publish.pr_url) -- confirmado por inspección directa del schema,
+    no supuesto. Ambos ahora se aplican de verdad vía jsonschema.
+    FormatChecker, sin dependencia nueva, sin red, sin mutar nada."""
+
+    # --- date-time: 1-5 ---
+
+    def test_1_timestamp_canonico_valido_es_aceptado(self):
+        record = _minimal_intake_record()
+        record["created_at"] = "2026-08-19T12:00:00Z"
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_2_timestamp_con_offset_de_zona_horaria_es_aceptado(self):
+        record = _minimal_intake_record()
+        record["created_at"] = "2026-08-19T12:00:00+00:00"
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_3_timestamp_basura_obvia_es_rechazado(self):
+        record = _minimal_intake_record()
+        record["created_at"] = "definitely-not-a-real-timestamp"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_FORMAT_DATE_TIME_VIOLATION", error_codes(result))
+
+    def test_4_fecha_de_calendario_imposible_es_rechazada(self):
+        record = _minimal_intake_record()
+        record["created_at"] = "2026-02-30T12:00:00Z"  # 30 de febrero no existe
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_FORMAT_DATE_TIME_VIOLATION", error_codes(result))
+
+    def test_5_zona_horaria_malformada_es_rechazada(self):
+        record = _minimal_intake_record()
+        record["created_at"] = "2026-08-19T12:00:00+25:00"  # offset imposible (>23:59)
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_FORMAT_DATE_TIME_VIOLATION", error_codes(result))
+
+    def test_5b_timestamp_sin_zona_horaria_tambien_se_rechaza(self):
+        # datetime.fromisoformat() acepta un datetime "naive" (sin
+        # offset), pero el schema exige explícitamente "RFC 3339 UTC
+        # timestamp" -- un timestamp sin offset no cumple esa intención,
+        # aunque sea sintácticamente parseable por el stdlib.
+        record = _minimal_intake_record()
+        record["created_at"] = "2026-08-19T12:00:00"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_FORMAT_DATE_TIME_VIOLATION", error_codes(result))
+
+    # --- uri: 6-9 ---
+
+    def test_6_url_de_pr_valida_es_aceptada(self):
+        record = _completed_record()
+        record["publish"]["pr_url"] = "https://example.test/pr/1"
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_7_otra_variante_de_uri_valida_es_aceptada(self):
+        # El schema canónico solo tipa "format": "uri" en publish.pr_url
+        # -- no existe un segundo campo de URL de repositorio/deploy en
+        # mission_record.schema.json (confirmado por inspección). Esta
+        # prueba cubre una segunda forma válida de URI en ese mismo campo
+        # (con query string) para no dejar el checker subprobado.
+        record = _completed_record()
+        record["publish"]["pr_url"] = "https://github.example.test/org/repo/pull/42?tab=files"
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_8_palabras_sueltas_no_son_una_uri(self):
+        record = _completed_record()
+        record["publish"]["pr_url"] = "not a uri at all, just words"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        # anyOf porque pr_url es anyOf[null, string+format:uri] -- ver
+        # "residual limitation" en el handoff sobre por qué el código no
+        # es SCHEMA_FORMAT_URI_VIOLATION directamente en este campo.
+        self.assertIn("SCHEMA_ANYOF_VIOLATION", error_codes(result))
+
+    def test_9_uri_malformada_sin_esquema_es_rechazada(self):
+        record = _completed_record()
+        record["publish"]["pr_url"] = "not-a-real-uri-scheme%%%"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_ANYOF_VIOLATION", error_codes(result))
+
+    def test_9b_el_checker_de_uri_en_si_mismo_rechaza_lo_esperado(self):
+        # Prueba directa del checker (no a través del anyOf) para
+        # confirmar que SÍ produce el código específico cuando el campo
+        # no está envuelto en anyOf -- ver _check_uri_format.
+        from orchestrator.validator import _check_uri_format
+        self.assertTrue(_check_uri_format("https://example.test/pr/1"))
+        self.assertFalse(_check_uri_format("not a uri at all, just words"))
+        self.assertFalse(_check_uri_format("not-a-real-uri-scheme%%%"))
+        self.assertFalse(_check_uri_format(""))
+
+    # --- pipeline: 10-13 ---
+
+    def test_10_registro_con_formato_invalido_falla_en_capa_estructural(self):
+        record = _built_and_reviewed_pass_record()
+        record["created_at"] = "garbage"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+    def test_11_registro_con_formato_valido_pero_cross_field_invalido_llega_a_esa_capa(self):
+        record = _built_and_reviewed_pass_record()
+        # Todos los timestamps son válidos; el finding viola PASS -- debe
+        # llegar a la capa cross-field, no quedarse en la estructural.
+        record["reviewer_evidence"][0]["findings"] = [
+            {"id": "F1", "severity": "P2", "summary": "x", "file": None, "line_range": None, "category": "x"}
+        ]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("VERDICT_SEVERITY_MISMATCH_PASS", error_codes(result))
+        self.assertFalse(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+    def test_12_el_registro_de_entrada_no_cambia_con_el_format_checker(self):
+        record = _minimal_intake_record()
+        record["created_at"] = "garbage-timestamp"
+        before = copy.deepcopy(record)
+        validate_mission_record(record)
+        self.assertEqual(record, before)
+
+    def test_13_resultados_deterministas_entre_llamadas_repetidas(self):
+        record = _minimal_intake_record()
+        record["created_at"] = "garbage-timestamp"
+        record["publish"]["pr_url"] = "also not a uri"
+        first = validate_mission_record(record)
+        second = validate_mission_record(record)
+        self.assertEqual(first.errors, second.errors)
+
+
+class PruebaCapaEstructuralJSONSchema(unittest.TestCase):
+    """Part A (hardening autorizada por José tras el corrective cycle):
+    validate_mission_record() ahora es dos capas -- estructural (JSON
+    Schema, orchestrator/schemas/mission_record.schema.json vía
+    jsonschema.Draft7Validator) seguida de cross-field. Un registro es
+    válido solo si AMBAS capas pasan; si la capa estructural encuentra
+    algo, la cross-field ni siquiera corre."""
+
+    def test_falta_intent_requerido(self):
+        record = _minimal_intake_record()
+        del record["intent"]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_REQUIRED_VIOLATION", error_codes(result))
+
+    def test_sha_de_commit_con_forma_invalida(self):
+        record = _completed_record()
+        record["merge"]["merge_commit_sha"] = "not-a-real-sha"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_ANYOF_VIOLATION", error_codes(result))
+
+    def test_campo_desconocido_en_el_nivel_superior(self):
+        record = _minimal_intake_record()
+        record["campo_inesperado"] = "no debería permitirse"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_ADDITIONALPROPERTIES_VIOLATION", error_codes(result))
+
+    def test_schema_version_no_soportada_via_capa_estructural(self):
+        record = _minimal_intake_record()
+        record["schema_version"] = "2.0.0"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        # El código específico se preserva por continuidad con la capa
+        # cross-field que existía antes de este hardening.
+        self.assertIn("UNSUPPORTED_SCHEMA_VERSION", error_codes(result))
+
+    def test_tipo_primitivo_incorrecto(self):
+        record = _minimal_intake_record()
+        record["corrective_cycle_count"] = "0"  # string en vez de int
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_TYPE_VIOLATION", error_codes(result))
+
+    def test_gate_anidado_malformado(self):
+        record = _minimal_intake_record()
+        record["human_gates"]["merge_authorization"] = {"status": "not_a_real_status"}
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        # Falta requeridos (requested_at, decided_at, ...) Y el status no
+        # es un valor del enum -- cualquiera de los dos códigos confirma
+        # que la capa estructural lo atrapó.
+        self.assertTrue(
+            any(code in ("SCHEMA_REQUIRED_VIOLATION", "SCHEMA_ENUM_VIOLATION") for code in error_codes(result)),
+            error_codes(result),
+        )
+
+    def test_identidad_de_artefacto_malformada(self):
+        record = _built_and_reviewed_pass_record()
+        record["builder_evidence"][0]["artifact"] = {"mode": "commit"}  # faltan campos requeridos por el modo
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_REQUIRED_VIOLATION", error_codes(result))
+
+    def test_estructuralmente_valido_pero_cross_field_invalido(self):
+        # Un registro que satisface el schema al pie de la letra (todos
+        # los campos con la forma y el tipo correctos) pero que viola un
+        # invariante cross-field (PASS con un finding presente) -- debe
+        # llegar hasta la capa cross-field y ser rechazado ahí, no antes.
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["findings"] = [
+            {"id": "F1", "severity": "P2", "summary": "x", "file": None, "line_range": None, "category": "x"}
+        ]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("VERDICT_SEVERITY_MISMATCH_PASS", error_codes(result))
+        # Ningún código SCHEMA_* debería aparecer -- confirma que sí pasó
+        # limpio por la capa estructural y falló específicamente en la
+        # cross-field.
+        self.assertFalse(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+    def test_registro_completamente_valido_pasa_ambas_capas(self):
+        result = validate_mission_record(_completed_record())
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_el_registro_de_entrada_no_se_muta(self):
+        record = _built_and_reviewed_pass_record()
+        before = copy.deepcopy(record)
+        validate_mission_record(record)
+        self.assertEqual(record, before)
+
+    def test_el_registro_de_entrada_no_se_muta_ni_cuando_es_estructuralmente_invalido(self):
+        record = _minimal_intake_record()
+        del record["intent"]
+        before = copy.deepcopy(record)
+        validate_mission_record(record)
+        self.assertEqual(record, before)
+
+    def test_registro_malformado_no_lanza_excepcion_en_capa_estructural(self):
+        for bad_input in (None, ["not", "a", "dict"], "a string", 42, {"totally": "wrong"}):
+            result = validate_mission_record(bad_input)
+            self.assertFalse(result.valid)
+            self.assertGreater(len(result.errors), 0)
+
+
+class PruebaCompletedSinEvidencia(unittest.TestCase):
+    def test_completed_sin_merge(self):
+        record = _built_and_reviewed_pass_record()
+        record["state"] = "COMPLETED"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+    def test_completed_con_merge_pero_sin_verificacion_de_deploy(self):
+        record = _completed_record()
+        record["deploy"]["deploy_confirmed_at"] = None
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+
+class PruebaConsistenciaDeHistorialDeEstado(unittest.TestCase):
+    def test_state_no_coincide_con_ultimo_state_history(self):
+        record = _authorized_record()
+        record["state"] = "BUILDING"  # pero state_history[-1].to_state sigue siendo AUTHORIZED
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_MISMATCH_WITH_HISTORY", error_codes(result))
+
+    def test_transicion_ilegal_en_el_historial(self):
+        record = _minimal_intake_record()
+        record["state"] = "COMPLETED"
+        record["state_history"].append(
+            {"from_state": "INTAKE", "to_state": "COMPLETED", "at": "2026-08-19T12:01:00Z", "actor": "chugel", "reason": "salto ilegal"}
+        )
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("ILLEGAL_STATE_TRANSITION", error_codes(result))
+
+
+class PruebaConsistenciaDeGates(unittest.TestCase):
+    def test_gate_aprobado_sin_evidencia_de_jose(self):
+        # Con la capa estructural (Part A) conectada, un gate "approved"
+        # con evidencia nula viola el schema (decided_at/decision_ref/
+        # approved_for no pueden ser null bajo el status "approved") --
+        # se rechaza en la capa estructural, antes de la cross-field.
+        record = _minimal_intake_record()
+        record["human_gates"]["merge_authorization"] = {
+            "status": "approved", "requested_at": None, "decided_at": None,
+            "decided_by": None, "decision_ref": None, "approved_for": None,
+        }
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+    def test_gate_pending_con_decision_ya_registrada_es_contradictorio(self):
+        record = _minimal_intake_record()
+        record["human_gates"]["scope_authorization"] = {
+            "status": "pending", "requested_at": "2026-08-19T12:00:00Z",
+            "decided_by": "jose", "decided_at": "2026-08-19T12:05:00Z",
+            "decision_ref": "audit:1", "approved_for": {"mission_definition_version": 1},
+        }
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("GATE_CONTRADICTORY_METADATA", error_codes(result))
+
+    def test_gate_rejected_con_evidencia_parcial_es_contradictorio(self):
+        record = _minimal_intake_record()
+        record["human_gates"]["scope_authorization"] = {
+            "status": "rejected", "requested_at": "2026-08-19T12:00:00Z",
+            "decided_by": "jose", "decided_at": None,
+            "decision_ref": None, "approved_for": None,
+        }
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("GATE_CONTRADICTORY_METADATA", error_codes(result))
+
+    def test_decided_by_nunca_puede_ser_un_agente(self):
+        # Con la capa estructural (Part A) conectada, human_gates.*.
+        # decided_by ya está tipado en el schema como anyOf[null, const:
+        # "jose"] -- "emilio" se rechaza en la capa estructural.
+        record = _minimal_intake_record()
+        record["human_gates"]["scope_authorization"]["decided_by"] = "emilio"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+
+class PruebaRegistrosMalformados(unittest.TestCase):
+    def test_estado_desconocido(self):
+        # Con la capa estructural (Part A) conectada, "state" ya está
+        # tipado como enum en el schema -- un valor fuera del vocabulario
+        # se rechaza en la capa estructural (SCHEMA_ENUM_VIOLATION), antes
+        # de que la capa cross-field (UNKNOWN_STATE) llegue a correr.
+        record = _minimal_intake_record()
+        record["state"] = "DOING_STUFF"
+        record["state_history"][-1]["to_state"] = "DOING_STUFF"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_ENUM_VIOLATION", error_codes(result))
+
+    def test_registro_no_es_un_objeto(self):
+        # El schema exige "type": "object" en la raíz -- una lista se
+        # rechaza en la capa estructural, nunca llega a la cross-field.
+        result = validate_mission_record(["not", "a", "dict"])
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_TYPE_VIOLATION", error_codes(result))
+
+    def test_registro_none_no_lanza_excepcion(self):
+        result = validate_mission_record(None)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_TYPE_VIOLATION", error_codes(result))
+
+    def test_falta_human_gates_por_completo(self):
+        # human_gates es un campo requerido en el schema -- su ausencia se
+        # rechaza en la capa estructural (SCHEMA_REQUIRED_VIOLATION), un
+        # código más específico que el MALFORMED_RECORD genérico que
+        # producía la capa cross-field antes de que existiera esta capa.
+        record = _minimal_intake_record()
+        del record["human_gates"]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_REQUIRED_VIOLATION", error_codes(result))
+
+    def test_schema_version_no_soportada(self):
+        record = _minimal_intake_record()
+        record["schema_version"] = "2.0.0"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("UNSUPPORTED_SCHEMA_VERSION", error_codes(result))
+
+    def test_registro_profundamente_roto_no_lanza_excepcion(self):
+        # Un caso adversarial deliberadamente feo: casi todo con la forma
+        # equivocada. El validador debe devolver errores, nunca reventar.
+        result = validate_mission_record({"schema_version": None, "state": 123, "human_gates": "not-a-dict"})
+        self.assertFalse(result.valid)
+        self.assertGreater(len(result.errors), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
