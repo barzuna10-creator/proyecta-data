@@ -8,6 +8,7 @@ import signal
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -48,8 +49,68 @@ import eventos as _eventos
 # simplemente espera su turno (ProcessPoolExecutor ya encola eso solo) --
 # lo que nunca espera es el resto de la aplicación, que es el requisito
 # real.
+#
+# LIMITE_MEMORIA_WORKER_BYTES (Mission #002, protección de memoria del
+# worker): tres incidentes reales confirmados (Events log de Render,
+# "Ran out of memory (used over 512MB)") muestran que sin un techo
+# propio, un plano suficientemente grande/denso hace crecer el proceso
+# hijo lo bastante como para tumbar el CONTENEDOR ENTERO -- el límite de
+# memoria de Render es por contenedor, no por proceso, así que esto no
+# es solo "este análisis falla", es "toda la app se cae para todos".
+#
+# 300 MiB de default: 512 MiB confirmado del contenedor (cgroup v2,
+# medido) - 72.6 MiB confirmado de RSS en reposo del proceso principal
+# (medido) - ~50 MiB de margen para crecimiento del principal bajo carga
+# - ~90 MiB de margen para overhead de cgroup/SO y colchón de seguridad
+# (estimados, no medidos -- no hay forma de medirlos sin instrumentación
+# que hoy no existe). Deliberadamente por debajo de lo que ya se sabe
+# que necesitan los planos reales que dispararon los incidentes (sus
+# picos, aunque no medidos en Linux por la razón de arriba, superaron
+# 512MB combinados en los tres casos) -- el objetivo de este límite NO
+# es lograr que esos planos se analicen con éxito, es que fallen limpio
+# (MemoryError, ver _completar_analisis_plano) en vez de tumbar el
+# contenedor. Configurable por variable de entorno para poder ajustarlo
+# sin redeploy si datos reales futuros (worker_vmrss_kb/worker_vmhwm_kb,
+# ver _medir_pico_memoria_worker) sugieren un valor distinto.
+LIMITE_MEMORIA_WORKER_BYTES = int(os.environ.get("LIMITE_MEMORIA_WORKER_BYTES", 300 * 1024 * 1024))
+
+
+def _inicializar_worker_planos():
+    """Initializer de ProcessPoolExecutor -- corre UNA VEZ dentro de cada
+    proceso worker (después del spawn, antes de aceptar cualquier
+    tarea), tanto para el worker original como para cualquier reemplazo
+    que arme _reciclar_executor_planos(). Le impone a ESE proceso (no al
+    principal) el techo de LIMITE_MEMORIA_WORKER_BYTES vía RLIMIT_AS.
+
+    RLIMIT_AS acota el espacio de direcciones virtual, no RSS
+    directamente -- para este tipo de carga (buffers grandes al leer un
+    PDF) ambos suelen crecer juntos lo suficiente en la práctica como
+    para que un exceso se traduzca en una asignación fallida (MemoryError
+    limpio y capturable en Python, ver _completar_analisis_plano) en vez
+    de que el kernel mate el proceso directo sin darle a Python ninguna
+    chance de reaccionar.
+
+    POSIX únicamente -- el módulo resource no existe en Windows, y no
+    todas las plataformas POSIX aplican RLIMIT_AS con la misma fuerza
+    (verificado: en este entorno de desarrollo local, setrlimit ya falla
+    con ValueError incluso pidiendo un límite menor al actual -- Linux/
+    Render es la plataforma real donde esto tiene que funcionar). Por
+    eso el try/except es deliberadamente amplio: en cualquier plataforma
+    o condición donde esto no se pueda aplicar, el peor caso es NO tener
+    el techo -- nunca impedir que el worker arranque."""
+    try:
+        import resource
+        resource.setrlimit(
+            resource.RLIMIT_AS, (LIMITE_MEMORIA_WORKER_BYTES, LIMITE_MEMORIA_WORKER_BYTES)
+        )
+    except Exception as error:
+        _logger.warning(f"ANALISIS_PLANO no_se_pudo_limitar_memoria_worker causa={type(error).__name__}")
+
+
 _CONTEXTO_PROCESOS = multiprocessing.get_context("spawn")
-_EXECUTOR_PLANOS = ProcessPoolExecutor(max_workers=1, mp_context=_CONTEXTO_PROCESOS)
+_EXECUTOR_PLANOS = ProcessPoolExecutor(
+    max_workers=1, mp_context=_CONTEXTO_PROCESOS, initializer=_inicializar_worker_planos
+)
 _LOCK_EXECUTOR_PLANOS = threading.Lock()
 
 # Mission #002 (Plan Processing Stability): verificado directo contra
@@ -63,6 +124,10 @@ TIMEOUT_ANALISIS_SEGUNDOS = 120
 MENSAJE_ERROR_GENERICO = "No se pudo leer el PDF. Verificá que no esté dañado o protegido."
 MENSAJE_ERROR_TIMEOUT = "El análisis tardó demasiado. Probá con un archivo más liviano o contactá soporte."
 MENSAJE_ERROR_INTERRUPCION = "El proceso se interrumpió (reinicio del servidor). Subí el plano de nuevo."
+MENSAJE_ERROR_MEMORIA_INSUFICIENTE = (
+    "Este plano es demasiado grande o complejo para analizarse automáticamente. "
+    "Probá con un PDF más liviano (menos imágenes o capas) o dividilo en partes."
+)
 
 
 class AnalisisPlanoEnCurso(Exception):
@@ -133,7 +198,9 @@ def _reciclar_executor_planos():
             except Exception:
                 _logger.exception(f"ANALISIS_PLANO no_se_pudo_matar_worker pid={pid}")
 
-        _EXECUTOR_PLANOS = ProcessPoolExecutor(max_workers=1, mp_context=_CONTEXTO_PROCESOS)
+        _EXECUTOR_PLANOS = ProcessPoolExecutor(
+            max_workers=1, mp_context=_CONTEXTO_PROCESOS, initializer=_inicializar_worker_planos
+        )
 
 
 def apagar_executor_planos():
@@ -1609,7 +1676,48 @@ def iniciar_analisis_plano(proyecto_id, propietario_id, ruta_pdf, nombre_archivo
     # forma propia de saber cuándo arrancó este intento en particular.
     inicio = time.perf_counter()
 
-    future = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf)
+    # BrokenProcessPool acá significa que el worker que iba a tomar ESTE
+    # trabajo ya estaba muerto (ej. un análisis anterior lo tumbó con un
+    # kill más duro que un MemoryError limpio) -- sin este manejo,
+    # _EXECUTOR_PLANOS queda roto para SIEMPRE (todo submit() futuro
+    # vuelve a fallar igual), tumbando cualquier subida de cualquier
+    # usuario hasta el próximo restart del proceso. Un solo reintento
+    # tras reciclar (mismo _reciclar_executor_planos ya usado por el
+    # watchdog de timeout) alcanza: si el pool nuevo también se rompe de
+    # entrada, hay algo más estructuralmente mal, y ahí sí se abandona en
+    # vez de reintentar sin límite.
+    try:
+        future = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf)
+    except BrokenProcessPool:
+        _logger.warning(
+            f"ANALISIS_PLANO pool_roto_en_submit proyecto_id={proyecto_id} token={token} "
+            "-- reciclando y reintentando"
+        )
+        _reciclar_executor_planos()
+        try:
+            future = _EXECUTOR_PLANOS.submit(_procesar_plano_pdf, ruta_pdf)
+        except BrokenProcessPool:
+            _logger.exception(
+                f"ANALISIS_PLANO pool_roto_tras_reciclar proyecto_id={proyecto_id} token={token}"
+            )
+            # El proyecto ya quedó en 'procesando' (ver arriba) y el
+            # watchdog todavía no se armó -- sin este UPDATE quedaría
+            # colgado ahí para siempre, sin ningún mecanismo que lo
+            # recupere hasta el próximo restart del proceso.
+            conexion_fallo = conectar()
+            try:
+                conexion_fallo.execute(
+                    """
+                    UPDATE proyectos SET plano_estado = 'error', plano_error_mensaje = ?
+                    WHERE id = ? AND plano_procesamiento_id = ?
+                    """,
+                    (MENSAJE_ERROR_MEMORIA_INSUFICIENTE, proyecto_id, token),
+                )
+                conexion_fallo.commit()
+            finally:
+                conexion_fallo.close()
+            raise
+
     # Armar el watchdog ANTES de enganchar el callback -- si el future ya
     # está resuelto en el momento de add_done_callback() (nunca pasa en
     # producción, donde el trabajo real siempre tarda; sí puede pasar con
@@ -1708,6 +1816,18 @@ def _completar_analisis_plano(proyecto_id, token, nombre_archivo, tamano_bytes, 
         except Exception as error:
             duracion_ms = round((time.perf_counter() - inicio) * 1000, 1)
             memoria_worker = _medir_pico_memoria_worker() or {}
+            # MemoryError: el worker chocó con LIMITE_MEMORIA_WORKER_BYTES
+            # (RLIMIT_AS) y Python pudo capturarlo limpio. BrokenProcessPool:
+            # el proceso murió más duro que eso (ej. el propio kernel lo
+            # mató) -- para el usuario, ambos casos significan lo mismo
+            # ("este plano necesitaba más memoria de la disponible"), así
+            # que comparten el mismo mensaje específico, distinto del
+            # genérico de "PDF dañado o protegido".
+            mensaje_error = (
+                MENSAJE_ERROR_MEMORIA_INSUFICIENTE
+                if isinstance(error, (MemoryError, BrokenProcessPool))
+                else MENSAJE_ERROR_GENERICO
+            )
             _logger.exception(
                 f"ANALISIS_PLANO fallo proyecto_id={proyecto_id} token={token} "
                 f"tamano_bytes={tamano_bytes} duracion_ms={duracion_ms} "
@@ -1720,7 +1840,7 @@ def _completar_analisis_plano(proyecto_id, token, nombre_archivo, tamano_bytes, 
                 UPDATE proyectos SET plano_estado = 'error', plano_error_mensaje = ?
                 WHERE id = ? AND plano_procesamiento_id = ?
                 """,
-                (MENSAJE_ERROR_GENERICO, proyecto_id, token),
+                (mensaje_error, proyecto_id, token),
             )
             conexion.commit()
             return
