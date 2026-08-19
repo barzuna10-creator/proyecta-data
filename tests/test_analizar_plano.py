@@ -363,6 +363,115 @@ class PruebaLoggingIncidenteMemoria(unittest.TestCase):
         self.assertEqual(proyecto_ok["plano_estado"], "listo")
 
 
+class PruebaMedicionMemoriaWorker(unittest.TestCase):
+    """Instrumentación read-only de calibración (Mission #002, fase 1 --
+    ver RUNBOOK_MEDICION_MEMORIA_RENDER.md): _leer_pico_memoria_desde_
+    status() se prueba con el formato real de /proc/<pid>/status (mismo
+    formato verificado a mano contra el proceso principal en Render el
+    2026-08-19 -- VmRSS/VmHWM en KB), y _medir_pico_memoria_worker() se
+    prueba solo por su resiliencia: en cualquier entorno sin /proc real
+    (como esta suite, que corre en macOS/CI, no en el contenedor de
+    Render) debe devolver None sin lanzar nunca -- ni siquiera en el peor
+    caso (executor sin _processes, PID inexistente, permiso denegado)."""
+
+    def test_parsea_vmrss_y_vmhwm_del_formato_real_de_proc_status(self):
+        contenido = (
+            "Name:\tpython3.14\n"
+            "State:\tS (sleeping)\n"
+            "VmPeak:\t  222328 kB\n"
+            "VmSize:\t  222264 kB\n"
+            "VmHWM:\t   74304 kB\n"
+            "VmRSS:\t   74304 kB\n"
+            "Threads:\t3\n"
+        )
+        resultado = repo._leer_pico_memoria_desde_status(contenido)
+        self.assertEqual(resultado, {"VmHWM": 74304, "VmRSS": 74304})
+
+    def test_contenido_sin_los_campos_esperados_devuelve_none(self):
+        contenido = "Name:\tpython3.14\nState:\tS (sleeping)\n"
+        self.assertIsNone(repo._leer_pico_memoria_desde_status(contenido))
+
+    def test_contenido_vacio_devuelve_none(self):
+        self.assertIsNone(repo._leer_pico_memoria_desde_status(""))
+
+    def test_sin_processes_en_el_executor_devuelve_none_sin_lanzar(self):
+        executor_falso = mock.MagicMock(spec=[])  # sin _processes -- getattr cae al default {}
+        with mock.patch.object(repo, "_EXECUTOR_PLANOS", executor_falso):
+            self.assertIsNone(repo._medir_pico_memoria_worker())
+
+    def test_processes_vacio_devuelve_none_sin_lanzar(self):
+        executor_falso = mock.MagicMock()
+        executor_falso._processes = {}
+        with mock.patch.object(repo, "_EXECUTOR_PLANOS", executor_falso):
+            self.assertIsNone(repo._medir_pico_memoria_worker())
+
+    def test_pid_inexistente_devuelve_none_sin_lanzar(self):
+        proceso_falso = mock.MagicMock()
+        proceso_falso.pid = 999999999  # PID casi con certeza inexistente
+        executor_falso = mock.MagicMock()
+        executor_falso._processes = {1: proceso_falso}
+        with mock.patch.object(repo, "_EXECUTOR_PLANOS", executor_falso):
+            self.assertIsNone(repo._medir_pico_memoria_worker())
+
+    def test_leer_el_proc_status_da_una_medicion_real_si_esta_disponible(self):
+        # No asume Linux -- si /proc no existe (macOS/CI), sigue siendo
+        # None, y eso también es un resultado válido de esta prueba: la
+        # instrumentación nunca debe romper nada, tenga o no datos.
+        proceso_falso = mock.MagicMock()
+        proceso_falso.pid = os.getpid()
+        executor_falso = mock.MagicMock()
+        executor_falso._processes = {1: proceso_falso}
+        with mock.patch.object(repo, "_EXECUTOR_PLANOS", executor_falso):
+            resultado = repo._medir_pico_memoria_worker()
+        if resultado is not None:
+            self.assertIn("VmRSS", resultado)
+
+
+class PruebaLogIncluyeMedicionDeMemoria(unittest.TestCase):
+    """El log ANALISIS_PLANO (éxito y fallo) ahora incluye
+    worker_vmrss_kb/worker_vmhwm_kb -- en esta suite (sin /proc real)
+    siempre salen None, y eso es exactamente lo que se prueba: el campo
+    está presente y nunca inventa un valor cuando no hay dato real."""
+
+    PROPIETARIO = "propietario-plano-medicion-memoria"
+
+    def setUp(self):
+        self.ruta_db = _crear_db_temporal()
+        import db
+        self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
+        self._patch_db.start()
+        self.proyecto = crear_proyecto(self.PROPIETARIO, "Proyecto con plano")
+
+    def tearDown(self):
+        self._patch_db.stop()
+        os.remove(self.ruta_db)
+
+    def test_log_de_exito_incluye_campos_de_memoria_del_worker(self):
+        parche, futuro = _mockear_executor(resultado=ANALISIS_DE_PRUEBA)
+        try:
+            with self.assertLogs("proyecta_api", level="INFO") as registro:
+                analizar_plano_sincrono(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "planos.pdf")
+        finally:
+            parche.stop()
+
+        linea = next(linea for linea in registro.output if "ANALISIS_PLANO completado" in linea)
+        self.assertIn("worker_vmrss_kb=", linea)
+        self.assertIn("worker_vmhwm_kb=", linea)
+
+    def test_log_de_fallo_incluye_campos_de_memoria_del_worker(self):
+        parche, futuro = _mockear_executor(excepcion=ValueError("boom"))
+        try:
+            with self.assertLogs("proyecta_api", level="INFO") as registro:
+                with self.assertRaises(ValueError):
+                    analizar_plano_sincrono(self.proyecto["id"], self.PROPIETARIO, "/tmp/no-importa.pdf", "malo.pdf")
+        finally:
+            parche.stop()
+
+        linea = next(linea for linea in registro.output if "ANALISIS_PLANO fallo" in linea)
+        self.assertIn("worker_vmrss_kb=", linea)
+        self.assertIn("worker_vmhwm_kb=", linea)
+
+
 class PruebaFlujoAsincronico(unittest.TestCase):
     """asincronico=True (ver api/routers/proyectos.py) -- iniciar_analisis_
     plano() nunca bloquea, el estado se consulta por separado."""
