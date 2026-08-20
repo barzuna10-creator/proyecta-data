@@ -216,6 +216,52 @@ uses a materially different unsupported-keyword set:**
     affect `orchestrator/validator.py`'s independently-loaded
     `Draft7Validator`, which remains the sole structural-enforcement layer
     before any evidence is persisted.
+
+**Corrective cycle (Increment #16, Codex `$ref` sibling-keyword HTTP 400)
+-- closes a second, distinct real failure a bounded isolated smoke test
+produced after points 9-12 above were already applied and authentication
+again confirmed `apiKey`: `invalid_request_error / invalid_json_schema:
+Invalid schema for response_format 'codex_output_schema':
+context=('properties', 'conclusion'), $ref cannot have keywords
+{'description'}.` -- confirmed against the exact reconstructed
+provider-facing schema, not assumed:**
+
+13. **Every `$ref` node in the returned projection now has `$ref` as its
+    only key.** Root cause, confirmed by direct reconstruction: the
+    canonical `builder_evidence_entry.properties.conclusion` node is
+    `{"description": "...", "$ref": "#/$defs/labeled_claim"}` --
+    OpenAI's structured-outputs feature rejects any sibling keyword
+    alongside `$ref` (the real error's `{'description'}` set-literal
+    phrasing is itself evidence the underlying rule is general, not
+    specific to `description` -- official documentation is silent on this
+    exact point, so this fix deliberately does **not** special-case
+    `description`: `_strip_ref_sibling_keywords()` removes *every* other
+    key from any node that has `$ref`, whatever that key's name is,
+    leaving the `$ref` value itself untouched). Enumerating every `$ref`
+    node reachable from both `builder_evidence_entry` and
+    `reviewer_evidence_entry` in the canonical schema found exactly one
+    node with any sibling at all (the `conclusion` node above) -- the
+    reviewer path currently has none, consistent with Emma's own real
+    Claude smoke test already having succeeded, but this fix applies
+    uniformly to both roles so a future canonical-schema edit can't
+    silently reintroduce the same class of failure undetected.
+14. **This pass runs last**, after reachability pruning, root promotion,
+    the `definitions`-to-`$defs` `$ref` rewrite, and
+    `_strip_codex_unsupported_keywords()` -- none of those three earlier
+    passes touch a `$ref` node's sibling keys, so ordering among them is
+    commutative, but running this pass last makes it the final,
+    authoritative guarantee that every `$ref` node in what's actually
+    returned has no siblings, regardless of what any earlier pass left
+    behind.
+15. **Stripping a sibling `description` changes only provider-facing
+    annotation, never validation semantics.** `description` (and any
+    other keyword this pass might remove) is a pure JSON Schema
+    documentation/metadata keyword in every draft -- it has never
+    affected structural validation. The referenced definition's own
+    `type`/`required`/etc. constraints are carried entirely by the `$ref`
+    target itself, untouched by this pass. `orchestrator/validator.py`'s
+    independent `Draft7Validator` is unaffected for the same structural
+    reason as points 9-12 above.
 """
 
 from __future__ import annotations
@@ -338,10 +384,25 @@ def _strip_codex_unsupported_keywords(node: object) -> object:
     return node
 
 
+def _strip_ref_sibling_keywords(node: object) -> object:
+    """Returns a new structure where every dict containing `$ref` has
+    `$ref` as its *only* key -- every other sibling key on that same node
+    is removed, whatever its name (module docstring point 13; not
+    special-cased to `description`). The `$ref` value itself is never
+    modified. Never mutates `node`."""
+    if isinstance(node, dict):
+        if "$ref" in node:
+            return {"$ref": node["$ref"]}
+        return {key: _strip_ref_sibling_keywords(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_strip_ref_sibling_keywords(item) for item in node]
+    return node
+
+
 def _load_evidence_schema(agent_role: str) -> dict:
     """Returns a provider-facing *projection* of the role's evidence
     entry, apt for OpenAI's structured-outputs feature -- not the
-    canonical schema itself (module docstring points 9-11). Reads a
+    canonical schema itself (module docstring points 9-13). Reads a
     fresh, independent copy of `mission_record.schema.json` on every call
     (never cached, never shared with `orchestrator/validator.py`'s own
     separately-loaded canonical schema object). Restricts the definitions
@@ -349,15 +410,17 @@ def _load_evidence_schema(agent_role: str) -> dict:
     requested entry, excluding the entry itself (which is promoted to the
     returned dict's root instead of staying behind a `$ref`), renames the
     container from `definitions` to `$defs` and rewrites every retained
-    `$ref` accordingly, and recursively strips
-    `_CODEX_UNSUPPORTED_KEYWORDS` -- a deliberately different set from
-    `claude_adapter.py`'s equivalent (module docstring point 10). The
-    canonical file on disk, and `orchestrator/validator.py`'s independent
-    `Draft7Validator`, are never touched (module docstring point 12). This
-    duplicates schema-projection logic conceptually similar to
-    claude_adapter.py's, kept local and Codex-specific per this
-    increment's own authorization (module docstring point 11) rather than
-    factored into a shared module."""
+    `$ref` accordingly, recursively strips `_CODEX_UNSUPPORTED_KEYWORDS`
+    -- a deliberately different set from `claude_adapter.py`'s equivalent
+    (module docstring point 10) -- and finally, as the last pass (module
+    docstring point 14), strips every sibling key from any `$ref` node so
+    `$ref` is always that node's sole key. The canonical file on disk, and
+    `orchestrator/validator.py`'s independent `Draft7Validator`, are never
+    touched (module docstring points 12, 15). This duplicates
+    schema-projection logic conceptually similar to claude_adapter.py's,
+    kept local and Codex-specific per this increment's own authorization
+    (module docstring point 11) rather than factored into a shared
+    module."""
     with open(_SCHEMA_PATH, encoding="utf-8") as f:
         full_schema = json.load(f)
     entry_name = _EVIDENCE_ENTRY_NAME[agent_role]
@@ -373,7 +436,8 @@ def _load_evidence_schema(agent_role: str) -> dict:
         "$defs": other_definitions,
     }
     projected = _rewrite_definitions_refs_to_defs(projected)
-    return _strip_codex_unsupported_keywords(projected)
+    projected = _strip_codex_unsupported_keywords(projected)
+    return _strip_ref_sibling_keywords(projected)
 
 
 def _inspect_file_backend() -> str | None:

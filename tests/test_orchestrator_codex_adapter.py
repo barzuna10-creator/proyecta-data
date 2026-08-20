@@ -909,5 +909,143 @@ class PruebaProyeccionDeEsquemaParaCodex(CodexAdapterTestCase):
         self.assertEqual(schema.get("type"), "object")
 
 
+def _find_ref_nodes(node, path="root"):
+    """Test-local, independent walker (deliberately not reusing the
+    adapter's own `_strip_ref_sibling_keywords`) -- returns
+    (path, sorted_keys) for every dict containing `$ref` found anywhere
+    inside `node`."""
+    hits = []
+    if isinstance(node, dict):
+        if "$ref" in node:
+            hits.append((path, sorted(node.keys())))
+        for k, v in node.items():
+            hits.extend(_find_ref_nodes(v, f"{path}.{k}"))
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            hits.extend(_find_ref_nodes(item, f"{path}[{i}]"))
+    return hits
+
+
+class PruebaEliminacionDeHermanosDeRef(CodexAdapterTestCase):
+    """Incremento #16, ciclo correctivo del segundo HTTP 400 de Codex --
+    cierra el hallazgo real confirmado (`invalid_request_error /
+    invalid_json_schema: ... $ref cannot have keywords {'description'}`)
+    tras un smoke test real aislado que autenticó correctamente y aceptó
+    la estructura `$defs`, pero rechazó `properties.conclusion` por tener
+    `description` como hermano de `$ref`. `_strip_ref_sibling_keywords()`
+    elimina TODO hermano de cualquier nodo `$ref`, sin distinguir por
+    nombre de clave -- estas pruebas verifican explícitamente que no está
+    limitado a `description`."""
+
+    def test_ref_con_description_se_reduce_a_solo_ref(self):
+        """Reproduce exactamente la forma real confirmada por la API."""
+        node = {"$ref": "#/$defs/labeled_claim", "description": "algo de contexto"}
+        result = self.coa._strip_ref_sibling_keywords(node)
+        self.assertEqual(result, {"$ref": "#/$defs/labeled_claim"})
+
+    def test_ref_con_otro_hermano_distinto_de_description_tambien_se_reduce(self):
+        """No debe estar limitado a 'description' -- un hermano sintético
+        distinto (`title`) también debe eliminarse, probando que la regla
+        implementada es general, no un caso especial."""
+        node = {"$ref": "#/$defs/sha", "title": "algo"}
+        result = self.coa._strip_ref_sibling_keywords(node)
+        self.assertEqual(result, {"$ref": "#/$defs/sha"})
+
+    def test_ref_con_multiples_hermanos_se_reduce_a_solo_ref(self):
+        node = {"$ref": "#/$defs/sha", "title": "x", "default": "y", "description": "z"}
+        result = self.coa._strip_ref_sibling_keywords(node)
+        self.assertEqual(result, {"$ref": "#/$defs/sha"})
+
+    def test_ref_sin_hermanos_no_se_modifica(self):
+        node = {"$ref": "#/$defs/sha"}
+        result = self.coa._strip_ref_sibling_keywords(node)
+        self.assertEqual(result, {"$ref": "#/$defs/sha"})
+
+    def test_conclusion_real_de_builder_es_exactamente_solo_ref(self):
+        """El nodo real que produjo el fallo confirmado
+        (`builder_evidence_entry.properties.conclusion`) debe quedar
+        reducido exactamente a `{"$ref": "#/$defs/labeled_claim"}`."""
+        schema = self.coa._load_evidence_schema("emilio")
+        self.assertEqual(schema["properties"]["conclusion"], {"$ref": "#/$defs/labeled_claim"})
+
+    def test_todo_nodo_ref_tiene_exactamente_una_clave_en_builder_y_reviewer(self):
+        for role in ("emilio", "emma"):
+            schema = self.coa._load_evidence_schema(role)
+            nodes = _find_ref_nodes(schema)
+            self.assertTrue(nodes, msg=f"role={role}: expected at least one $ref node")
+            bad = [n for n in nodes if n[1] != ["$ref"]]
+            self.assertEqual(bad, [], msg=f"role={role}")
+
+    def test_todo_ref_target_sigue_resolviendo_tras_la_eliminacion_de_hermanos(self):
+        for role in ("emilio", "emma"):
+            schema = self.coa._load_evidence_schema(role)
+            refs = _codex_find_refs(schema)
+            targets = {r.rsplit("/", 1)[-1] for r in refs}
+            dangling = targets - set(schema["$defs"].keys())
+            self.assertEqual(dangling, set(), msg=f"role={role}")
+
+    def test_stripping_de_palabras_clave_no_soportadas_sigue_intacto(self):
+        """El nuevo paso no debe interferir con el filtrado ya aprobado de
+        if/then/else/allOf/not/dependentRequired/dependentSchemas."""
+        unsupported = {"if", "then", "else", "allOf", "not", "dependentRequired", "dependentSchemas"}
+        for role in ("emilio", "emma"):
+            schema = self.coa._load_evidence_schema(role)
+            self.assertEqual(_codex_find_keys(schema, unsupported), [], msg=f"role={role}")
+
+    def test_restricciones_soportadas_siguen_intactas(self):
+        """El nuevo paso no debe eliminar minLength/minimum/pattern/etc.,
+        que sí están soportados por Codex para modelos estándar."""
+        schema = self.coa._load_evidence_schema("emilio")
+        survivors = _codex_find_keys(
+            schema, {"minLength", "minimum", "pattern", "anyOf", "enum", "additionalProperties"}
+        )
+        self.assertIn("minLength", survivors)
+        self.assertIn("anyOf", survivors)
+        self.assertIn("additionalProperties", survivors)
+
+    def test_archivo_canonico_sigue_identico_tras_la_eliminacion_de_hermanos(self):
+        import hashlib
+
+        path = self._canonical_schema_path_helper()
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.coa._load_evidence_schema("emilio")
+        self.coa._load_evidence_schema("emma")
+        after = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(before, after)
+
+    def _canonical_schema_path_helper(self):
+        return Path(self.coa.__file__).resolve().parent.parent / "schemas" / "mission_record.schema.json"
+
+    def test_build_options_recibe_la_proyeccion_corregida(self):
+        """El único llamador real -- `_run()`, vía
+        `thread.run(..., output_schema=schema)` -- expone la proyección
+        ya sin hermanos de `$ref`, no el esquema previo (con
+        `description` aún presente en `conclusion`)."""
+        thread = self._fake_sdk.Thread(
+            id="t-1",
+            turn_result=self._fake_sdk.TurnResult(
+                status=self._fake_sdk.TurnStatus.completed, final_response=json.dumps({"attempt": 0})
+            ),
+        )
+        with self._patch_thread_start(thread):
+            adapter = self.coa.CodexAdapter()
+            adapter.invoke(self._request(agent_role="emilio"))
+        sent_schema = thread.last_kwargs["output_schema"]
+        self.assertEqual(sent_schema["properties"]["conclusion"], {"$ref": "#/$defs/labeled_claim"})
+        nodes = _find_ref_nodes(sent_schema)
+        bad = [n for n in nodes if n[1] != ["$ref"]]
+        self.assertEqual(bad, [])
+
+    def test_regresion_del_fallo_real_confirmado_ref_no_puede_tener_description(self):
+        """Prueba de regresión dirigida al segundo fallo real confirmado:
+        `invalid_request_error / invalid_json_schema: Invalid schema for
+        response_format 'codex_output_schema': context=('properties',
+        'conclusion'), $ref cannot have keywords {'description'}.`"""
+        schema = self.coa._load_evidence_schema("emilio")
+        conclusion = schema["properties"]["conclusion"]
+        self.assertEqual(set(conclusion.keys()), {"$ref"})
+        self.assertNotIn("description", conclusion)
+
+
 if __name__ == "__main__":
     unittest.main()
