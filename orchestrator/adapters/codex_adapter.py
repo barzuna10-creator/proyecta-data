@@ -156,6 +156,66 @@ Remaining disclosures, still true after these corrections:
   `Sandbox.read_only` for Emma) reconfirmed by direct introspection this
   correction (`Sandbox.read_only`/`Sandbox.workspace_write`/
   `Sandbox.full_access` all present).
+
+**Corrective cycle (Increment #16, Codex structured-output HTTP 400) --
+closes the confirmed real failure a bounded isolated smoke test produced
+after Emilio's dedicated Keychain-backed OpenAI credential path was
+provisioned and authenticated successfully (`account().root.type ==
+"apiKey"` was confirmed active): `invalid_request_error /
+invalid_json_schema: Invalid schema for response_format
+'codex_output_schema': In context=(), 'if' is not permitted.` --
+confirmed against current official OpenAI Structured Outputs
+documentation, not assumed identical to Claude's already-fixed
+equivalent (`claude_adapter.py`'s own `_load_evidence_schema()`), which
+uses a materially different unsupported-keyword set:**
+
+9. **`_load_evidence_schema()` now returns a provider-facing projection**,
+   not the canonical schema verbatim. Root cause: the prior version
+   inlined all 13 canonical definitions unfiltered, with the requested
+   entry left behind a root-level `$ref` and no `type` at the root --
+   OpenAI's own documentation states the root schema object "must be an
+   object, and not use anyOf" (no root-level indirection permitted),
+   matching Anthropic's equivalent requirement. This adapter now: (a)
+   computes the `$ref`-reachability closure from the requested entry and
+   retains only those definitions; (b) promotes the requested entry's own
+   schema body (`type`, `properties`, `required`, `additionalProperties`,
+   etc.) directly to the returned dict's root, so the entry is no longer
+   referenced via `$ref` at all and no longer belongs in the definitions
+   container; (c) uses `$defs` as the definitions container key, not
+   `definitions` -- OpenAI's own documentation and every example use
+   `$defs` exclusively; every retained `$ref` is rewritten from
+   `#/definitions/<name>` to `#/$defs/<name>` accordingly, so nothing is
+   left dangling after the rename.
+10. **The stripped-keyword set is Codex-specific, deliberately different
+    from Claude's.** OpenAI's structured-outputs documentation lists
+    `allOf`, `not`, `dependentRequired`, `dependentSchemas`, `if`, `then`,
+    `else` as universally unsupported (`allOf` is *not* on Anthropic's
+    list, and Anthropic does support it) -- these are the only keywords
+    `_CODEX_UNSUPPORTED_KEYWORDS` strips. Critically, `minLength`,
+    `maxLength`, `minimum`, `maximum`, `multipleOf`, `pattern`, `format`,
+    `minItems`, `maxItems` are documented as unsupported *only for
+    fine-tuned models* -- Codex uses standard models, so these remain
+    fully supported here and are deliberately preserved, unlike the
+    equivalent (universal, not fine-tuned-only) restriction Claude's
+    adapter enforces. Copying Claude's stripped-keyword set onto Codex
+    would have both under-stripped (missed `allOf`) and over-stripped
+    (dropped constraints OpenAI actually honors for this path) --
+    disclosed here rather than assumed identical.
+11. **No shared helper module was introduced.** This increment's own
+    authorization is explicit that the correction stay Codex-specific and
+    bounded -- the reachability/promotion/stripping logic is duplicated
+    locally in this file rather than factored out alongside
+    `claude_adapter.py`'s equivalent, matching this file's own long-
+    standing stated reason for not sharing `_load_evidence_schema()`
+    itself.
+12. **Canonical enforcement is unaffected, by the same structural
+    argument already established for `claude_adapter.py`.** This module
+    has never imported `orchestrator.validator` or `orchestrator.chugel`,
+    and reads `mission_record.schema.json` fresh via its own `json.load()`
+    on every call -- there is no code path by which this projection could
+    affect `orchestrator/validator.py`'s independently-loaded
+    `Draft7Validator`, which remains the sole structural-enforcement layer
+    before any evidence is persisted.
 """
 
 from __future__ import annotations
@@ -200,17 +260,120 @@ class CodexAdapterError(Exception):
     AgentInvocationResult, never an exception."""
 
 
+# Documented (module docstring points 9-10) as unsupported by OpenAI's
+# structured-outputs feature for standard (non-fine-tuned) models --
+# deliberately NOT the same set as claude_adapter.py's
+# _PROVIDER_UNSUPPORTED_KEYWORDS. Stripped from the provider-facing
+# projection only, never from the canonical mission_record.schema.json.
+_CODEX_UNSUPPORTED_KEYWORDS = frozenset(
+    {"if", "then", "else", "allOf", "not", "dependentRequired", "dependentSchemas"}
+)
+
+
+def _codex_refs_in(node: object) -> set[str]:
+    """Returns every `#/definitions/<name>` target `$ref`d anywhere inside
+    `node`, recursively. Read-only -- never mutates `node`. Looks for the
+    canonical file's own `#/definitions/...` pointer form, since that is
+    what's still present before this function's caller rewrites anything."""
+    found: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and value.startswith("#/definitions/"):
+                found.add(value.rsplit("/", 1)[-1])
+            else:
+                found |= _codex_refs_in(value)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _codex_refs_in(item)
+    return found
+
+
+def _codex_reachable_definitions(definitions: dict, entry_name: str) -> set[str]:
+    """Returns the transitive closure of definition names reachable from
+    `entry_name` via `$ref`, including `entry_name` itself."""
+    seen: set[str] = set()
+    frontier = {entry_name}
+    while frontier:
+        name = frontier.pop()
+        if name in seen or name not in definitions:
+            continue
+        seen.add(name)
+        frontier |= _codex_refs_in(definitions[name])
+    return seen
+
+
+def _rewrite_definitions_refs_to_defs(node: object) -> object:
+    """Returns a new structure with every `$ref` value rewritten from
+    `#/definitions/<name>` to `#/$defs/<name>` -- never mutates `node`.
+    Module docstring point 9(c): OpenAI's documented container key is
+    `$defs`, not `definitions`."""
+    if isinstance(node, dict):
+        rewritten = {}
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and value.startswith("#/definitions/"):
+                rewritten[key] = "#/$defs/" + value.rsplit("/", 1)[-1]
+            else:
+                rewritten[key] = _rewrite_definitions_refs_to_defs(value)
+        return rewritten
+    if isinstance(node, list):
+        return [_rewrite_definitions_refs_to_defs(item) for item in node]
+    return node
+
+
+def _strip_codex_unsupported_keywords(node: object) -> object:
+    """Returns a new structure with every key in
+    `_CODEX_UNSUPPORTED_KEYWORDS` removed, recursively -- never mutates
+    `node` itself. Supported constructs (`$ref`, `anyOf`, `enum`,
+    `additionalProperties`, and, for Codex specifically, `minLength`/
+    `minimum`/`pattern`/etc. -- see module docstring point 10) pass
+    through unchanged."""
+    if isinstance(node, dict):
+        return {
+            key: _strip_codex_unsupported_keywords(value)
+            for key, value in node.items()
+            if key not in _CODEX_UNSUPPORTED_KEYWORDS
+        }
+    if isinstance(node, list):
+        return [_strip_codex_unsupported_keywords(item) for item in node]
+    return node
+
+
 def _load_evidence_schema(agent_role: str) -> dict:
-    """See claude_adapter.py's identical helper for why this is
-    duplicated rather than shared."""
+    """Returns a provider-facing *projection* of the role's evidence
+    entry, apt for OpenAI's structured-outputs feature -- not the
+    canonical schema itself (module docstring points 9-11). Reads a
+    fresh, independent copy of `mission_record.schema.json` on every call
+    (never cached, never shared with `orchestrator/validator.py`'s own
+    separately-loaded canonical schema object). Restricts the definitions
+    container to exactly the `$ref`-reachability closure from the
+    requested entry, excluding the entry itself (which is promoted to the
+    returned dict's root instead of staying behind a `$ref`), renames the
+    container from `definitions` to `$defs` and rewrites every retained
+    `$ref` accordingly, and recursively strips
+    `_CODEX_UNSUPPORTED_KEYWORDS` -- a deliberately different set from
+    `claude_adapter.py`'s equivalent (module docstring point 10). The
+    canonical file on disk, and `orchestrator/validator.py`'s independent
+    `Draft7Validator`, are never touched (module docstring point 12). This
+    duplicates schema-projection logic conceptually similar to
+    claude_adapter.py's, kept local and Codex-specific per this
+    increment's own authorization (module docstring point 11) rather than
+    factored into a shared module."""
     with open(_SCHEMA_PATH, encoding="utf-8") as f:
         full_schema = json.load(f)
     entry_name = _EVIDENCE_ENTRY_NAME[agent_role]
-    return {
-        "$schema": full_schema.get("$schema", "http://json-schema.org/draft-07/schema#"),
-        "definitions": full_schema["definitions"],
-        "$ref": f"#/definitions/{entry_name}",
+    reachable = _codex_reachable_definitions(full_schema["definitions"], entry_name)
+    other_definitions = {
+        name: definition
+        for name, definition in full_schema["definitions"].items()
+        if name in reachable and name != entry_name
     }
+    projected = {
+        "$schema": full_schema.get("$schema", "http://json-schema.org/draft-07/schema#"),
+        **full_schema["definitions"][entry_name],
+        "$defs": other_definitions,
+    }
+    projected = _rewrite_definitions_refs_to_defs(projected)
+    return _strip_codex_unsupported_keywords(projected)
 
 
 def _inspect_file_backend() -> str | None:

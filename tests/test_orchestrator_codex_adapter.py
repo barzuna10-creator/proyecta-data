@@ -543,7 +543,13 @@ class PruebaCompatibilidadConSDKReal(CodexAdapterTestCase):
             adapter = self.coa.CodexAdapter()
             adapter.invoke(self._request())
         self.assertEqual(thread.run_called_count, 1)
-        self.assertIn("builder_evidence_entry", json.dumps(thread.last_kwargs["output_schema"]))
+        # Incremento #16, ciclo correctivo del HTTP 400 de Codex -- desde
+        # que la propia entrada se promueve a la raíz del esquema (sin
+        # `$ref` ni nombre de definición visible), la distinción por rol
+        # ya no puede verificarse buscando el literal "builder_evidence_entry"
+        # en el JSON serializado -- se verifica con un campo `required`
+        # exclusivo de builder_evidence_entry.
+        self.assertIn("handoff_document_ref", json.dumps(thread.last_kwargs["output_schema"]))
 
 
 class PruebaInvocacionExitosa(CodexAdapterTestCase):
@@ -698,11 +704,209 @@ class PruebaPermisosPorRol(CodexAdapterTestCase):
 
 class PruebaEsquemaDeEvidencia(CodexAdapterTestCase):
     def test_output_schema_usa_definicion_correcta_por_rol(self):
+        """Incremento #16, ciclo correctivo del HTTP 400 de Codex -- la
+        propia entrada ahora vive en la raíz (sin `$ref`, sin contenedor
+        `definitions`), así que la distinción por rol se verifica con
+        campos `required` exclusivos de cada entrada real."""
         schema_emilio = self.coa._load_evidence_schema("emilio")
         schema_emma = self.coa._load_evidence_schema("emma")
-        self.assertIn("builder_evidence_entry", schema_emilio["$ref"])
-        self.assertIn("reviewer_evidence_entry", schema_emma["$ref"])
-        self.assertIn("definitions", schema_emilio)
+        emilio_json = json.dumps(schema_emilio)
+        emma_json = json.dumps(schema_emma)
+        self.assertIn("handoff_document_ref", emilio_json)
+        self.assertNotIn("handoff_document_ref", emma_json)
+        self.assertIn("verdict", emma_json)
+        self.assertIn("blocked_reason", emma_json)
+        self.assertNotIn("blocked_reason", emilio_json)
+        self.assertNotIn("$ref", schema_emilio)
+        self.assertIn("$defs", schema_emilio)
+        self.assertNotIn("definitions", schema_emilio)
+
+
+def _codex_find_keys(node, keys):
+    """Test-local, independent tree walker (deliberately not reusing the
+    adapter's own `_strip_codex_unsupported_keywords`/`_codex_refs_in`, so
+    this assertion doesn't become circular)."""
+    hits = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in keys:
+                hits.append(k)
+            hits.extend(_codex_find_keys(v, keys))
+    elif isinstance(node, list):
+        for item in node:
+            hits.extend(_codex_find_keys(item, keys))
+    return hits
+
+
+def _codex_find_refs(node):
+    """Test-local, independent `$ref` collector -- returns the full
+    `$ref` string values found (not just the trailing name), so tests can
+    independently confirm the `#/$defs/...` prefix, not just the target
+    name."""
+    found = set()
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "$ref" and isinstance(v, str):
+                found.add(v)
+            else:
+                found |= _codex_find_refs(v)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _codex_find_refs(item)
+    return found
+
+
+class PruebaProyeccionDeEsquemaParaCodex(CodexAdapterTestCase):
+    """Incremento #16, ciclo correctivo del HTTP 400 de Codex -- cierra el
+    hallazgo real confirmado (`invalid_request_error / invalid_json_schema:
+    ... 'if' is not permitted`) tras un smoke test real aislado que
+    autenticó correctamente (`account().root.type == "apiKey"`) usando la
+    credencial dedicada de Emilio. `_load_evidence_schema()` ahora
+    devuelve una proyección apta para OpenAI: la propia entrada
+    solicitada promovida a la raíz (`type: object` directo, no detrás de
+    un `$ref`), contenedor `$defs` (no `definitions`) con solo las
+    definiciones alcanzables además de la propia entrada, cada `$ref`
+    interno reescrito a `#/$defs/...`, y únicamente las palabras clave
+    documentadas como no soportadas por OpenAI eliminadas -- un conjunto
+    deliberadamente distinto del usado para Claude (no incluye
+    minLength/minimum/pattern/etc., que sí están soportados por Codex
+    para modelos estándar)."""
+
+    _UNSUPPORTED_KEYWORDS = {"if", "then", "else", "allOf", "not", "dependentRequired", "dependentSchemas"}
+    _SUPPORTED_STANDARD_MODEL_CONSTRAINTS = {
+        "minLength", "maxLength", "minimum", "maximum", "multipleOf", "pattern", "format", "minItems", "maxItems",
+    }
+
+    def _canonical_schema_path(self):
+        return Path(self.coa.__file__).resolve().parent.parent / "schemas" / "mission_record.schema.json"
+
+    def _canonical_definitions(self):
+        with open(self._canonical_schema_path(), encoding="utf-8") as f:
+            return json.load(f)["definitions"]
+
+    def _expected_reachable(self, entry_name):
+        """Independent reachability computation (not calling the
+        adapter's own `_codex_reachable_definitions`)."""
+        definitions = self._canonical_definitions()
+        seen = set()
+        frontier = {entry_name}
+        while frontier:
+            name = frontier.pop()
+            if name in seen or name not in definitions:
+                continue
+            seen.add(name)
+            refs = set()
+            def walk(node):
+                if isinstance(node, dict):
+                    for k, v in node.items():
+                        if k == "$ref" and isinstance(v, str) and v.startswith("#/definitions/"):
+                            refs.add(v.rsplit("/", 1)[-1])
+                        else:
+                            walk(v)
+                elif isinstance(node, list):
+                    for item in node:
+                        walk(item)
+            walk(definitions[name])
+            frontier |= refs
+        return seen
+
+    def test_raiz_de_builder_es_type_object_no_ref(self):
+        schema = self.coa._load_evidence_schema("emilio")
+        self.assertEqual(schema.get("type"), "object")
+        self.assertNotIn("$ref", schema)
+        self.assertIn("properties", schema)
+        self.assertIn("required", schema)
+        self.assertIn("additionalProperties", schema)
+
+    def test_entrada_builder_ausente_de_defs(self):
+        schema = self.coa._load_evidence_schema("emilio")
+        self.assertNotIn("builder_evidence_entry", schema["$defs"])
+
+    def test_definiciones_de_builder_son_exactamente_su_cierre_alcanzable_menos_la_propia_entrada(self):
+        schema = self.coa._load_evidence_schema("emilio")
+        expected = self._expected_reachable("builder_evidence_entry") - {"builder_evidence_entry"}
+        self.assertEqual(set(schema["$defs"].keys()), expected)
+        self.assertLess(len(expected), len(self._canonical_definitions()))
+
+    def test_todo_ref_usa_defs_y_resuelve_sin_ninguno_apuntando_a_definitions(self):
+        for role in ("emilio", "emma"):
+            schema = self.coa._load_evidence_schema(role)
+            all_refs = _codex_find_refs(schema)
+            old_style = [r for r in all_refs if r.startswith("#/definitions/")]
+            self.assertEqual(old_style, [], msg=f"role={role}")
+            targets = {r.rsplit("/", 1)[-1] for r in all_refs}
+            dangling = targets - set(schema["$defs"].keys())
+            self.assertEqual(dangling, set(), msg=f"role={role}")
+            for r in all_refs:
+                self.assertTrue(r.startswith("#/$defs/"), msg=f"role={role} ref={r!r}")
+
+    def test_palabras_clave_no_soportadas_por_codex_ausentes(self):
+        for role in ("emilio", "emma"):
+            schema = self.coa._load_evidence_schema(role)
+            hits = _codex_find_keys(schema, self._UNSUPPORTED_KEYWORDS)
+            self.assertEqual(hits, [], msg=f"role={role}")
+
+    def test_restricciones_soportadas_para_modelos_estandar_se_preservan(self):
+        """A diferencia de Claude, minLength/minimum/pattern/etc. SÍ están
+        soportados por Codex para modelos estándar (documentación oficial
+        de OpenAI: solo no soportados para modelos fine-tuned) -- deben
+        sobrevivir la proyección, nunca eliminarse."""
+        schema = self.coa._load_evidence_schema("emilio")
+        survivors = _codex_find_keys(schema, self._SUPPORTED_STANDARD_MODEL_CONSTRAINTS)
+        self.assertTrue(survivors, "expected at least one standard-model constraint to survive projection")
+        self.assertIn("minLength", survivors)
+
+    def test_keywords_soportados_universalmente_se_preservan(self):
+        schema = self.coa._load_evidence_schema("emilio")
+        survivors = _codex_find_keys(schema, {"$ref", "anyOf", "enum", "additionalProperties"})
+        self.assertIn("anyOf", survivors)
+        self.assertIn("additionalProperties", survivors)
+
+    def test_archivo_canonico_es_identico_antes_y_despues_de_la_proyeccion(self):
+        import hashlib
+
+        path = self._canonical_schema_path()
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.coa._load_evidence_schema("emilio")
+        self.coa._load_evidence_schema("emma")
+        after = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(before, after)
+
+    def test_build_options_envia_la_proyeccion_a_travez_de_output_schema(self):
+        """El único llamador real de `_load_evidence_schema()` --
+        `_run()`, vía `thread.run(..., output_schema=schema)` -- expone la
+        proyección filtrada, no el esquema canónico completo."""
+        thread = self._fake_sdk.Thread(
+            id="t-1",
+            turn_result=self._fake_sdk.TurnResult(
+                status=self._fake_sdk.TurnStatus.completed, final_response=json.dumps({"attempt": 0})
+            ),
+        )
+        with self._patch_thread_start(thread):
+            adapter = self.coa.CodexAdapter()
+            adapter.invoke(self._request(agent_role="emilio"))
+        sent_schema = thread.last_kwargs["output_schema"]
+        self.assertEqual(sent_schema.get("type"), "object")
+        self.assertNotIn("$ref", sent_schema)
+        hits = _codex_find_keys(sent_schema, self._UNSUPPORTED_KEYWORDS)
+        self.assertEqual(hits, [])
+
+    def test_regresion_del_fallo_real_confirmado_if_not_permitted(self):
+        """Prueba de regresión dirigida al fallo real confirmado por un
+        smoke test aislado: `invalid_request_error / invalid_json_schema:
+        ... 'if' is not permitted` (param: text.format.schema). La causa
+        raíz era doble: (1) el esquema completo, incluyendo `if`/`then`/
+        `else`/`allOf`, se enviaba sin filtrar; (2) la raíz no declaraba
+        `type` directamente. Ambas quedan cerradas aquí.
+
+        Nota: no se usa un chequeo ingenuo de substring "if" in json.dumps(...)
+        -- nombres legítimos como "artifact_identity" contienen "if" como
+        substring (art-IF-act), lo que produciría un falso positivo incluso
+        con el filtrado correcto. Se usa en cambio la búsqueda precisa por
+        clave real, igual que test_palabras_clave_no_soportadas_por_codex_ausentes."""
+        schema = self.coa._load_evidence_schema("emilio")
+        self.assertEqual(_codex_find_keys(schema, {"if", "then", "else"}), [])
+        self.assertEqual(schema.get("type"), "object")
 
 
 if __name__ == "__main__":
