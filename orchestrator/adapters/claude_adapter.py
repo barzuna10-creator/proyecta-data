@@ -70,6 +70,7 @@ only inherited from Increment #10's research:
    absent -- the bundled CLI subprocess inherits the parent process
    environment on its own, so the adapter never needs to hold, forward,
    or format the credential value itself.
+   **Superseded, see point 9 below.**
 
 **Corrective cycle (Increment #14, closing Emma's P2 findings) -- verified
 this time against the actual installed `claude-agent-sdk==0.2.141`
@@ -113,6 +114,71 @@ package in a disposable venv:**
    never `"completed"`, regardless of whether `structured_output` happens
    to be non-empty -- defense-in-depth against exactly the failure mode
    Emma's review named, verified-safe-either-way rather than assumed.
+
+**Scoped credential increment (Increment #16 follow-up) -- closes the
+discovered conflict between this project's own architectural principle
+("Zentra's provider routing is based on API products and their own
+quotas, never on Claude.ai... consumer subscriptions",
+`PROVIDER_ROUTER_V1.md`'s closing section) and the operational fact that
+a plain `ANTHROPIC_API_KEY` environment variable set for a real pilot is
+not reliably visible to a nested SDK invocation running under a Claude
+Code host session (that session withholds this specific variable name
+from spawned subprocesses -- confirmed empirically, see the Increment #16
+credential-boundary Discovery):**
+
+9. **`ANTHROPIC_API_KEY` env-var presence is no longer this adapter's
+   auth signal at all -- removed, not merely relaxed.** The constructor
+   now requires `claude_settings_path` (no default): the path to a
+   dedicated, isolated `ClaudeAgentOptions(settings=...)` file whose
+   `apiKeyHelper` key names a script that resolves the real Anthropic API
+   key at Claude-CLI-subprocess-invocation time (from macOS Keychain, per
+   the Increment #16 Discovery's recommended machine-local setup -- not
+   created or touched by this module or this increment). `_build_options()`
+   also sets `setting_sources=[]`, so this SDK invocation never reads a
+   user's normal `~/.claude/settings.json`/project/local settings --
+   confirmed by direct inspection of the installed
+   `claude-agent-sdk==0.2.141` source: `setting_sources=[]` is documented
+   as "SDK isolation mode," and `settings=<path>` is a separate,
+   always-loaded "flag settings" layer with the highest priority,
+   independent of `setting_sources`.
+10. **This adapter never reads, executes, or reveals the credential
+    itself, at any point.** `_verify_claude_settings_file()` performs
+    structural validation only -- the settings file exists, parses as a
+    JSON object, and names a non-empty, existing, executable
+    `apiKeyHelper` script -- and fails closed (`ClaudeAdapterError`) on
+    any of those conditions, before `ClaudeAgentOptions` is ever
+    constructed. It never opens, executes, or captures output from the
+    referenced helper script -- invoking it (and thereby touching the
+    real key) remains entirely the Claude CLI subprocess's own
+    responsibility at actual call time, not this adapter's, matching the
+    "no API key may appear in... source code... logs, or command output"
+    requirement.
+
+**Corrective cycle (Increment #16 follow-up, closing Emma's P1 finding) --
+verified against the actual installed `claude-agent-sdk==0.2.141`
+`_internal/transport/subprocess_cli.py`, not merely inferred:**
+
+11. **A pre-invocation environment check now refuses to proceed if
+    `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is present in this
+    process's own environment.** Emma's independent review found, and I
+    confirmed by direct source inspection, that the SDK spawns the Claude
+    CLI subprocess with `{**dict(os.environ), **options.env}` -- i.e. the
+    subprocess inherits this process's *entire* environment, and
+    `ClaudeAgentOptions.env` (which this adapter only uses for
+    `CLAUDE_CODE_MAX_RETRIES`/`API_TIMEOUT_MS`) never neutralizes either
+    variable. Per Anthropic's documented authentication precedence,
+    `ANTHROPIC_AUTH_TOKEN` (rank 2) and `ANTHROPIC_API_KEY` (rank 3) both
+    outrank `apiKeyHelper` (rank 4) -- so either variable, if ambient in
+    this process for any reason, would silently override the dedicated,
+    isolated credential source point 9 above exists to guarantee, with no
+    error and no adapter-level awareness. `_verify_no_ambient_credential_env()`
+    closes this: it checks *presence only* (`"ANTHROPIC_API_KEY" in
+    os.environ` / `"ANTHROPIC_AUTH_TOKEN" in os.environ`) and raises
+    `ClaudeAdapterError` naming which variable(s) were found -- it never
+    reads, prints, logs, copies, or unsets either variable's value, and
+    never touches the process environment at all. This check runs before
+    `_verify_claude_settings_file()`, so an ambient credential is refused
+    even before the settings-file/helper structure is inspected.
 """
 
 from __future__ import annotations
@@ -174,6 +240,67 @@ def _load_evidence_schema(agent_role: str) -> dict:
     }
 
 
+def _verify_claude_settings_file(path: Path) -> None:
+    """Fail-closed structural check only (module docstring point 10) --
+    never reads, executes, or reveals the credential itself. Confirms the
+    dedicated, isolated SDK settings file exists, parses as a JSON object,
+    and declares a non-empty `apiKeyHelper` pointing at an existing,
+    executable script. Never invokes the helper script itself."""
+    if not path.is_file():
+        raise ClaudeAdapterError(
+            f"Claude settings file not found at {path} -- refusing to invoke "
+            "without a confirmed, dedicated apiKeyHelper configuration."
+        )
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ClaudeAdapterError(
+            f"Claude settings file at {path} could not be read/parsed: {exc!r}"
+        ) from exc
+    if not isinstance(content, dict):
+        raise ClaudeAdapterError(
+            f"Claude settings file at {path} does not contain a JSON object"
+        )
+    helper = content.get("apiKeyHelper")
+    if not isinstance(helper, str) or not helper.strip():
+        raise ClaudeAdapterError(
+            f"Claude settings file at {path} has no non-empty 'apiKeyHelper' key "
+            "-- refusing to invoke without a confirmed credential-helper configuration."
+        )
+    helper_path = Path(helper)
+    if not helper_path.is_file() or not os.access(helper_path, os.X_OK):
+        raise ClaudeAdapterError(
+            f"Claude settings file at {path} references apiKeyHelper {helper!r}, "
+            "which does not exist or is not executable -- refusing to invoke "
+            "without a confirmed, runnable credential helper."
+        )
+
+
+_AMBIENT_CREDENTIAL_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _verify_no_ambient_credential_env() -> None:
+    """Fail-closed check only (module docstring point 11) -- presence
+    only, never reads/prints/logs/copies/unsets either variable's value.
+    Refuses if `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is present in
+    this process's own environment: both outrank `apiKeyHelper` in
+    Claude Code's documented authentication precedence, so either one
+    being ambient would silently bypass the dedicated, isolated
+    credential source this adapter exists to enforce."""
+    found = [name for name in _AMBIENT_CREDENTIAL_ENV_VARS if name in os.environ]
+    if found:
+        raise ClaudeAdapterError(
+            "Refusing to invoke: "
+            + " and ".join(found)
+            + " present in the adapter process environment -- this would "
+            "outrank the dedicated apiKeyHelper settings path in Claude "
+            "Code's authentication precedence. Unset it/them from this "
+            "process's environment before invoking; this adapter never "
+            "reads or reports the value(s) themselves."
+        )
+
+
 def _map_exception_to_outcome(exc: Exception) -> tuple[str, str]:
     """Returns (outcome, error_detail). See module docstring point 1 for
     why this maps against claude-agent-sdk's own CLI/process exception
@@ -213,17 +340,20 @@ class ClaudeAdapter:
     that call -- never holds one as instance state between calls
     (PROVIDER_ROUTER_V1.md section 6)."""
 
-    def __init__(self, *, model: str = DEFAULT_MODEL, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        claude_settings_path: str | Path,
+        model: str = DEFAULT_MODEL,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        self._settings_path = Path(claude_settings_path)
         self._model = model
         self._timeout_seconds = timeout_seconds
 
     def invoke(self, request: AgentInvocationRequest) -> AgentInvocationResult:
-        if "ANTHROPIC_API_KEY" not in os.environ:
-            raise ClaudeAdapterError(
-                "ANTHROPIC_API_KEY is not set in the process environment -- refusing to "
-                "construct a Claude client. No fallback to an ambient CLI login state is "
-                "ever attempted (PROVIDER_INTEGRATION_V1.md section 2)."
-            )
+        _verify_no_ambient_credential_env()
+        _verify_claude_settings_file(self._settings_path)
 
         try:
             result_message = asyncio.run(
@@ -322,6 +452,8 @@ class ClaudeAdapter:
                 "CLAUDE_CODE_MAX_RETRIES": "0",
                 "API_TIMEOUT_MS": timeout_ms,
             },
+            settings=str(self._settings_path),
+            setting_sources=[],
         )
 
 
