@@ -590,6 +590,244 @@ class PruebaDecideScopeChangeAtribucion(ChugelTestCase):
         self.assertEqual(p2["status"], "pending_human_decision")
 
 
+# --- decide_scope_change_and_reauthorize: atomicidad -----------------------
+
+class PruebaDecideScopeChangeAndReauthorize(ChugelTestCase):
+    """Cierra el hallazgo P3 no bloqueante documentado en el propio
+    docstring de chugel.py: ni decide_scope_change() ni decide_gate(),
+    llamados por separado en cualquier orden, pueden producir un registro
+    válido cuando scope_authorization ya está aprobado para una versión
+    anterior -- confirmado en Discovery mediante dry-run antes de escribir
+    ningún código. decide_scope_change_and_reauthorize() cierra esa
+    brecha con una sola mutación combinada, una sola validación, una sola
+    escritura."""
+
+    def _approve_v1_and_propose_v2(self, mid, proposal_id="p2"):
+        chugel.decide_gate(
+            mid, "scope_authorization", _gate_decision(approved_for={"mission_definition_version": 1})
+        )
+        chugel.propose_scope_change(mid, _proposal(proposal_id=proposal_id))
+
+    def test_v1_aprobado_reautoriza_atomicamente_a_v2(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+
+        updated = chugel.decide_scope_change_and_reauthorize(
+            mid, "p2",
+            scope_decision={
+                "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+                "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+            },
+            gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+        )
+
+        self.assertEqual(len(updated["mission_definition_history"]), 2)
+        self.assertEqual(updated["mission_definition_history"][0]["version"], 1)
+        self.assertEqual(updated["mission_definition_history"][1]["version"], 2)
+        self.assertEqual(
+            updated["human_gates"]["scope_authorization"]["approved_for"]["mission_definition_version"], 2
+        )
+        self.assertEqual(updated["human_gates"]["scope_authorization"]["status"], "approved")
+        # persiste de verdad, no solo el valor de retorno en memoria
+        on_disk = chugel.get_mission(mid)
+        self.assertEqual(
+            on_disk["human_gates"]["scope_authorization"]["approved_for"]["mission_definition_version"], 2
+        )
+
+    def test_v1_permanece_en_el_historial(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        original_v1 = chugel.get_mission(mid)["mission_definition_history"][0]
+
+        updated = chugel.decide_scope_change_and_reauthorize(
+            mid, "p2",
+            scope_decision={
+                "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+                "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+            },
+            gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+        )
+        self.assertEqual(updated["mission_definition_history"][0], original_v1)
+
+    def test_scope_decision_decided_by_incorrecto_no_toca_disco(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        with self.assertRaises(ValueError):
+            chugel.decide_scope_change_and_reauthorize(
+                mid, "p2",
+                scope_decision={
+                    "decided_by": "emilio", "decided_at": "2026-08-19T12:30:00Z",
+                    "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+                },
+                gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+            )
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_gate_decision_decided_by_incorrecto_no_toca_disco(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        with self.assertRaises(ValueError):
+            chugel.decide_scope_change_and_reauthorize(
+                mid, "p2",
+                scope_decision={
+                    "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+                    "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+                },
+                gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}, decided_by="emilio"),
+            )
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_gate_apuntando_a_version_incorrecta_falla_validacion_sin_escribir(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        with self.assertRaises(chugel.MissionValidationFailed) as ctx:
+            chugel.decide_scope_change_and_reauthorize(
+                mid, "p2",
+                scope_decision={
+                    "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+                    "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+                },
+                # la nueva versión real será 2, no 3 -- debe fallar por STALE_APPROVAL
+                gate_decision=_gate_decision(approved_for={"mission_definition_version": 3}),
+            )
+        self.assertTrue(any(e.code == "STALE_APPROVAL" for e in ctx.exception.errors))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_proposal_id_desconocido_no_toca_disco(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        with self.assertRaises(ValueError):
+            chugel.decide_scope_change_and_reauthorize(
+                mid, "no-such-proposal",
+                scope_decision={
+                    "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+                    "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+                },
+                gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+            )
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_mission_definition_entry_faltante_no_toca_disco(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        with self.assertRaises(ValueError):
+            chugel.decide_scope_change_and_reauthorize(
+                mid, "p2",
+                scope_decision={
+                    "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z", "status": "accepted",
+                },
+                gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+            )
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_status_invalido_no_toca_disco(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        with self.assertRaises(ValueError):
+            chugel.decide_scope_change_and_reauthorize(
+                mid, "p2",
+                scope_decision={
+                    "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z", "status": "maybe",
+                },
+                gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+            )
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_rechazo_junto_a_reautorizacion_falla_por_stale_approval(self):
+        """status='rejected' no produce una nueva versión -- la
+        reautorización del gate para una versión que nunca se creó debe
+        fallar cerrado por el mismo chequeo STALE_APPROVAL, sin lógica
+        especial adicional."""
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        with self.assertRaises(chugel.MissionValidationFailed) as ctx:
+            chugel.decide_scope_change_and_reauthorize(
+                mid, "p2",
+                scope_decision={
+                    "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z", "status": "rejected",
+                },
+                gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+            )
+        self.assertTrue(any(e.code == "STALE_APPROVAL" for e in ctx.exception.errors))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_campos_no_relacionados_permanecen_intactos(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+        before = chugel.get_mission(mid)
+
+        updated = chugel.decide_scope_change_and_reauthorize(
+            mid, "p2",
+            scope_decision={
+                "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+                "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+            },
+            gate_decision=_gate_decision(approved_for={"mission_definition_version": 2}),
+        )
+
+        self.assertEqual(updated["repository"], before["repository"])
+        self.assertEqual(updated["builder_evidence"], before["builder_evidence"])
+        self.assertEqual(updated["reviewer_evidence"], before["reviewer_evidence"])
+        self.assertEqual(updated["corrective_cycle_count"], before["corrective_cycle_count"])
+        self.assertEqual(updated["budget"], before["budget"])
+
+    def test_decide_scope_change_solo_sigue_fallando_igual_que_antes(self):
+        """decide_scope_change() por sí solo, sin la reautorización del
+        gate, debe seguir comportándose exactamente igual que antes de
+        esta extracción -- STALE_APPROVAL, sin escribir."""
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        self._approve_v1_and_propose_v2(mid)
+
+        with self.assertRaises(chugel.MissionValidationFailed) as ctx:
+            chugel.decide_scope_change(mid, "p2", {
+                "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+                "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+            })
+        self.assertTrue(any(e.code == "STALE_APPROVAL" for e in ctx.exception.errors))
+
+    def test_decide_gate_solo_sigue_funcionando_igual_que_antes(self):
+        """decide_gate() por sí solo, para un gate sin relación con la
+        reautorización de alcance, debe seguir funcionando exactamente
+        igual que antes de esta extracción."""
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        updated = chugel.decide_gate(mid, "publish_authorization", _gate_decision())
+        self.assertEqual(updated["human_gates"]["publish_authorization"]["status"], "approved")
+        self.assertEqual(updated["human_gates"]["publish_authorization"]["decided_by"], "jose")
+
+
 # --- corrective_cycle_count atómico ---------------------------------
 
 class PruebaCorrectiveCycleCountAtomico(ChugelTestCase):
