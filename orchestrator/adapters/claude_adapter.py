@@ -61,9 +61,16 @@ only inherited from Increment #10's research:
    text, disclosed here rather than silently narrowed.
 5. **`model` and the exact `ClaudeAgentOptions` field for selecting it**
    are carried as an adapter constructor default
-   (`DEFAULT_MODEL` below), not independently verified against live
-   documentation this increment (search results did not surface this
-   field's exact current name with certainty) -- labeled ASSUMPTION.
+   (`DEFAULT_MODEL` below). **Updated (Increment #16 HTTP 400 corrective
+   cycle, 2026-08-20): `"claude-sonnet-5"` is now confirmed, not merely
+   assumed** -- verified against current official Anthropic documentation
+   (the models-overview page's comparison table), which lists it verbatim
+   as both the Claude API ID and Claude API alias for Claude Sonnet 5, a
+   dateless pinned-snapshot identifier (the naming convention Anthropic
+   uses starting with the Claude 4.6 generation). The prior HTTP 400 this
+   increment diagnosed was traced to the structured-output schema shape
+   (see point 11 below), not to this model identifier -- `DEFAULT_MODEL`
+   is unchanged.
 6. **`ANTHROPIC_API_KEY` is never read into a Python variable by this
    adapter.** The adapter only checks the key's *presence* in
    `os.environ` before ever constructing a client, and fails closed if
@@ -179,6 +186,49 @@ verified against the actual installed `claude-agent-sdk==0.2.141`
     never touches the process environment at all. This check runs before
     `_verify_claude_settings_file()`, so an ambient credential is refused
     even before the settings-file/helper structure is inspected.
+
+**Corrective cycle (Increment #16 HTTP 400 follow-up) -- closes the
+structured-output schema violation a real authentication smoke test
+uncovered after point 11 was fixed, confirmed against current official
+Anthropic structured-outputs documentation and against the exact
+`mission_record.schema.json` content, not merely inferred:**
+
+12. **`_load_evidence_schema()` now returns a provider-facing projection
+    of the canonical schema, not the canonical schema itself.** The prior
+    version inlined the *entire* `definitions` map from
+    `mission_record.schema.json` verbatim into `output_format.schema` --
+    including `minLength`/`minimum` string/numeric constraints and
+    `if`/`then`/`else` conditional schemas, none of which Anthropic's
+    structured-outputs feature supports (confirmed via its current
+    documentation), and including definitions never referenced by the
+    requested entry at all (e.g. `human_gate`, `http_check`,
+    `mission_definition_version`, `actor` were sent even when requesting
+    `reviewer_evidence_entry`, which references none of them). A real
+    smoke test with this schema produced an HTTP 400 immediately after
+    the Increment #16 credential fix resolved the prior 401 -- consistent
+    with a request-shape rejection, not an authentication failure.
+    `_load_evidence_schema()` now: (a) computes the transitive `$ref`
+    reachability closure starting from the requested entry name and
+    retains only those definitions -- valid by construction, since every
+    `$ref` inside the closure necessarily resolves to something also
+    inside the closure; and (b) recursively strips exactly the documented
+    unsupported keywords (`minLength`, `maxLength`, `minimum`, `maximum`,
+    `multipleOf`, `if`, `then`, `else`) from a fresh, independently-parsed
+    copy of the schema, never mutating any shared object or the file on
+    disk. Supported keywords (`$ref`, `pattern`, `enum`, `anyOf`, `allOf`,
+    `additionalProperties: false`, etc.) are preserved unchanged.
+    `orchestrator/validator.py`'s `Draft7Validator`, loaded independently
+    from the same file at its own import time, is untouched by this
+    function and remains the sole structural-enforcement layer before any
+    evidence is persisted (`orchestrator/chugel.py`'s
+    `record_builder_evidence()`/`record_reviewer_evidence()`) -- the
+    constraints stripped from the provider-facing copy were never
+    enforced by Anthropic's API in the first place (per its own
+    documentation) and continue to be fully enforced canonically. This
+    module's own `mission_record.schema.json` read is a fresh
+    `json.load()` on every call, entirely disjoint from `validator.py`'s
+    separately-loaded object -- there is no code path by which this
+    projection could affect canonical validation.
 """
 
 from __future__ import annotations
@@ -202,7 +252,7 @@ from claude_agent_sdk import (
 
 from orchestrator.agent_invocation import AgentInvocationRequest, AgentInvocationResult
 
-DEFAULT_MODEL = "claude-sonnet-5"  # ASSUMPTION -- see module docstring, point 5.
+DEFAULT_MODEL = "claude-sonnet-5"  # confirmed against live docs -- see module docstring, point 5.
 DEFAULT_TIMEOUT_SECONDS = 300.0
 
 _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "mission_record.schema.json"
@@ -222,20 +272,96 @@ class ClaudeAdapterError(Exception):
     reported via a returned AgentInvocationResult, never an exception."""
 
 
+# Documented (module docstring point 12) as unsupported by Anthropic's
+# structured-outputs feature -- stripped from the provider-facing schema
+# projection only, never from the canonical mission_record.schema.json.
+_PROVIDER_UNSUPPORTED_KEYWORDS = frozenset(
+    {"minLength", "maxLength", "minimum", "maximum", "multipleOf", "if", "then", "else"}
+)
+
+
+def _refs_in(node: object) -> set[str]:
+    """Returns every `#/definitions/<name>` target `$ref`d anywhere inside
+    `node`, recursively. Read-only -- never mutates `node`."""
+    found: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and value.startswith("#/definitions/"):
+                found.add(value.rsplit("/", 1)[-1])
+            else:
+                found |= _refs_in(value)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _refs_in(item)
+    return found
+
+
+def _reachable_definitions(definitions: dict, entry_name: str) -> set[str]:
+    """Returns the transitive closure of definition names reachable from
+    `entry_name` via `$ref`, including `entry_name` itself. Every `$ref`
+    inside the closure necessarily resolves to something also inside the
+    closure, by construction."""
+    seen: set[str] = set()
+    frontier = {entry_name}
+    while frontier:
+        name = frontier.pop()
+        if name in seen or name not in definitions:
+            continue
+        seen.add(name)
+        frontier |= _refs_in(definitions[name])
+    return seen
+
+
+def _strip_provider_unsupported_keywords(node: object) -> object:
+    """Returns a new structure with every key in
+    `_PROVIDER_UNSUPPORTED_KEYWORDS` removed, recursively -- never mutates
+    `node` itself, so the caller's own fresh, independently-parsed copy
+    (and, transitively, the canonical schema file and
+    `orchestrator/validator.py`'s own separately-loaded object) are
+    unaffected regardless of aliasing. Supported keywords (`$ref`,
+    `pattern`, `enum`, `anyOf`, `allOf`, `additionalProperties`, etc.) are
+    passed through unchanged."""
+    if isinstance(node, dict):
+        return {
+            key: _strip_provider_unsupported_keywords(value)
+            for key, value in node.items()
+            if key not in _PROVIDER_UNSUPPORTED_KEYWORDS
+        }
+    if isinstance(node, list):
+        return [_strip_provider_unsupported_keywords(item) for item in node]
+    return node
+
+
 def _load_evidence_schema(agent_role: str) -> dict:
-    """Returns a self-contained JSON Schema for the role's evidence entry,
-    keeping the full `definitions` map so internal `$ref`s (e.g. to
-    `artifact_identity`, `check_result`) resolve correctly -- this
-    duplicates the schema-loading logic Codex's adapter also needs
-    (see codex_adapter.py); no shared module is introduced for two small,
+    """Returns a provider-facing *projection* of the role's evidence entry
+    -- not the canonical schema itself (module docstring point 12). Reads
+    a fresh, independent copy of `mission_record.schema.json` on every
+    call (never cached, never shared with `orchestrator/validator.py`'s
+    own separately-loaded canonical schema object), restricts
+    `definitions` to exactly the `$ref`-reachability closure from the
+    requested entry (dropping unreferenced definitions such as
+    `human_gate`/`http_check`/`mission_definition_version`/`actor` for a
+    `reviewer_evidence_entry` request), and recursively strips
+    `_PROVIDER_UNSUPPORTED_KEYWORDS` from that closure. The canonical file
+    on disk, and `orchestrator/validator.py`'s independent
+    `Draft7Validator`, are never touched -- see module docstring point 12
+    for why this projection cannot weaken canonical enforcement. This
+    duplicates the schema-loading logic Codex's adapter also needs (see
+    codex_adapter.py); no shared module is introduced for two small,
     self-contained call sites, matching this increment's file-scope
     authorization (adapters only, no new shared package module)."""
     with open(_SCHEMA_PATH, encoding="utf-8") as f:
         full_schema = json.load(f)
     entry_name = _EVIDENCE_ENTRY_NAME[agent_role]
+    reachable = _reachable_definitions(full_schema["definitions"], entry_name)
+    projected_definitions = {
+        name: definition
+        for name, definition in full_schema["definitions"].items()
+        if name in reachable
+    }
     return {
         "$schema": full_schema.get("$schema", "http://json-schema.org/draft-07/schema#"),
-        "definitions": full_schema["definitions"],
+        "definitions": _strip_provider_unsupported_keywords(projected_definitions),
         "$ref": f"#/definitions/{entry_name}",
     }
 

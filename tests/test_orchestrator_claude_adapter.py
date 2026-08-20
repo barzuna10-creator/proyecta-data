@@ -24,6 +24,7 @@ real."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -403,6 +404,145 @@ class PruebaSinCredencialAmbiental(ClaudeAdapterTestCase):
                 adapter.invoke(self._request())
         self.assertNotIn(secret_shaped_value, str(ctx.exception))
         self.assertNotIn(secret_shaped_value, repr(ctx.exception))
+
+
+def _find_keys(node, keys):
+    """Test-local, independent tree walker (deliberately not reusing the
+    adapter's own `_strip_provider_unsupported_keywords`/`_refs_in`, so
+    this assertion doesn't become circular) -- returns every occurrence of
+    any key in `keys` found anywhere in `node`."""
+    hits = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in keys:
+                hits.append(k)
+            hits.extend(_find_keys(v, keys))
+    elif isinstance(node, list):
+        for item in node:
+            hits.extend(_find_keys(item, keys))
+    return hits
+
+
+def _find_refs(node):
+    """Test-local, independent `$ref` collector (see `_find_keys` above --
+    deliberately not reusing the adapter's own `_refs_in`)."""
+    found = set()
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "$ref" and isinstance(v, str) and v.startswith("#/definitions/"):
+                found.add(v.rsplit("/", 1)[-1])
+            else:
+                found |= _find_refs(v)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _find_refs(item)
+    return found
+
+
+class PruebaProyeccionDeEsquemaParaProveedor(ClaudeAdapterTestCase):
+    """Incremento #16, ciclo correctivo del HTTP 400 -- cierra el hallazgo
+    del Discovery: `_load_evidence_schema()` ahora devuelve una proyección
+    apta para el proveedor (sin palabras clave no soportadas por
+    Anthropic, sin definiciones no alcanzables), sin tocar jamás el
+    archivo canónico `mission_record.schema.json` ni debilitar la
+    validación canónica en `orchestrator/validator.py`."""
+
+    _UNSUPPORTED_KEYWORDS = {
+        "minLength", "maxLength", "minimum", "maximum", "multipleOf",
+        "if", "then", "else",
+    }
+
+    def _canonical_schema_path(self):
+        return (
+            Path(self.ca.__file__).resolve().parent.parent / "schemas" / "mission_record.schema.json"
+        )
+
+    def _canonical_definitions(self):
+        with open(self._canonical_schema_path(), encoding="utf-8") as f:
+            return json.load(f)["definitions"]
+
+    def _expected_reachable(self, entry_name):
+        """Independent reachability computation (not calling the
+        adapter's own `_reachable_definitions`), so this test doesn't
+        just restate the production logic back at itself."""
+        definitions = self._canonical_definitions()
+        seen = set()
+        frontier = {entry_name}
+        while frontier:
+            name = frontier.pop()
+            if name in seen or name not in definitions:
+                continue
+            seen.add(name)
+            frontier |= _find_refs(definitions[name])
+        return seen
+
+    def test_esquema_de_reviewer_no_contiene_palabras_clave_no_soportadas(self):
+        schema = self.ca._load_evidence_schema("emma")
+        hits = _find_keys(schema, self._UNSUPPORTED_KEYWORDS)
+        self.assertEqual(hits, [])
+
+    def test_esquema_de_builder_no_contiene_palabras_clave_no_soportadas(self):
+        schema = self.ca._load_evidence_schema("emilio")
+        hits = _find_keys(schema, self._UNSUPPORTED_KEYWORDS)
+        self.assertEqual(hits, [])
+
+    def test_definiciones_de_reviewer_son_exactamente_su_cierre_alcanzable(self):
+        schema = self.ca._load_evidence_schema("emma")
+        expected = self._expected_reachable("reviewer_evidence_entry")
+        self.assertEqual(set(schema["definitions"].keys()), expected)
+        # confirma que el cierre real es un subconjunto propio del total --
+        # si esto alguna vez deja de cumplirse, la prueba de "no se envía
+        # todo" perdería sentido y debe revisarse.
+        self.assertLess(len(expected), len(self._canonical_definitions()))
+
+    def test_esquema_de_builder_tiene_las_mismas_propiedades(self):
+        schema = self.ca._load_evidence_schema("emilio")
+        expected = self._expected_reachable("builder_evidence_entry")
+        self.assertEqual(set(schema["definitions"].keys()), expected)
+        self.assertLess(len(expected), len(self._canonical_definitions()))
+        self.assertEqual(_find_keys(schema, self._UNSUPPORTED_KEYWORDS), [])
+
+    def test_todo_ref_interno_resuelve_dentro_de_la_proyeccion(self):
+        for role in ("emma", "emilio"):
+            schema = self.ca._load_evidence_schema(role)
+            referenced = _find_refs(schema["definitions"])
+            dangling = referenced - set(schema["definitions"].keys())
+            self.assertEqual(dangling, set(), msg=f"role={role}")
+
+    def test_archivo_canonico_es_identico_antes_y_despues_de_la_proyeccion(self):
+        path = self._canonical_schema_path()
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.ca._load_evidence_schema("emma")
+        self.ca._load_evidence_schema("emilio")
+        after = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(before, after)
+
+    def test_keywords_soportados_se_preservan(self):
+        """`$ref`, `pattern`, `enum`, `anyOf`, `allOf`, y
+        `additionalProperties` no deben eliminarse -- solo las palabras
+        clave explícitamente no soportadas."""
+        schema = self.ca._load_evidence_schema("emma")
+        supported_present = _find_keys(
+            schema, {"$ref", "pattern", "enum", "anyOf", "allOf", "additionalProperties"}
+        )
+        self.assertTrue(supported_present, "expected at least one supported keyword to survive projection")
+        self.assertIn("pattern", supported_present)
+        self.assertIn("anyOf", supported_present)
+        self.assertIn("additionalProperties", supported_present)
+
+    def test_output_format_de_la_invocacion_real_usa_la_proyeccion(self):
+        """`_build_options()` -- el único llamador real de
+        `_load_evidence_schema()` -- expone la proyección filtrada, no el
+        esquema canónico completo, en el `output_format` que de verdad se
+        envía al SDK."""
+        adapter = self._adapter()
+        options = adapter._build_options(self._request(agent_role="emma"))
+        hits = _find_keys(options.output_format, self._UNSUPPORTED_KEYWORDS)
+        self.assertEqual(hits, [])
+        self.assertEqual(
+            set(options.output_format["schema"]["definitions"].keys()),
+            self._expected_reachable("reviewer_evidence_entry"),
+        )
 
 
 class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
