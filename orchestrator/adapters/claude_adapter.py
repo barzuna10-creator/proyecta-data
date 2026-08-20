@@ -229,6 +229,35 @@ Anthropic structured-outputs documentation and against the exact
     `json.load()` on every call, entirely disjoint from `validator.py`'s
     separately-loaded object -- there is no code path by which this
     projection could affect canonical validation.
+
+**Corrective cycle (Increment #16, final HTTP 400 follow-up) -- closes a
+second, distinct root cause the point-12 fix alone did not resolve,
+confirmed against the literal Anthropic API error text recovered from a
+real smoke test's own local CLI session transcript, not inferred:**
+
+13. **The provider-facing schema's root now IS the requested entry's own
+    schema body, not a `$ref` pointing at it.** Point 12's fix (correct on
+    its own terms) still left the projection's root as
+    `{"$schema": ..., "definitions": {...}, "$ref": "#/definitions/<entry>"}`
+    -- every documented Anthropic structured-output example instead shows
+    an inline `{"type": "object", "properties": {...}, "required": [...],
+    "additionalProperties": false}` directly at the root. A real smoke
+    test after the point-12 fix still returned HTTP 400; reading that
+    invocation's own local session transcript (a pre-existing artifact
+    the CLI itself writes, not a new request) surfaced the literal
+    Anthropic error: `"API Error: 400 tools.10.custom.input_schema.type:
+    Field required"` -- confirming the CLI wraps `output_format.schema`
+    as a tool's `input_schema`, and Anthropic's tool-schema validation
+    requires `type` directly at that root, not resolved via `$ref`.
+    `_load_evidence_schema()` now spreads the requested entry's own
+    definition (`type`/`properties`/`required`/`additionalProperties`/
+    etc., whatever it already declares) directly into the returned
+    dict's top level, and `definitions` retains only the *other*
+    definitions still needed by internal `$ref`s from that root entry's
+    own properties -- the entry itself is no longer referenced by `$ref`
+    at all, so it no longer belongs in `definitions`. `_PROVIDER_
+    UNSUPPORTED_KEYWORDS` stripping (point 12) is applied to this whole
+    structure, root included, exactly as before.
 """
 
 from __future__ import annotations
@@ -334,16 +363,26 @@ def _strip_provider_unsupported_keywords(node: object) -> object:
 
 def _load_evidence_schema(agent_role: str) -> dict:
     """Returns a provider-facing *projection* of the role's evidence entry
-    -- not the canonical schema itself (module docstring point 12). Reads
-    a fresh, independent copy of `mission_record.schema.json` on every
-    call (never cached, never shared with `orchestrator/validator.py`'s
-    own separately-loaded canonical schema object), restricts
-    `definitions` to exactly the `$ref`-reachability closure from the
-    requested entry (dropping unreferenced definitions such as
+    -- not the canonical schema itself (module docstring points 12-13).
+    Reads a fresh, independent copy of `mission_record.schema.json` on
+    every call (never cached, never shared with
+    `orchestrator/validator.py`'s own separately-loaded canonical schema
+    object). The requested entry's own schema body (`type`, `properties`,
+    `required`, `additionalProperties`, and any other keywords already
+    present on it) is promoted to the *root* of the returned dict -- not
+    left behind a root-level `$ref` -- because Anthropic's structured-
+    output tool-schema validation requires `type` at the schema root
+    directly, not resolved indirectly (module docstring point 13; the
+    confirmed real-world symptom of not doing this was
+    `tools.N.custom.input_schema.type: Field required`). `definitions`
+    retains only the *other* definitions the entry's own `$ref`-
+    reachability closure needs (never the entry itself, which is no
+    longer referenced by `$ref` at all once promoted to the root) --
+    dropping unreferenced definitions such as
     `human_gate`/`http_check`/`mission_definition_version`/`actor` for a
-    `reviewer_evidence_entry` request), and recursively strips
-    `_PROVIDER_UNSUPPORTED_KEYWORDS` from that closure. The canonical file
-    on disk, and `orchestrator/validator.py`'s independent
+    `reviewer_evidence_entry` request. `_PROVIDER_UNSUPPORTED_KEYWORDS`
+    is recursively stripped from the whole projection, root included. The
+    canonical file on disk, and `orchestrator/validator.py`'s independent
     `Draft7Validator`, are never touched -- see module docstring point 12
     for why this projection cannot weaken canonical enforcement. This
     duplicates the schema-loading logic Codex's adapter also needs (see
@@ -354,16 +393,17 @@ def _load_evidence_schema(agent_role: str) -> dict:
         full_schema = json.load(f)
     entry_name = _EVIDENCE_ENTRY_NAME[agent_role]
     reachable = _reachable_definitions(full_schema["definitions"], entry_name)
-    projected_definitions = {
+    other_definitions = {
         name: definition
         for name, definition in full_schema["definitions"].items()
-        if name in reachable
+        if name in reachable and name != entry_name
     }
-    return {
+    projected = {
         "$schema": full_schema.get("$schema", "http://json-schema.org/draft-07/schema#"),
-        "definitions": _strip_provider_unsupported_keywords(projected_definitions),
-        "$ref": f"#/definitions/{entry_name}",
+        **full_schema["definitions"][entry_name],
+        "definitions": other_definitions,
     }
+    return _strip_provider_unsupported_keywords(projected)
 
 
 def _verify_claude_settings_file(path: Path) -> None:

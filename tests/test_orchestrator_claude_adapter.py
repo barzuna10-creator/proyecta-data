@@ -440,11 +440,14 @@ def _find_refs(node):
 
 
 class PruebaProyeccionDeEsquemaParaProveedor(ClaudeAdapterTestCase):
-    """Incremento #16, ciclo correctivo del HTTP 400 -- cierra el hallazgo
-    del Discovery: `_load_evidence_schema()` ahora devuelve una proyección
+    """Incremento #16, ciclos correctivos del HTTP 400 -- cierra los dos
+    hallazgos: `_load_evidence_schema()` ahora devuelve una proyección
     apta para el proveedor (sin palabras clave no soportadas por
-    Anthropic, sin definiciones no alcanzables), sin tocar jamás el
-    archivo canónico `mission_record.schema.json` ni debilitar la
+    Anthropic, sin definiciones no alcanzables, con la propia entrada
+    solicitada promovida a la raíz -- `type: object` directo, no detrás
+    de un `$ref` -- confirmado contra el error real de la API:
+    `tools.N.custom.input_schema.type: Field required`), sin tocar jamás
+    el archivo canónico `mission_record.schema.json` ni debilitar la
     validación canónica en `orchestrator/validator.py`."""
 
     _UNSUPPORTED_KEYWORDS = {
@@ -486,28 +489,62 @@ class PruebaProyeccionDeEsquemaParaProveedor(ClaudeAdapterTestCase):
         hits = _find_keys(schema, self._UNSUPPORTED_KEYWORDS)
         self.assertEqual(hits, [])
 
-    def test_definiciones_de_reviewer_son_exactamente_su_cierre_alcanzable(self):
+    def test_definiciones_de_reviewer_son_exactamente_su_cierre_alcanzable_menos_la_propia_entrada(self):
         schema = self.ca._load_evidence_schema("emma")
-        expected = self._expected_reachable("reviewer_evidence_entry")
+        expected = self._expected_reachable("reviewer_evidence_entry") - {"reviewer_evidence_entry"}
         self.assertEqual(set(schema["definitions"].keys()), expected)
-        # confirma que el cierre real es un subconjunto propio del total --
-        # si esto alguna vez deja de cumplirse, la prueba de "no se envía
-        # todo" perdería sentido y debe revisarse.
+        # confirma que el cierre real (sin la propia entrada) es un
+        # subconjunto propio del total -- si esto alguna vez deja de
+        # cumplirse, la prueba de "no se envía todo" perdería sentido y
+        # debe revisarse.
         self.assertLess(len(expected), len(self._canonical_definitions()))
 
     def test_esquema_de_builder_tiene_las_mismas_propiedades(self):
         schema = self.ca._load_evidence_schema("emilio")
-        expected = self._expected_reachable("builder_evidence_entry")
+        expected = self._expected_reachable("builder_evidence_entry") - {"builder_evidence_entry"}
         self.assertEqual(set(schema["definitions"].keys()), expected)
         self.assertLess(len(expected), len(self._canonical_definitions()))
         self.assertEqual(_find_keys(schema, self._UNSUPPORTED_KEYWORDS), [])
 
     def test_todo_ref_interno_resuelve_dentro_de_la_proyeccion(self):
+        """Los `$ref` ahora pueden aparecer en cualquier parte del
+        esquema (no solo dentro de `definitions`), porque la propia
+        entrada solicitada -- con sus `properties` propias, que sí
+        contienen `$ref`s -- ahora vive en la raíz, no detrás de un
+        `$ref` de nivel superior."""
         for role in ("emma", "emilio"):
             schema = self.ca._load_evidence_schema(role)
-            referenced = _find_refs(schema["definitions"])
+            referenced = _find_refs(schema)
             dangling = referenced - set(schema["definitions"].keys())
             self.assertEqual(dangling, set(), msg=f"role={role}")
+
+    def test_raiz_de_reviewer_es_type_object_no_ref(self):
+        """Incremento #16, ciclo correctivo final del HTTP 400 -- prueba
+        de regresión dirigida al fallo real confirmado:
+        `API Error: 400 tools.10.custom.input_schema.type: Field required`.
+        La raíz del esquema debe declarar `type` directamente (satisfaciendo
+        el requisito mínimo estructural de `input_schema.type`), no dejarlo
+        detrás de un `$ref` de nivel superior."""
+        schema = self.ca._load_evidence_schema("emma")
+        self.assertEqual(schema.get("type"), "object")
+        self.assertNotIn("$ref", schema)
+        self.assertIn("properties", schema)
+        self.assertIn("required", schema)
+        self.assertIn("additionalProperties", schema)
+
+    def test_raiz_de_builder_es_type_object_no_ref(self):
+        schema = self.ca._load_evidence_schema("emilio")
+        self.assertEqual(schema.get("type"), "object")
+        self.assertNotIn("$ref", schema)
+        self.assertIn("properties", schema)
+        self.assertIn("required", schema)
+        self.assertIn("additionalProperties", schema)
+
+    def test_la_propia_entrada_no_aparece_dentro_de_definitions(self):
+        reviewer_schema = self.ca._load_evidence_schema("emma")
+        self.assertNotIn("reviewer_evidence_entry", reviewer_schema["definitions"])
+        builder_schema = self.ca._load_evidence_schema("emilio")
+        self.assertNotIn("builder_evidence_entry", builder_schema["definitions"])
 
     def test_archivo_canonico_es_identico_antes_y_despues_de_la_proyeccion(self):
         path = self._canonical_schema_path()
@@ -534,14 +571,17 @@ class PruebaProyeccionDeEsquemaParaProveedor(ClaudeAdapterTestCase):
         """`_build_options()` -- el único llamador real de
         `_load_evidence_schema()` -- expone la proyección filtrada, no el
         esquema canónico completo, en el `output_format` que de verdad se
-        envía al SDK."""
+        envía al SDK, incluyendo la raíz `type: object` (no un `$ref`)."""
         adapter = self._adapter()
         options = adapter._build_options(self._request(agent_role="emma"))
-        hits = _find_keys(options.output_format, self._UNSUPPORTED_KEYWORDS)
+        schema = options.output_format["schema"]
+        hits = _find_keys(schema, self._UNSUPPORTED_KEYWORDS)
         self.assertEqual(hits, [])
+        self.assertEqual(schema.get("type"), "object")
+        self.assertNotIn("$ref", schema)
         self.assertEqual(
-            set(options.output_format["schema"]["definitions"].keys()),
-            self._expected_reachable("reviewer_evidence_entry"),
+            set(schema["definitions"].keys()),
+            self._expected_reachable("reviewer_evidence_entry") - {"reviewer_evidence_entry"},
         )
 
 
@@ -702,11 +742,23 @@ class PruebaPermisosPorRol(ClaudeAdapterTestCase):
         self.assertIn("Read", options.allowed_tools)
 
     def test_output_format_usa_el_schema_del_rol_correcto(self):
+        """Incremento #16, ciclo correctivo final -- desde que la propia
+        entrada se promovió a la raíz del esquema (sin `$ref` ni nombre
+        de definición visible), la distinción por rol ya no puede
+        verificarse buscando el literal "builder_evidence_entry"/
+        "reviewer_evidence_entry" en el JSON serializado -- se verifica
+        en cambio con campos `required` que son exclusivos de cada
+        entrada real (ver orchestrator/schemas/mission_record.schema.json)."""
         adapter = self._adapter()
         options_emilio = adapter._build_options(self._request(agent_role="emilio"))
         options_emma = adapter._build_options(self._request(agent_role="emma"))
-        self.assertIn("builder_evidence_entry", json.dumps(options_emilio.output_format))
-        self.assertIn("reviewer_evidence_entry", json.dumps(options_emma.output_format))
+        emilio_json = json.dumps(options_emilio.output_format)
+        emma_json = json.dumps(options_emma.output_format)
+        self.assertIn("handoff_document_ref", emilio_json)
+        self.assertNotIn("handoff_document_ref", emma_json)
+        self.assertIn("verdict", emma_json)
+        self.assertIn("blocked_reason", emma_json)
+        self.assertNotIn("blocked_reason", emilio_json)
 
 
 class PruebaSinReintentoAutonomoNiSesionCompartida(ClaudeAdapterTestCase):
