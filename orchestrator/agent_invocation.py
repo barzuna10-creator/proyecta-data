@@ -34,7 +34,34 @@ prior identifier(s) to compare against as explicit, caller-supplied
 parameters -- today, a human/script holding Emilio's just-produced result
 in memory supplies them. Omitting them (both None) is treated exactly as
 AGENT_INVOCATION_V1.md's own "provider exposes no usable identifier" case
-already specifies: the comparison is skipped, never treated as a pass."""
+already specifies: the comparison is skipped, never treated as a pass.
+
+Corrective cycle (Increment #16, role-boundary Discovery finding B --
+deterministic attempt binding): closes a confirmed real gap found via a
+real pilot Emilio attempt. `request.attempt` is never serialized into
+`request.task` (build_emilio_invocation_request()/
+build_emma_invocation_request() never put it there), so
+`result.evidence['attempt']` was, before this fix, entirely provider-
+asserted data with no binding check anywhere before
+chugel.record_builder_evidence()/record_reviewer_evidence() -- Chugel's
+own validator only checks *internal* Mission Record consistency (attempt
+sequencing, corrective-cycle triggers), never what was actually
+requested. A real Codex attempt exploited exactly this gap: it fabricated
+a full corrective-cycle narrative and self-labeled its submission
+`attempt: 1` while the request had asked for `attempt: 0`; Chugel
+happened to reject it because the fabrication was internally
+inconsistent, not because anything checked it against the request. Both
+consume_emilio_result() and consume_emma_result() now call the new
+_check_attempt_binding() -- placed after every existing protocol check
+(invocation_id; for Emma, also requested_fresh_context/
+fresh_context_attested and the stale-session comparisons) and before the
+outcome branch that could otherwise call into chugel -- raising the new
+AttemptNumberMismatch for a missing, malformed (non-int), or mismatched
+`evidence['attempt']`, identically in all three cases. Placed after
+Emma's fresh-context/stale-session checks specifically so those checks'
+own existing precedence and exception types are unchanged when evidence
+is absent or a placeholder (several pre-existing tests construct a result
+with no evidence at all to exercise those checks in isolation)."""
 
 from __future__ import annotations
 
@@ -71,6 +98,20 @@ class StaleSessionReused(AgentInvocationError):
     """Emma's provider_session_id/provider_conversation_id matches a
     caller-supplied prior identifier for the same mission -- refused
     unconditionally, regardless of fresh_context_attested's value."""
+
+
+class AttemptNumberMismatch(AgentInvocationError):
+    """result.evidence['attempt'] does not equal request.attempt --
+    refused before evidence is ever touched, exactly like
+    InvocationIdMismatch. Increment #16 role-boundary corrective cycle:
+    request.attempt is never sent to the provider as part of `task`, so
+    without this check `evidence['attempt']` is entirely provider-
+    asserted data Chugel's own validator cannot bind back to what was
+    actually requested -- confirmed by a real pilot attempt in which
+    Codex self-labeled a fabricated corrective-cycle narrative as
+    attempt=1 while the request had asked for attempt=0. A missing
+    (None), malformed (non-int), or mismatched attempt all raise this
+    identically -- no coercion, no repair."""
 
 
 # --- structured envelopes ------------------------------------------------
@@ -212,6 +253,31 @@ def _validate_result_shape(result: AgentInvocationResult) -> None:
         raise ValueError(f"outcome {result.outcome!r} is not one of {sorted(_OUTCOMES)}")
 
 
+def _check_attempt_binding(
+    request: AgentInvocationRequest, result: AgentInvocationResult
+) -> None:
+    """Increment #16 role-boundary corrective cycle: a "completed" result
+    is only ever eligible to be persisted if its evidence's own `attempt`
+    field equals request.attempt exactly -- int equality, no coercion, no
+    normalization. Never called for a non-"completed" outcome (nothing is
+    persisted for those regardless, so there is nothing to bind). A
+    missing evidence dict, a missing/None `attempt` key, a non-int
+    `attempt`, or a mismatched int are all refused identically -- every
+    one of "missing," "malformed," and "mismatched" fails closed the same
+    way, per this increment's explicit requirement."""
+    if result.outcome != "completed":
+        return
+    evidence_attempt = (
+        result.evidence.get("attempt") if isinstance(result.evidence, dict) else None
+    )
+    if evidence_attempt != request.attempt:
+        raise AttemptNumberMismatch(
+            f"mission {request.mission_id}: result.evidence['attempt'] "
+            f"({evidence_attempt!r}) does not equal request.attempt "
+            f"({request.attempt!r}) -- refusing before evidence is persisted"
+        )
+
+
 def consume_emilio_result(
     request: AgentInvocationRequest, result: AgentInvocationResult
 ) -> dict | None:
@@ -228,6 +294,7 @@ def consume_emilio_result(
             f"request.invocation_id {request.invocation_id!r}"
         )
     _validate_result_shape(result)
+    _check_attempt_binding(request, result)
 
     if result.outcome != "completed":
         return None
@@ -286,6 +353,8 @@ def consume_emma_result(
             f"{result.provider_conversation_id!r} matches the supplied prior "
             "identifier -- refusing regardless of fresh_context_attested"
         )
+
+    _check_attempt_binding(request, result)
 
     if result.outcome != "completed":
         return None

@@ -373,6 +373,177 @@ class PruebaStaleSessionReused(AgentInvocationTestCase):
         self.assertIsNotNone(updated)
 
 
+# --- attempt binding (Incremento #16, ciclo correctivo de frontera) -----
+
+class PruebaAttemptBinding(AgentInvocationTestCase):
+    """Cierra el hallazgo real confirmado de Discovery (B): request.attempt
+    nunca se serializa en request.task, así que evidence['attempt'] era,
+    antes de esta corrección, dato enteramente afirmado por el proveedor,
+    sin ningún chequeo de vínculo con lo realmente solicitado antes de
+    chugel.record_builder_evidence()/record_reviewer_evidence(). Un
+    intento real de Codex explotó exactamente esta brecha: fabricó una
+    narrativa completa de ciclo correctivo y se autoetiquetó
+    attempt=1 mientras el request pedía attempt=0."""
+
+    def test_emilio_attempt_coincidente_pasa(self):
+        m = _create_intake_mission("algo")
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        result = _result(req.invocation_id, evidence=_builder_evidence(attempt=0))
+        updated = ai.consume_emilio_result(req, result)
+        self.assertIsNotNone(updated)
+
+    def test_emilio_attempt_no_coincidente_falla_antes_de_persistir(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        req = ai.build_emilio_invocation_request(mid, 0)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        result = _result(req.invocation_id, evidence=_builder_evidence(attempt=1))
+        with self.assertRaises(ai.AttemptNumberMismatch):
+            ai.consume_emilio_result(req, result)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_emilio_attempt_faltante_falla_antes_de_persistir(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        req = ai.build_emilio_invocation_request(mid, 0)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        bad_evidence = _builder_evidence(attempt=0)
+        del bad_evidence["attempt"]
+        result = _result(req.invocation_id, evidence=bad_evidence)
+        with self.assertRaises(ai.AttemptNumberMismatch):
+            ai.consume_emilio_result(req, result)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_emilio_attempt_malformado_falla_antes_de_persistir(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        req = ai.build_emilio_invocation_request(mid, 0)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        bad_evidence = _builder_evidence(attempt="0")  # string, no int -- nunca coercido
+        result = _result(req.invocation_id, evidence=bad_evidence)
+        with self.assertRaises(ai.AttemptNumberMismatch):
+            ai.consume_emilio_result(req, result)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_emma_attempt_coincidente_pasa(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        req = ai.build_emma_invocation_request(mid, 0)
+        result = _result(req.invocation_id, fresh_context_attested=True,
+                          evidence=_reviewer_evidence(attempt=0))
+        updated = ai.consume_emma_result(req, result)
+        self.assertIsNotNone(updated)
+
+    def test_emma_attempt_no_coincidente_falla_antes_de_persistir(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        req = ai.build_emma_invocation_request(mid, 0)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        result = _result(req.invocation_id, fresh_context_attested=True,
+                          evidence=_reviewer_evidence(attempt=1))
+        with self.assertRaises(ai.AttemptNumberMismatch):
+            ai.consume_emma_result(req, result)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_emma_attempt_faltante_falla_antes_de_persistir(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        req = ai.build_emma_invocation_request(mid, 0)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        bad_evidence = _reviewer_evidence(attempt=0)
+        del bad_evidence["attempt"]
+        result = _result(req.invocation_id, fresh_context_attested=True, evidence=bad_evidence)
+        with self.assertRaises(ai.AttemptNumberMismatch):
+            ai.consume_emma_result(req, result)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_emma_attempt_malformado_falla_antes_de_persistir(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        req = ai.build_emma_invocation_request(mid, 0)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        bad_evidence = _reviewer_evidence(attempt=None)
+        result = _result(req.invocation_id, fresh_context_attested=True, evidence=bad_evidence)
+        with self.assertRaises(ai.AttemptNumberMismatch):
+            ai.consume_emma_result(req, result)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_attempt_binding_ocurre_despues_de_invocation_id(self):
+        """invocation_id mismatch debe seguir teniendo prioridad -- un
+        mismatch de attempt no debe enmascarar un protocolo violado más
+        fundamental."""
+        m = _create_intake_mission("algo")
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        result = _result(str(uuid.uuid4()), evidence=_builder_evidence(attempt=1))
+        with self.assertRaises(ai.InvocationIdMismatch):
+            ai.consume_emilio_result(req, result)
+
+    def test_attempt_binding_no_interfiere_con_fresh_context_ni_stale_session(self):
+        """Los chequeos preexistentes de fresh-context/stale-session de
+        Emma deben seguir teniendo su propio tipo de excepción intacto --
+        el chequeo de attempt no debe enmascararlos cuando evidence es
+        None/placeholder, exactamente el escenario que ya ejercían estas
+        pruebas preexistentes."""
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        req = ai.build_emma_invocation_request(mid, 0)
+
+        result = _result(req.invocation_id, fresh_context_attested=False)
+        with self.assertRaises(ai.FreshContextNotAttested):
+            ai.consume_emma_result(req, result)
+
+        result = _result(req.invocation_id, fresh_context_attested=True,
+                          provider_session_id="SAME-SESSION-ID")
+        with self.assertRaises(ai.StaleSessionReused):
+            ai.consume_emma_result(req, result, prior_session_id="SAME-SESSION-ID")
+
+    def test_attempt_1_coincidente_pasa_para_ambos_roles(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        chugel.record_reviewer_evidence(mid, _reviewer_evidence(
+            attempt=0, verdict="CHANGES_REQUIRED",
+            findings=[{"id": "f1", "severity": "P1", "summary": "x",
+                       "file": None, "line_range": None, "category": "bug"}]))
+
+        req1 = ai.build_emilio_invocation_request(mid, 1)
+        result1 = _result(req1.invocation_id, evidence=_builder_evidence(attempt=1))
+        self.assertIsNotNone(ai.consume_emilio_result(req1, result1))
+
+        req_e1 = ai.build_emma_invocation_request(mid, 1)
+        result_e1 = _result(req_e1.invocation_id, fresh_context_attested=True,
+                             evidence=_reviewer_evidence(attempt=1))
+        self.assertIsNotNone(ai.consume_emma_result(req_e1, result_e1))
+
+    def test_outcome_no_completado_omite_el_chequeo_de_attempt(self):
+        """Un outcome no-completado nunca persiste nada de todas formas --
+        el chequeo de attempt no debe lanzar espuriamente cuando evidence
+        es None, que es la forma normal de un resultado no-completado."""
+        m = _create_intake_mission("algo")
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        for outcome in ("failed", "timeout", "invalid_output", "unavailable"):
+            result = _result(req.invocation_id, outcome=outcome, evidence=None)
+            returned = ai.consume_emilio_result(req, result)
+            self.assertIsNone(returned, msg=outcome)
+
+
 # --- outcome branches ----------------------------------------------------
 
 class PruebaOutcomeBranches(AgentInvocationTestCase):
