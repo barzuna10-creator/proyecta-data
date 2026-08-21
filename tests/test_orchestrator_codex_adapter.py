@@ -149,10 +149,41 @@ def _install_fake_openai_codex():
             self.account = account
             self.requires_openai_auth = requires_openai_auth
 
+    class CodexConfig:
+        """Reproduces the real openai_codex.CodexConfig dataclass shape --
+        a plain attribute bag, `config_overrides` a tuple of `key=value`
+        strings destined to become `--config <kv>` args to the real
+        `codex app-server` subprocess (confirmed by reading
+        openai_codex/client.py directly)."""
+
+        def __init__(
+            self,
+            *,
+            codex_bin=None,
+            launch_args_override=None,
+            config_overrides=(),
+            cwd=None,
+            env=None,
+            client_name="codex_python_sdk",
+            client_title="Codex Python SDK",
+            client_version="0.147.0",
+            experimental_api=True,
+        ):
+            self.codex_bin = codex_bin
+            self.launch_args_override = launch_args_override
+            self.config_overrides = config_overrides
+            self.cwd = cwd
+            self.env = env
+            self.client_name = client_name
+            self.client_title = client_title
+            self.client_version = client_version
+            self.experimental_api = experimental_api
+
     class Codex:
         instances = []
 
         def __init__(self, config=None):
+            self.config = config
             self.logged_in_with = None
             self.chatgpt_login_called = False
             self._account_response = GetAccountResponse(account=Account(ApiKeyAccount()))
@@ -204,6 +235,7 @@ def _install_fake_openai_codex():
 
     fake.Sandbox = Sandbox
     fake.Codex = Codex
+    fake.CodexConfig = CodexConfig
     fake.Thread = Thread
     fake.TurnResult = TurnResult
     fake.TurnStatus = TurnStatus
@@ -469,6 +501,83 @@ class PruebaFronteraDeConfianzaReal(CodexAdapterTestCase):
     def test_nunca_llama_login_chatgpt(self):
         for func in (self.coa.CodexAdapter.invoke, self.coa.CodexAdapter._run):
             self.assertNotIn("login_chatgpt", func.__code__.co_names)
+
+
+class PruebaRestriccionMultiAgente(CodexAdapterTestCase):
+    """Incremento #16, ciclo correctivo de frontera de rol -- cierra el
+    hallazgo real confirmado de Discovery (A): un hilo real de Codex usó
+    su propia herramienta nativa `spawn_agent` para bifurcar un sub-agente
+    en `/root/emma_review`, obtuvo de él un veredicto "PASS" autogenerado,
+    e incorporó esa revisión fabricada a su propia evidencia de builder --
+    sin ninguna invocación real de Emma. Confirmado por introspección
+    directa del paquete real `openai-codex==0.147.0` y por una invocación
+    local (sin red, sin credencial) del binario `codex` real: `codex
+    features list -c features.multi_agent=false` reporta `multi_agent
+    stable  false` -- esta es una restricción técnica real del proveedor,
+    no una instrucción de prompt."""
+
+    def test_codex_se_construye_con_multi_agent_deshabilitado(self):
+        thread = self._fake_sdk.Thread(
+            id="t-1",
+            turn_result=self._fake_sdk.TurnResult(
+                status=self._fake_sdk.TurnStatus.completed, final_response=json.dumps({"attempt": 0})
+            ),
+        )
+        with self._patch_thread_start(thread):
+            adapter = self.coa.CodexAdapter()
+            adapter.invoke(self._request())
+
+        self.assertEqual(len(self._fake_sdk.Codex.instances), 1)
+        codex_instance = self._fake_sdk.Codex.instances[0]
+        self.assertIsNotNone(codex_instance.config)
+        self.assertIn("features.multi_agent=false", codex_instance.config.config_overrides)
+
+    def test_restriccion_presente_en_cada_invocacion_para_ambos_roles(self):
+        for role in ("emilio", "emma"):
+            thread = self._fake_sdk.Thread(
+                id=f"t-{role}",
+                turn_result=self._fake_sdk.TurnResult(
+                    status=self._fake_sdk.TurnStatus.completed, final_response=json.dumps({"attempt": 0})
+                ),
+            )
+            with self._patch_thread_start(thread):
+                adapter = self.coa.CodexAdapter()
+                adapter.invoke(self._request(agent_role=role))
+
+        self.assertEqual(len(self._fake_sdk.Codex.instances), 2)
+        for codex_instance in self._fake_sdk.Codex.instances:
+            self.assertIn("features.multi_agent=false", codex_instance.config.config_overrides)
+
+    def test_configuracion_normal_de_workspace_write_permanece_intacta(self):
+        """La restricción de multi_agent es ortogonal al Sandbox -- Emilio
+        sigue recibiendo workspace_write, la edición normal de archivos no
+        se ve afectada por esta corrección."""
+        captured = {}
+
+        def fake_thread_start(self_codex, **kwargs):
+            captured.update(kwargs)
+            return self._fake_sdk.Thread(
+                id="t-1",
+                turn_result=self._fake_sdk.TurnResult(
+                    status=self._fake_sdk.TurnStatus.completed, final_response=json.dumps({"attempt": 0})
+                ),
+            )
+
+        with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
+            adapter = self.coa.CodexAdapter()
+            adapter.invoke(self._request(agent_role="emilio", task={"repository": {"worktree_path": "/tmp/wt"}}))
+
+        self.assertEqual(captured.get("sandbox"), self._fake_sdk.Sandbox.workspace_write)
+        self.assertEqual(captured.get("cwd"), "/tmp/wt")
+        codex_instance = self._fake_sdk.Codex.instances[-1]
+        self.assertIn("features.multi_agent=false", codex_instance.config.config_overrides)
+
+    def test_no_amplia_a_otras_banderas_de_caracteristicas(self):
+        """Esta corrección está deliberadamente acotada a
+        features.multi_agent -- no debe deshabilitar browser_use, plugins,
+        apps, computer_use ni ninguna otra bandera (hallazgo P2 diferido,
+        no corregido aquí)."""
+        self.assertEqual(self.coa._CODEX_CONFIG_OVERRIDES, ("features.multi_agent=false",))
 
 
 class PruebaCompatibilidadConSDKReal(CodexAdapterTestCase):

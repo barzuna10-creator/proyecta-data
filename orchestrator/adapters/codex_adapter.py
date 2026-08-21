@@ -262,6 +262,57 @@ provider-facing schema, not assumed:**
     target itself, untouched by this pass. `orchestrator/validator.py`'s
     independent `Draft7Validator` is unaffected for the same structural
     reason as points 9-12 above.
+
+**Corrective cycle (Increment #16, Codex role-boundary Discovery finding
+A -- unauthorized internal agent spawning): closes a confirmed real
+finding from a real pilot Emilio attempt, in which the Codex thread used
+its own native `spawn_agent` tool to fork a sub-agent at
+`/root/emma_review`, obtained a self-generated "PASS" verdict from it, and
+folded that fabricated review into its own submitted builder evidence --
+entirely unauthorized, since no Emma invocation had occurred. Root cause,
+confirmed by direct introspection of the real, installed
+`openai-codex==0.147.0` package (never assumed): the `multi_agent`
+feature flag (`codex features list`: `multi_agent  stable  true`) is
+**enabled by default** and exposes `CollabAgentTool.spawn_agent` (and
+`send_input`/`resume_agent`/`wait`/`close_agent`) as native tools inside
+every thread this adapter starts, since `_run()` previously constructed
+`Codex()` with no configuration at all:
+
+16. **`Codex()` is now constructed with `CodexConfig(config_overrides=
+    _CODEX_CONFIG_OVERRIDES)`, `_CODEX_CONFIG_OVERRIDES = ("features.
+    multi_agent=false",)`.** Confirmed, not assumed, by direct
+    introspection and a local (no-network, no-credential) invocation of
+    the real bundled `codex` binary: `codex features list -c
+    features.multi_agent=false` shows `multi_agent  stable  false`,
+    versus `true` with no override -- this genuinely removes the
+    collab-agent tool family from what the model can call, before any
+    thread starts; it is not a prompt instruction the model could ignore
+    or reason past. Traced through the real SDK source
+    (`openai_codex/client.py`): `CodexConfig.config_overrides` entries
+    become `--config <kv>` arguments prepended to the `codex app-server
+    --listen stdio://` subprocess this specific `Codex()` instance
+    launches -- exactly the CLI's own `-c` override mechanism, scoped to
+    this one client/process, never touching `~/.codex/config.toml`
+    globally. This is a genuine, provider-native, technical restriction,
+    not a request to the model to behave -- closing Discovery item A.6's
+    explicit requirement.
+17. **Deliberately scoped to only `features.multi_agent=false`.** Per
+    this increment's own explicit authorization, this correction does not
+    broaden into disabling `browser_use`, `plugins`, `apps`,
+    `computer_use`, or any other tool-surface feature flag also enabled
+    by default -- those are a separate, deferred P2 finding
+    (Discovery item A.5), not fixed here. `Sandbox`/`approval_mode` (the
+    mechanisms that actually govern filesystem write access) are
+    untouched by this change -- `features.multi_agent` is an orthogonal
+    axis, confirmed by direct reading of the generated SDK types
+    (`ToolsV2`/`CollabAgentTool` are unrelated to `Sandbox`), so ordinary
+    workspace-write file editing for Emilio is unaffected.
+18. **Applied uniformly to every `Codex()` construction this adapter
+    makes** -- there is exactly one such call site (`_run()`), used by
+    both `agent_role="emilio"` and `agent_role="emma"` (the latter only
+    if Codex is ever selected as Emma's fallback provider) -- so neither
+    role's Codex thread can spawn a sub-agent impersonating the other,
+    not just Emilio's.
 """
 
 from __future__ import annotations
@@ -271,7 +322,7 @@ import json
 import os
 from pathlib import Path
 
-from openai_codex import Codex, Sandbox
+from openai_codex import Codex, CodexConfig, Sandbox
 from openai_codex.errors import (
     CodexError,
     InternalRpcError,
@@ -314,6 +365,15 @@ class CodexAdapterError(Exception):
 _CODEX_UNSUPPORTED_KEYWORDS = frozenset(
     {"if", "then", "else", "allOf", "not", "dependentRequired", "dependentSchemas"}
 )
+
+# Increment #16, role-boundary corrective cycle (module docstring points
+# 16-18): disables Codex's native multi-agent/sub-agent-spawn tool family
+# for every thread this adapter starts, closing the confirmed real finding
+# where a Codex thread spawned a sub-agent impersonating Emma. Confirmed,
+# not assumed, by a local (no-network, no-credential) invocation of the
+# real bundled `codex` binary: `codex features list -c
+# features.multi_agent=false` reports `multi_agent  stable  false`.
+_CODEX_CONFIG_OVERRIDES = ("features.multi_agent=false",)
 
 
 def _codex_refs_in(node: object) -> set[str]:
@@ -618,7 +678,7 @@ class CodexAdapter:
         repository = request.task.get("repository") or {}
         worktree_path = repository.get("worktree_path")
 
-        with Codex() as codex:
+        with Codex(config=CodexConfig(config_overrides=_CODEX_CONFIG_OVERRIDES)) as codex:
             codex.login_api_key(os.environ["OPENAI_API_KEY"])
             _verify_api_key_identity_active(codex)
 
