@@ -463,6 +463,21 @@ def record_reviewer_evidence(mission_id: str, evidence: dict) -> dict:
     return mutated
 
 
+def _apply_gate_decision(record: dict, gate_name: str, decision: dict) -> dict:
+    """Pure mutation only -- no read, no validate, no write. Returns a
+    fresh copy of `record` with `human_gates[gate_name]` replaced by
+    `decision` wholesale. The caller is responsible for the eager
+    gate_name/decided_by refusals decide_gate() has always performed
+    before ever reaching this point -- this helper trusts its caller
+    already did them, exactly as it trusted them when this was all one
+    function body."""
+    mutated = copy.deepcopy(record)
+    mutated["human_gates"] = dict(mutated["human_gates"])
+    mutated["human_gates"][gate_name] = copy.deepcopy(decision)
+    mutated["updated_at"] = _now()
+    return mutated
+
+
 def decide_gate(mission_id: str, gate_name: str, decision: dict) -> dict:
     """The only path to setting a human_gates.<name> status. Hard-refuses
     before any read/write unless decision['decided_by'] is literally
@@ -476,10 +491,7 @@ def decide_gate(mission_id: str, gate_name: str, decision: dict) -> dict:
         )
 
     record = _read_mission_record(mission_id)
-    mutated = copy.deepcopy(record)
-    mutated["human_gates"] = dict(mutated["human_gates"])
-    mutated["human_gates"][gate_name] = copy.deepcopy(decision)
-    mutated["updated_at"] = _now()
+    mutated = _apply_gate_decision(record, gate_name, decision)
 
     result = validate_mission_record(mutated)
     if not result.valid:
@@ -555,14 +567,38 @@ def decide_scope_change(mission_id: str, proposal_id: str, decision: dict) -> di
         )
 
     record = _read_mission_record(mission_id)
+    mutated = _apply_scope_change_decision(record, proposal_id, decision)
+
+    result = validate_mission_record(mutated)
+    if not result.valid:
+        raise MissionValidationFailed(
+            f"mission {mission_id}: scope-change decision failed validation", result.errors
+        )
+
+    _write_mission_record(mutated)
+    return mutated
+
+
+def _apply_scope_change_decision(record: dict, proposal_id: str, decision: dict) -> dict:
+    """Pure mutation only -- no read, no validate, no write. Returns a
+    fresh copy of `record` with the proposal at `proposal_id` marked per
+    `decision['status']` and, on acceptance, the resulting
+    mission_definition_history entry appended. The caller is responsible
+    for the eager decided_by/status refusals decide_scope_change() has
+    always performed before ever reaching this point -- this helper
+    trusts its caller already did them, exactly as it trusted them when
+    this was all one function body."""
     mutated = copy.deepcopy(record)
+    status = decision["status"]
 
     proposals = list(mutated["proposed_scope_changes"])
     index = next(
         (i for i, p in enumerate(proposals) if p.get("proposal_id") == proposal_id), None
     )
     if index is None:
-        raise ValueError(f"mission {mission_id}: no proposal with proposal_id={proposal_id!r}")
+        raise ValueError(
+            f"mission {mutated['mission_id']}: no proposal with proposal_id={proposal_id!r}"
+        )
 
     proposal = copy.deepcopy(proposals[index])
     proposal["status"] = status
@@ -586,11 +622,79 @@ def decide_scope_change(mission_id: str, proposal_id: str, decision: dict) -> di
     proposals[index] = proposal
     mutated["proposed_scope_changes"] = proposals
     mutated["updated_at"] = _now()
+    return mutated
+
+
+def decide_scope_change_and_reauthorize(
+    mission_id: str,
+    proposal_id: str,
+    scope_decision: dict,
+    gate_decision: dict,
+) -> dict:
+    """Atomically accepts a proposed scope change AND re-approves
+    `human_gates.scope_authorization` for the resulting new mission
+    definition version, in a single validate-then-write cycle -- closes
+    the scope-change-sequencing gap this module's own docstring already
+    documents (Emma's non-blocking P3 finding from CHUGEL_V1.md's final
+    review). Confirmed by dry-run before this function existed: neither
+    ordering of the two existing calls alone can produce a valid record --
+    `decide_scope_change()` alone leaves `scope_authorization` stale for
+    the new version (`STALE_APPROVAL`); `decide_gate()` alone, called
+    before the new version exists, is equally rejected by the exact same
+    symmetric check in `validator.py`'s `_check_stale_approvals()`, which
+    this function does not modify, weaken, or bypass -- it is applied,
+    unchanged, to the fully combined record below.
+
+    Hard-refuses before any read/write unless BOTH `scope_decision['decided_by']`
+    and `gate_decision['decided_by']` are literally HUMAN_DECIDER, mirroring
+    `decide_scope_change()`'s and `decide_gate()`'s own individual guards
+    exactly -- and unless `scope_decision['status']` is 'accepted' or
+    'rejected', mirroring `decide_scope_change()`'s own guard. `gate_decision`
+    is always applied to `gate_name="scope_authorization"` -- this
+    operation's entire purpose, not a generalized any-gate atomic
+    primitive.
+
+    Performs both mutations against the same in-memory record, via the
+    same pure `_apply_scope_change_decision()`/`_apply_gate_decision()`
+    helpers `decide_scope_change()`/`decide_gate()` themselves use,
+    validates the fully combined record exactly once, and writes exactly
+    once via the existing `_write_mission_record()`. If validation fails
+    for any reason -- including a `gate_decision.approved_for.mission_definition_version`
+    that does not match the version `_apply_scope_change_decision()`
+    actually produced -- zero bytes are written; the on-disk record is
+    guaranteed unchanged, exactly as every other Chugel operation already
+    promises. A `scope_decision['status'] == 'rejected'` alongside a
+    `gate_decision` is not specially rejected here -- no new
+    mission_definition_history version is produced in that case, so the
+    gate re-decision will almost always fail the same STALE_APPROVAL check
+    on its own, which is the correct fail-closed outcome without any
+    additional bespoke logic."""
+    if scope_decision.get("decided_by") != HUMAN_DECIDER:
+        raise ValueError(
+            f"decide_scope_change_and_reauthorize() refuses: scope_decision['decided_by'] "
+            f"must be the literal {HUMAN_DECIDER!r}, got {scope_decision.get('decided_by')!r}"
+        )
+    if gate_decision.get("decided_by") != HUMAN_DECIDER:
+        raise ValueError(
+            f"decide_scope_change_and_reauthorize() refuses: gate_decision['decided_by'] "
+            f"must be the literal {HUMAN_DECIDER!r}, got {gate_decision.get('decided_by')!r}"
+        )
+    status = scope_decision.get("status")
+    if status not in ("accepted", "rejected"):
+        raise ValueError(
+            "decide_scope_change_and_reauthorize() requires scope_decision['status'] "
+            "to be 'accepted' or 'rejected'"
+        )
+
+    record = _read_mission_record(mission_id)
+    mutated = _apply_scope_change_decision(record, proposal_id, scope_decision)
+    mutated = _apply_gate_decision(mutated, "scope_authorization", gate_decision)
 
     result = validate_mission_record(mutated)
     if not result.valid:
         raise MissionValidationFailed(
-            f"mission {mission_id}: scope-change decision failed validation", result.errors
+            f"mission {mission_id}: atomic scope-change acceptance + scope_authorization "
+            "re-decision failed validation", result.errors
         )
 
     _write_mission_record(mutated)
