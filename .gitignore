@@ -12,6 +12,12 @@ logs/*.json
 # SO
 .DS_Store
 
+# Registros de misión en runtime de Chugel V1 (orchestrator/chugel.py) --
+# estado operativo mutable, no contenido de repositorio. Ver
+# orchestrator/CHUGEL_V1.md, sección "Rollback strategy" (decisión de
+# git-tracking) e Incremento #5 para el razonamiento completo.
+orchestrator/missions/*.json
+
 # Archivos auxiliares de SQLite en modo WAL (regenerables, se crean al
 # correr el backend localmente contra database/proyecta.db -- ver db.py)
 database/proyecta.db-shm
