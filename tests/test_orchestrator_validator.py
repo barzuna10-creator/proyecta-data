@@ -206,6 +206,17 @@ def error_codes(result):
     return sorted(e.code for e in result.errors)
 
 
+def _set_invocation_identity(entry, *, invocation_id, provider,
+                             provider_session_id=None,
+                             provider_conversation_id=None):
+    entry.update({
+        "invocation_id": invocation_id,
+        "provider": provider,
+        "provider_session_id": provider_session_id,
+        "provider_conversation_id": provider_conversation_id,
+    })
+
+
 class PruebaFlujosLegales(unittest.TestCase):
     """Casos de camino feliz -- deben validar limpio, sin ningún error."""
 
@@ -351,6 +362,111 @@ class PruebaConsistenciaIdentidadDeArtefacto(unittest.TestCase):
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
         self.assertIn("ARTIFACT_IDENTITY_MISMATCH_WITH_BUILDER", error_codes(result))
+
+
+class PruebaIdentidadPersistenteDeInvocacion(unittest.TestCase):
+    BUILDER_INVOCATION_ID = "11111111-1111-4111-8111-111111111111"
+    REVIEWER_INVOCATION_ID = "22222222-2222-4222-8222-222222222222"
+
+    def _record_with_identities(self, *, builder_session="builder-session",
+                                reviewer_session="reviewer-session",
+                                builder_conversation="builder-conversation",
+                                reviewer_conversation="reviewer-conversation"):
+        record = _built_and_reviewed_pass_record()
+        _set_invocation_identity(
+            record["builder_evidence"][0],
+            invocation_id=self.BUILDER_INVOCATION_ID,
+            provider="codex",
+            provider_session_id=builder_session,
+            provider_conversation_id=builder_conversation,
+        )
+        _set_invocation_identity(
+            record["reviewer_evidence"][0],
+            invocation_id=self.REVIEWER_INVOCATION_ID,
+            provider="claude",
+            provider_session_id=reviewer_session,
+            provider_conversation_id=reviewer_conversation,
+        )
+        return record
+
+    def test_registro_historico_sin_identidades_sigue_valido(self):
+        record = _built_and_reviewed_pass_record()
+        self.assertTrue(validate_mission_record(record).valid)
+
+    def test_identidades_null_son_validas(self):
+        record = self._record_with_identities(
+            builder_session=None,
+            reviewer_session=None,
+            builder_conversation=None,
+            reviewer_conversation=None,
+        )
+        for field in ("invocation_id", "provider"):
+            record["builder_evidence"][0][field] = None
+            record["reviewer_evidence"][0][field] = None
+        self.assertTrue(validate_mission_record(record).valid)
+
+    def test_identidades_distintas_son_validas(self):
+        record = self._record_with_identities()
+        self.assertTrue(validate_mission_record(record).valid)
+
+    def test_reviewer_no_puede_reusar_sesion_del_builder_mismo_intento(self):
+        record = self._record_with_identities(reviewer_session="builder-session")
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("REVIEWER_REUSED_BUILDER_PROVIDER_SESSION", error_codes(result))
+
+    def test_reviewer_no_puede_reusar_conversacion_del_builder_mismo_intento(self):
+        record = self._record_with_identities(
+            reviewer_conversation="builder-conversation",
+        )
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("REVIEWER_REUSED_BUILDER_PROVIDER_CONVERSATION", error_codes(result))
+
+    def test_null_no_se_compara_como_identidad_compartida(self):
+        record = self._record_with_identities(
+            builder_session=None,
+            reviewer_session=None,
+        )
+        self.assertNotIn(
+            "REVIEWER_REUSED_BUILDER_PROVIDER_SESSION",
+            error_codes(validate_mission_record(record)),
+        )
+
+    def test_solo_se_compara_el_intento_correspondiente(self):
+        record = _corrective_cycle_record()
+        for attempt, builder in enumerate(record["builder_evidence"]):
+            _set_invocation_identity(
+                builder,
+                invocation_id=(self.BUILDER_INVOCATION_ID if attempt == 0 else
+                               "33333333-3333-4333-8333-333333333333"),
+                provider="codex",
+                provider_session_id=f"builder-session-{attempt}",
+            )
+        for attempt, reviewer in enumerate(record["reviewer_evidence"]):
+            _set_invocation_identity(
+                reviewer,
+                invocation_id=(self.REVIEWER_INVOCATION_ID if attempt == 0 else
+                               "44444444-4444-4444-8444-444444444444"),
+                provider="claude",
+                provider_session_id=f"builder-session-{1 - attempt}",
+            )
+        self.assertTrue(validate_mission_record(record).valid)
+
+    def test_invocation_id_debe_ser_uuid_canonico_o_null(self):
+        for bad_value in ("inv-1", "", 1, True, {}):
+            with self.subTest(bad_value=bad_value):
+                record = self._record_with_identities()
+                record["builder_evidence"][0]["invocation_id"] = bad_value
+                self.assertFalse(validate_mission_record(record).valid)
+
+    def test_metadatos_de_proveedor_deben_ser_strings_no_vacios_o_null(self):
+        for field in ("provider", "provider_session_id", "provider_conversation_id"):
+            for bad_value in ("", 1, True, {}):
+                with self.subTest(field=field, bad_value=bad_value):
+                    record = self._record_with_identities()
+                    record["reviewer_evidence"][0][field] = bad_value
+                    self.assertFalse(validate_mission_record(record).valid)
 
 
 class PruebaAprobacionesObsoletas(unittest.TestCase):

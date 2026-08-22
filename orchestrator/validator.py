@@ -320,6 +320,7 @@ def validate_mission_record(record: Any) -> ValidationResult:
     errors += _check_reviewer_verdict_consistency(record)
     errors += _check_attempt_sequencing(record)
     errors += _check_artifact_identity_consistency(record)
+    errors += _check_reviewer_provider_identity_independence(record)
     errors += _check_human_gates_consistency(record)
     errors += _check_corrective_cycle_consistency(record)
     errors += _check_mission_definition_history_consistency(record)
@@ -548,6 +549,57 @@ def _check_artifact_identity_consistency(record: dict) -> list[ValidationError]:
                 f"matching builder_evidence attempt actually produced",
                 path + ".artifact_identity_confirmed_at_start",
             ))
+
+    return errors
+
+
+def _check_reviewer_provider_identity_independence(record: dict) -> list[ValidationError]:
+    """A reviewer may not claim the provider session/conversation identity
+    persisted for the matching builder attempt. Missing or null identity
+    metadata remains valid for historical records and providers that expose
+    no usable identifier; when both sides persist an identifier, equality is
+    an unconditional fail-closed independence violation."""
+    errors: list[ValidationError] = []
+    builder_entries = record.get("builder_evidence")
+    builder_by_attempt = {
+        entry.get("attempt"): entry
+        for entry in builder_entries
+        if isinstance(builder_entries, list) and isinstance(entry, dict)
+    } if isinstance(builder_entries, list) else {}
+
+    reviewer_entries = record.get("reviewer_evidence")
+    if not isinstance(reviewer_entries, list):
+        return errors
+
+    identity_fields = (
+        (
+            "provider_session_id",
+            "REVIEWER_REUSED_BUILDER_PROVIDER_SESSION",
+            "provider session",
+        ),
+        (
+            "provider_conversation_id",
+            "REVIEWER_REUSED_BUILDER_PROVIDER_CONVERSATION",
+            "provider conversation",
+        ),
+    )
+    for idx, reviewer_entry in enumerate(reviewer_entries):
+        if not isinstance(reviewer_entry, dict):
+            continue
+        builder_entry = builder_by_attempt.get(reviewer_entry.get("attempt"))
+        if not isinstance(builder_entry, dict):
+            continue
+
+        for field_name, code, label in identity_fields:
+            builder_identity = builder_entry.get(field_name)
+            reviewer_identity = reviewer_entry.get(field_name)
+            if builder_identity is not None and reviewer_identity == builder_identity:
+                errors.append(ValidationError(
+                    code,
+                    f"reviewer_evidence[{idx}] reuses the matching builder attempt's "
+                    f"{label} identity",
+                    f"$.reviewer_evidence[{idx}].{field_name}",
+                ))
 
     return errors
 

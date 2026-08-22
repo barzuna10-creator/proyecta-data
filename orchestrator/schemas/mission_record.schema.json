@@ -313,6 +313,23 @@
       "pattern": "^[0-9a-f]{40}$",
       "description": "Full 40-character Git commit SHA. Short SHAs are never sufficient identity."
     },
+    "nullable_invocation_id": {
+      "description": "Infrastructure-owned invocation UUID. Optional and nullable for backward compatibility; never supplied by provider/model output.",
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      ]
+    },
+    "nullable_provider_identity": {
+      "description": "Infrastructure-owned opaque provider identity metadata. Optional and nullable when the infrastructure has no usable identifier.",
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
     "scope_authorization_gate": {
       "allOf": [
         { "$ref": "#/definitions/human_gate" },
@@ -541,6 +558,10 @@
       "properties": {
         "attempt": { "type": "integer", "enum": [0, 1] },
         "invoked_at": { "$ref": "#/definitions/timestamp" },
+        "invocation_id": { "$ref": "#/definitions/nullable_invocation_id" },
+        "provider": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_session_id": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_conversation_id": { "$ref": "#/definitions/nullable_provider_identity" },
         "artifact": { "$ref": "#/definitions/artifact_identity" },
         "changed_files": {
           "type": "array",
@@ -623,6 +644,10 @@
       "properties": {
         "attempt": { "type": "integer", "enum": [0, 1] },
         "invoked_at": { "$ref": "#/definitions/timestamp" },
+        "invocation_id": { "$ref": "#/definitions/nullable_invocation_id" },
+        "provider": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_session_id": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_conversation_id": { "$ref": "#/definitions/nullable_provider_identity" },
         "artifact_identity_confirmed_at_start": { "$ref": "#/definitions/artifact_identity" },
         "artifact_identity_confirmed_before_conclusion": { "$ref": "#/definitions/artifact_identity" },
         "rechecked_commands": {
