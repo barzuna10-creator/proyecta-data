@@ -37,6 +37,7 @@ prueba):**
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib
 import inspect
 import json
@@ -544,7 +545,7 @@ class PruebaCompatibilidadConSDKReal(CodexAdapterTestCase):
             adapter = self.coa.CodexAdapter()
             adapter.invoke(self._request())
         self.assertEqual(thread.run_called_count, 1)
-        self.assertIn("builder_evidence_entry", json.dumps(thread.last_kwargs["output_schema"]))
+        self.assertIn("handoff_document_ref", thread.last_kwargs["output_schema"]["properties"])
 
 
 class PruebaInvocacionExitosa(CodexAdapterTestCase):
@@ -701,9 +702,12 @@ class PruebaEsquemaDeEvidencia(CodexAdapterTestCase):
     def test_output_schema_usa_definicion_correcta_por_rol(self):
         schema_emilio = self.coa._load_evidence_schema("emilio")
         schema_emma = self.coa._load_evidence_schema("emma")
-        self.assertIn("builder_evidence_entry", schema_emilio["$ref"])
-        self.assertIn("reviewer_evidence_entry", schema_emma["$ref"])
-        self.assertIn("definitions", schema_emilio)
+        self.assertEqual(schema_emilio.get("type"), "object")
+        self.assertEqual(schema_emma.get("type"), "object")
+        self.assertNotIn("$ref", schema_emilio)
+        self.assertNotIn("$ref", schema_emma)
+        self.assertIn("handoff_document_ref", schema_emilio["properties"])
+        self.assertIn("verdict", schema_emma["properties"])
 
     def test_schema_proyectado_excluye_identidad_de_infraestructura(self):
         infrastructure = {
@@ -714,9 +718,182 @@ class PruebaEsquemaDeEvidencia(CodexAdapterTestCase):
                             ("emma", "reviewer_evidence_entry")):
             with self.subTest(role=role):
                 schema = self.coa._load_evidence_schema(role)
-                definition = schema["definitions"][entry]
-                self.assertTrue(infrastructure.isdisjoint(definition["properties"]))
-                self.assertFalse(definition["additionalProperties"])
+                self.assertTrue(infrastructure.isdisjoint(schema["properties"]))
+                self.assertFalse(schema["additionalProperties"])
+
+
+def _find_keys(node, keys):
+    hits = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in keys:
+                hits.append(key)
+            hits.extend(_find_keys(value, keys))
+    elif isinstance(node, list):
+        for item in node:
+            hits.extend(_find_keys(item, keys))
+    return hits
+
+
+def _find_refs(node):
+    refs = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str):
+                refs.add(value)
+            else:
+                refs |= _find_refs(value)
+    elif isinstance(node, list):
+        for item in node:
+            refs |= _find_refs(item)
+    return refs
+
+
+def _find_ref_nodes(node):
+    nodes = []
+    if isinstance(node, dict):
+        if "$ref" in node:
+            nodes.append(node)
+        for value in node.values():
+            nodes.extend(_find_ref_nodes(value))
+    elif isinstance(node, list):
+        for item in node:
+            nodes.extend(_find_ref_nodes(item))
+    return nodes
+
+
+class PruebaProyeccionCodex(CodexAdapterTestCase):
+    _IDENTITY = {
+        "invocation_id", "provider", "provider_session_id",
+        "provider_conversation_id",
+    }
+    _UNSUPPORTED = {
+        "if", "then", "else", "allOf", "not",
+        "dependentRequired", "dependentSchemas",
+    }
+
+    def _canonical_path(self):
+        return Path(self.coa.__file__).resolve().parent.parent / "schemas" / "mission_record.schema.json"
+
+    def _canonical(self):
+        return json.loads(self._canonical_path().read_text(encoding="utf-8"))
+
+    def _expected_reachable_after_identity_sanitization(self, role):
+        entry_name = {"emilio": "builder_evidence_entry", "emma": "reviewer_evidence_entry"}[role]
+        definitions = copy.deepcopy(self._canonical()["definitions"])
+        for name in self._IDENTITY:
+            definitions[entry_name]["properties"].pop(name, None)
+        seen, frontier = set(), {entry_name}
+        while frontier:
+            name = frontier.pop()
+            if name in seen or name not in definitions:
+                continue
+            seen.add(name)
+            frontier |= {
+                ref.rsplit("/", 1)[-1]
+                for ref in _find_refs(definitions[name])
+                if ref.startswith("#/definitions/")
+            }
+        return seen - {entry_name}
+
+    def test_ambos_roles_tienen_raiz_inline_y_defs_alcanzables_exactos(self):
+        for role in ("emilio", "emma"):
+            with self.subTest(role=role):
+                schema = self.coa._load_evidence_schema(role)
+                self.assertEqual(schema.get("type"), "object")
+                self.assertNotIn("$ref", schema)
+                self.assertNotIn("definitions", schema)
+                self.assertEqual(
+                    set(schema["$defs"]),
+                    self._expected_reachable_after_identity_sanitization(role),
+                )
+
+    def test_refs_solo_defs_sin_colgantes_y_sin_hermanos(self):
+        for role in ("emilio", "emma"):
+            schema = self.coa._load_evidence_schema(role)
+            refs = _find_refs(schema)
+            self.assertTrue(refs)
+            self.assertTrue(all(ref.startswith("#/$defs/") for ref in refs))
+            self.assertEqual(
+                {ref.rsplit("/", 1)[-1] for ref in refs} - set(schema["$defs"]),
+                set(),
+            )
+            self.assertTrue(all(set(node) == {"$ref"} for node in _find_ref_nodes(schema)))
+
+    def test_keywords_incompatibles_ausentes_y_restricciones_soportadas_presentes(self):
+        for role in ("emilio", "emma"):
+            schema = self.coa._load_evidence_schema(role)
+            self.assertEqual(_find_keys(schema, self._UNSUPPORTED), [])
+            self.assertIn("minLength", _find_keys(schema, {"minLength"}))
+            self.assertIn("additionalProperties", _find_keys(schema, {"additionalProperties"}))
+            self.assertFalse(schema["additionalProperties"])
+
+    def test_identidad_de_infraestructura_no_aparece_en_ningun_lugar(self):
+        for role in ("emilio", "emma"):
+            serialized = json.dumps(self.coa._load_evidence_schema(role), sort_keys=True)
+            for name in self._IDENTITY:
+                self.assertNotIn(name, serialized, msg=f"role={role}, identity={name}")
+            self.assertNotIn("nullable_invocation_id", serialized)
+            self.assertNotIn("nullable_provider_identity", serialized)
+
+    def test_canonico_conserva_identidad_y_bytes_exactos(self):
+        import hashlib
+
+        path = self._canonical_path()
+        before = path.read_bytes()
+        canonical = json.loads(before)
+        for entry_name in ("builder_evidence_entry", "reviewer_evidence_entry"):
+            self.assertTrue(self._IDENTITY <= set(canonical["definitions"][entry_name]["properties"]))
+        self.coa._load_evidence_schema("emilio")
+        self.coa._load_evidence_schema("emma")
+        after = path.read_bytes()
+        self.assertEqual(after, before)
+        self.assertEqual(hashlib.sha256(after).digest(), hashlib.sha256(before).digest())
+
+    def test_schema_corregido_llega_a_thread_run(self):
+        thread = self._fake_sdk.Thread(
+            id="t-1",
+            turn_result=self._fake_sdk.TurnResult(
+                status=self._fake_sdk.TurnStatus.completed,
+                final_response=json.dumps({"attempt": 0}),
+            ),
+        )
+        with self._patch_thread_start(thread):
+            self.coa.CodexAdapter().invoke(self._request(agent_role="emilio"))
+        schema = thread.last_kwargs["output_schema"]
+        self.assertEqual(schema.get("type"), "object")
+        self.assertEqual(_find_keys(schema, self._UNSUPPORTED), [])
+        serialized = json.dumps(schema)
+        self.assertTrue(all(name not in serialized for name in self._IDENTITY))
+
+    def test_helpers_soportan_refs_anidados_y_ciclicos(self):
+        definitions = {
+            "entry": {"type": "object", "properties": {"x": {"$ref": "#/definitions/a"}}},
+            "a": {"anyOf": [{"$ref": "#/definitions/b"}]},
+            "b": {"items": {"$ref": "#/definitions/a"}},
+            "unused": {"type": "string"},
+        }
+        self.assertEqual(self.coa._codex_reachable_definitions(definitions, "entry"), {"entry", "a", "b"})
+
+    def test_ref_con_hermanos_arbitrarios_se_reduce_a_ref_only(self):
+        node = {
+            "outer": [{"$ref": "#/$defs/x", "description": "x", "title": "y", "default": 1}]
+        }
+        self.assertEqual(
+            self.coa._strip_ref_sibling_keywords(node),
+            {"outer": [{"$ref": "#/$defs/x"}]},
+        )
+
+    def test_strip_unsupported_recursivo_preserva_supported(self):
+        node = {
+            "allOf": [],
+            "properties": {"x": {"if": {}, "then": {}, "minLength": 1}},
+            "additionalProperties": False,
+        }
+        self.assertEqual(
+            self.coa._strip_codex_unsupported_keywords(node),
+            {"properties": {"x": {"minLength": 1}}, "additionalProperties": False},
+        )
 
 
 class PruebaDependenciasDeclaradas(unittest.TestCase):

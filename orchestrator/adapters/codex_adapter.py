@@ -193,6 +193,14 @@ _CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
 # The real "completed" enum member's value, per openai_codex.generated.v2_all.TurnStatus.
 _TURN_STATUS_COMPLETED = "completed"
 
+_INFRASTRUCTURE_EVIDENCE_FIELDS = frozenset(
+    {"invocation_id", "provider", "provider_session_id", "provider_conversation_id"}
+)
+
+_CODEX_UNSUPPORTED_KEYWORDS = frozenset(
+    {"if", "then", "else", "allOf", "not", "dependentRequired", "dependentSchemas"}
+)
+
 
 class CodexAdapterError(Exception):
     """Raised only for a pre-invocation fail-closed refusal (missing
@@ -201,23 +209,104 @@ class CodexAdapterError(Exception):
     AgentInvocationResult, never an exception."""
 
 
+def _codex_refs_in(node: object) -> set[str]:
+    """Collect canonical ``#/definitions/...`` targets without mutation."""
+    found: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and value.startswith("#/definitions/"):
+                found.add(value.rsplit("/", 1)[-1])
+            else:
+                found |= _codex_refs_in(value)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _codex_refs_in(item)
+    return found
+
+
+def _codex_reachable_definitions(definitions: dict, entry_name: str) -> set[str]:
+    """Return the transitive definition closure, including ``entry_name``."""
+    seen: set[str] = set()
+    frontier = {entry_name}
+    while frontier:
+        name = frontier.pop()
+        if name in seen or name not in definitions:
+            continue
+        seen.add(name)
+        frontier |= _codex_refs_in(definitions[name])
+    return seen
+
+
+def _rewrite_definitions_refs_to_defs(node: object) -> object:
+    """Return a copy with canonical definition refs rewritten for Codex."""
+    if isinstance(node, dict):
+        rewritten = {}
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and value.startswith("#/definitions/"):
+                rewritten[key] = "#/$defs/" + value.rsplit("/", 1)[-1]
+            else:
+                rewritten[key] = _rewrite_definitions_refs_to_defs(value)
+        return rewritten
+    if isinstance(node, list):
+        return [_rewrite_definitions_refs_to_defs(item) for item in node]
+    return node
+
+
+def _strip_codex_unsupported_keywords(node: object) -> object:
+    """Return a copy without keywords unsupported by Codex structured output."""
+    if isinstance(node, dict):
+        return {
+            key: _strip_codex_unsupported_keywords(value)
+            for key, value in node.items()
+            if key not in _CODEX_UNSUPPORTED_KEYWORDS
+        }
+    if isinstance(node, list):
+        return [_strip_codex_unsupported_keywords(item) for item in node]
+    return node
+
+
+def _strip_ref_sibling_keywords(node: object) -> object:
+    """Return a copy where every ``$ref`` node contains only ``$ref``."""
+    if isinstance(node, dict):
+        if "$ref" in node:
+            return {"$ref": node["$ref"]}
+        return {key: _strip_ref_sibling_keywords(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_strip_ref_sibling_keywords(item) for item in node]
+    return node
+
+
 def _load_evidence_schema(agent_role: str) -> dict:
-    """See claude_adapter.py's identical helper for why this is
-    duplicated rather than shared."""
+    """Build a Codex-only projection while leaving the canonical schema intact.
+
+    Infrastructure-owned identity is removed before reachability analysis,
+    ensuring neither those properties nor identity-only definitions can be
+    requested from the model. Canonical validation and trusted identity
+    injection remain the responsibility of the PR #16/#17 layers.
+    """
     with open(_SCHEMA_PATH, encoding="utf-8") as f:
-        full_schema = json.load(f)
+        canonical_schema = json.load(f)
+
+    full_schema = copy.deepcopy(canonical_schema)
     entry_name = _EVIDENCE_ENTRY_NAME[agent_role]
-    definitions = copy.deepcopy(full_schema["definitions"])
+    definitions = full_schema["definitions"]
     properties = definitions[entry_name]["properties"]
-    for field_name in (
-        "invocation_id", "provider", "provider_session_id", "provider_conversation_id",
-    ):
+    for field_name in _INFRASTRUCTURE_EVIDENCE_FIELDS:
         properties.pop(field_name, None)
-    return {
+
+    reachable = _codex_reachable_definitions(definitions, entry_name)
+    projected = {
         "$schema": full_schema.get("$schema", "http://json-schema.org/draft-07/schema#"),
-        "definitions": definitions,
-        "$ref": f"#/definitions/{entry_name}",
+        **definitions[entry_name],
+        "$defs": {
+            name: definition
+            for name, definition in definitions.items()
+            if name in reachable and name != entry_name
+        },
     }
+    projected = _rewrite_definitions_refs_to_defs(projected)
+    projected = _strip_codex_unsupported_keywords(projected)
+    return _strip_ref_sibling_keywords(projected)
 
 
 def _inspect_file_backend() -> str | None:
