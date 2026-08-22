@@ -27,6 +27,7 @@ import importlib
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -88,6 +89,12 @@ def _install_fake_claude_agent_sdk():
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
+    class HookMatcher:
+        def __init__(self, matcher=None, hooks=None, timeout=None):
+            self.matcher = matcher
+            self.hooks = hooks or []
+            self.timeout = timeout
+
     fake.ClaudeSDKError = ClaudeSDKError
     fake.CLINotFoundError = CLINotFoundError
     fake.CLIConnectionError = CLIConnectionError
@@ -96,6 +103,7 @@ def _install_fake_claude_agent_sdk():
     fake.CLIJSONDecodeError = CLIJSONDecodeError
     fake.ResultMessage = ResultMessage
     fake.ClaudeAgentOptions = ClaudeAgentOptions
+    fake.HookMatcher = HookMatcher
     fake.ClaudeSDKClient = None  # replaced per-test via mock.patch
     sys.modules["claude_agent_sdk"] = fake
     return fake
@@ -136,11 +144,24 @@ class ClaudeAdapterTestCase(unittest.TestCase):
 
         importlib.reload(ca)
         self.ca = ca
-        self._env_patch = mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test-value"})
+        self._tmpdir = tempfile.TemporaryDirectory()
+        root = Path(self._tmpdir.name)
+        self.worktree = root / "worktree"
+        self.worktree.mkdir()
+        self.worktree = self.worktree.resolve()
+        self.helper = root / "api-key-helper"
+        self.helper.write_text("#!/bin/sh\nexit 0\n")
+        self.helper.chmod(0o700)
+        self.settings = root / "claude-settings.json"
+        self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper)}))
+        self._env_patch = mock.patch.dict(os.environ, {}, clear=False)
         self._env_patch.start()
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
     def tearDown(self):
         self._env_patch.stop()
+        self._tmpdir.cleanup()
         sys.modules.pop("claude_agent_sdk", None)
         sys.modules.pop("orchestrator.adapters.claude_adapter", None)
 
@@ -150,16 +171,19 @@ class ClaudeAdapterTestCase(unittest.TestCase):
             mission_id="mission-1",
             agent_role=agent_role,
             attempt=attempt,
-            task=task or {"repository": {"worktree_path": "/tmp/worktree"}},
+            task=task or {"repository": {"worktree_path": str(self.worktree)}},
             requested_at="2026-08-19T12:00:00Z",
             requested_fresh_context=(agent_role == "emma"),
         )
 
+    def _adapter(self, **kwargs):
+        return self.ca.ClaudeAdapter(claude_settings_path=self.settings, **kwargs)
+
 
 class PruebaCredencialFaltante(ClaudeAdapterTestCase):
-    def test_sin_anthropic_api_key_lanza_antes_de_construir_cliente(self):
-        del os.environ["ANTHROPIC_API_KEY"]
-        adapter = self.ca.ClaudeAdapter()
+    def test_credencial_ambiental_lanza_antes_de_construir_cliente(self):
+        os.environ["ANTHROPIC_API_KEY"] = "never-read-test-value"
+        adapter = self._adapter()
         with self.assertRaises(self.ca.ClaudeAdapterError):
             adapter.invoke(self._request())
 
@@ -172,7 +196,7 @@ class PruebaCredencialFaltante(ClaudeAdapterTestCase):
 
         source = inspect.getsource(self.ca)
         self.assertNotIn('os.environ["ANTHROPIC_API_KEY"]', source)
-        self.assertIn('"ANTHROPIC_API_KEY" not in os.environ', source)
+        self.assertIn('"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"', source)
 
 
 class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
@@ -181,7 +205,7 @@ class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
         result_msg = self._fake_sdk.ResultMessage(structured_output=evidence, session_id="claude-session-abc")
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
         with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self.ca.ClaudeAdapter()
+            adapter = self._adapter()
             result = adapter.invoke(self._request())
 
         self.assertEqual(result.outcome, "completed")
@@ -196,7 +220,7 @@ class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
         result_msg = self._fake_sdk.ResultMessage(structured_output=None, session_id="s-1")
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
         with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self.ca.ClaudeAdapter()
+            adapter = self._adapter()
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "invalid_output")
         self.assertIsNone(result.evidence)
@@ -215,7 +239,7 @@ class PruebaIsErrorEnResultMessage(ClaudeAdapterTestCase):
         )
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
         with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self.ca.ClaudeAdapter()
+            adapter = self._adapter()
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "failed")
         self.assertIsNone(result.evidence)
@@ -228,7 +252,7 @@ class PruebaIsErrorEnResultMessage(ClaudeAdapterTestCase):
         )
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
         with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self.ca.ClaudeAdapter()
+            adapter = self._adapter()
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "completed")
 
@@ -237,7 +261,7 @@ class PruebaMapeoDeExcepciones(ClaudeAdapterTestCase):
     def _invoke_with_exc(self, exc):
         fake_client_factory = lambda **kw: _FakeClient(raise_exc=exc, **kw)
         with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self.ca.ClaudeAdapter()
+            adapter = self._adapter()
             return adapter.invoke(self._request())
 
     def test_cli_not_found_es_unavailable(self):
@@ -309,7 +333,7 @@ class PruebaTimeoutAdapter(ClaudeAdapterTestCase):
         async def _hang(*a, **k):
             await asyncio.sleep(10)
 
-        adapter = self.ca.ClaudeAdapter(timeout_seconds=0.01)
+        adapter = self._adapter(timeout_seconds=0.01)
         with mock.patch.object(adapter, "_run", side_effect=_hang):
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "timeout")
@@ -317,14 +341,14 @@ class PruebaTimeoutAdapter(ClaudeAdapterTestCase):
 
 class PruebaPermisosPorRol(ClaudeAdapterTestCase):
     def test_emilio_recibe_bash_edit_write(self):
-        adapter = self.ca.ClaudeAdapter()
+        adapter = self._adapter()
         options = adapter._build_options(self._request(agent_role="emilio"))
         self.assertIn("Bash", options.allowed_tools)
         self.assertIn("Edit", options.allowed_tools)
         self.assertIn("Write", options.allowed_tools)
 
     def test_emma_nunca_recibe_bash_edit_write(self):
-        adapter = self.ca.ClaudeAdapter()
+        adapter = self._adapter()
         options = adapter._build_options(self._request(agent_role="emma"))
         self.assertNotIn("Bash", options.allowed_tools)
         self.assertNotIn("Edit", options.allowed_tools)
@@ -332,29 +356,268 @@ class PruebaPermisosPorRol(ClaudeAdapterTestCase):
         self.assertIn("Read", options.allowed_tools)
 
     def test_output_format_usa_el_schema_del_rol_correcto(self):
-        adapter = self.ca.ClaudeAdapter()
+        adapter = self._adapter()
         options_emilio = adapter._build_options(self._request(agent_role="emilio"))
         options_emma = adapter._build_options(self._request(agent_role="emma"))
-        self.assertIn("builder_evidence_entry", json.dumps(options_emilio.output_format))
-        self.assertIn("reviewer_evidence_entry", json.dumps(options_emma.output_format))
+        emilio = options_emilio.output_format["schema"]
+        emma = options_emma.output_format["schema"]
+        self.assertIn("handoff_document_ref", emilio["properties"])
+        self.assertNotIn("verdict", emilio["properties"])
+        self.assertIn("verdict", emma["properties"])
+        self.assertIn("findings", emma["properties"])
 
     def test_schema_proyectado_excluye_identidad_de_infraestructura(self):
         infrastructure = {
             "invocation_id", "provider", "provider_session_id",
             "provider_conversation_id",
         }
-        for role, entry in (("emilio", "builder_evidence_entry"),
-                            ("emma", "reviewer_evidence_entry")):
+        for role in ("emilio", "emma"):
             with self.subTest(role=role):
                 schema = self.ca._load_evidence_schema(role)
-                definition = schema["definitions"][entry]
-                self.assertTrue(infrastructure.isdisjoint(definition["properties"]))
-                self.assertFalse(definition["additionalProperties"])
+                self.assertTrue(infrastructure.isdisjoint(schema["properties"]))
+                self.assertFalse(schema["additionalProperties"])
+                serialized = json.dumps(schema)
+                for field in infrastructure:
+                    self.assertNotIn(field, serialized)
+
+    def test_proyeccion_anthropic_tiene_raiz_inline_refs_resueltos_y_keywords_compatibles(self):
+        unsupported = {"minLength", "maxLength", "minimum", "maximum", "multipleOf", "if", "then", "else"}
+
+        def walk(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    yield key, value
+                    yield from walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    yield from walk(value)
+
+        for role in ("emilio", "emma"):
+            schema = self.ca._load_evidence_schema(role)
+            self.assertEqual(schema["type"], "object")
+            self.assertNotIn("$ref", schema)
+            keys = {key for key, _ in walk(schema)}
+            self.assertTrue(unsupported.isdisjoint(keys))
+            refs = {
+                value.rsplit("/", 1)[-1]
+                for key, value in walk(schema)
+                if key == "$ref" and isinstance(value, str) and value.startswith("#/definitions/")
+            }
+            self.assertTrue(refs.issubset(schema["definitions"]))
+
+
+class PruebaConfinamientoClaude(ClaudeAdapterTestCase):
+    def _options(self, role="emilio", task=None):
+        return self._adapter()._build_options(self._request(agent_role=role, task=task))
+
+    def test_cwd_es_el_path_canonico_resuelto(self):
+        options = self._options()
+        self.assertEqual(options.cwd, self.worktree.resolve())
+
+    def test_worktree_relativo_inexistente_archivo_y_symlink_son_rechazados(self):
+        regular_file = self.worktree.parent / "not-a-directory"
+        regular_file.write_text("x")
+        link = self.worktree.parent / "worktree-link"
+        link.symlink_to(self.worktree, target_is_directory=True)
+        cases = [
+            "relative/worktree",
+            str(self.worktree.parent / "missing"),
+            str(regular_file.resolve()),
+            str(link),
+            None,
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                task = {"repository": {"worktree_path": raw}}
+                with self.assertRaises(self.ca.ClaudeAdapterError):
+                    self._options(task=task)
+
+    def test_worktree_invalido_se_rechaza_antes_de_construir_cliente(self):
+        task = {"repository": {"worktree_path": "relative/worktree"}}
+        with mock.patch.object(self.ca, "ClaudeSDKClient") as client:
+            with self.assertRaises(self.ca.ClaudeAdapterError):
+                self._adapter().invoke(self._request(task=task))
+        client.assert_not_called()
+
+    def test_tools_y_allowed_tools_son_exactos_por_rol(self):
+        expected = {
+            "emilio": ["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
+            "emma": ["Read", "Glob", "Grep"],
+        }
+        for role, tools in expected.items():
+            with self.subTest(role=role):
+                options = self._options(role)
+                self.assertEqual(options.tools, tools)
+                self.assertEqual(options.allowed_tools, tools)
+        self.assertTrue({"Bash", "Edit", "Write"}.isdisjoint(self._options("emma").tools))
+
+    def test_superficie_auxiliar_esta_cerrada(self):
+        options = self._options()
+        self.assertTrue(options.strict_mcp_config)
+        self.assertEqual(options.mcp_servers, {})
+        self.assertEqual(options.skills, [])
+        self.assertEqual(options.plugins, [])
+        self.assertEqual(options.add_dirs, [])
+        self.assertEqual(options.permission_mode, "dontAsk")
+        self.assertEqual(options.setting_sources, [])
+
+    def test_sandbox_fail_closed_no_bypass_sin_red_ni_paths_extra(self):
+        sandbox = self._options().sandbox
+        self.assertTrue(sandbox["enabled"])
+        self.assertTrue(sandbox["failIfUnavailable"])
+        self.assertTrue(sandbox["autoAllowBashIfSandboxed"])
+        self.assertFalse(sandbox["allowUnsandboxedCommands"])
+        self.assertEqual(sandbox["excludedCommands"], [])
+        self.assertEqual(sandbox["filesystem"]["denyRead"], [self.worktree.anchor])
+        self.assertEqual(sandbox["filesystem"]["allowRead"], [str(self.worktree)])
+        self.assertEqual(sandbox["filesystem"]["allowWrite"], [])
+        self.assertEqual(sandbox["filesystem"]["denyWrite"], [])
+        self.assertEqual(sandbox["network"]["allowedDomains"], [])
+        self.assertEqual(sandbox["network"]["allowUnixSockets"], [])
+        self.assertFalse(sandbox["network"]["allowAllUnixSockets"])
+        self.assertFalse(sandbox["network"]["allowLocalBinding"])
+
+    def test_settings_entregados_solo_contienen_auth_y_politica_infra(self):
+        payload = json.loads(self._options().settings)
+        self.assertEqual(set(payload), {"apiKeyHelper", "permissions"})
+        self.assertEqual(payload["apiKeyHelper"], str(self.helper))
+        self.assertNotIn("sandbox", payload)  # SDK merges the infrastructure-owned options.sandbox.
+
+    def test_settings_con_cualquier_clave_extra_fallan_cerrado(self):
+        for key, value in (("permissions", {}), ("mcpServers", {}), ("hooks", {}), ("sandbox", {})):
+            with self.subTest(key=key):
+                self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper), key: value}))
+                with self.assertRaises(self.ca.ClaudeAdapterError):
+                    self._options()
+                self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper)}))
+
+    def test_helper_debe_ser_absoluto_existente_y_ejecutable(self):
+        cases = ["relative-helper", str(self.worktree.parent / "missing-helper")]
+        nonexec = self.worktree.parent / "nonexec-helper"
+        nonexec.write_text("#!/bin/sh\n")
+        cases.append(str(nonexec))
+        for helper in cases:
+            with self.subTest(helper=helper):
+                self.settings.write_text(json.dumps({"apiKeyHelper": helper}))
+                with self.assertRaises(self.ca.ClaudeAdapterError):
+                    self._options()
+        self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper)}))
+
+    def test_guard_nativo_niega_absoluto_traversal_y_symlink_escape(self):
+        outside = self.worktree.parent / "outside.txt"
+        outside.write_text("outside")
+        link = self.worktree / "outside-link"
+        link.symlink_to(outside)
+        guard = self._options().hooks["PreToolUse"][0].hooks[0]
+        cases = [
+            ("Read", {"file_path": str(outside)}),
+            ("Read", {"file_path": "../outside.txt"}),
+            ("Read", {"file_path": "outside-link"}),
+            ("Write", {"file_path": str(outside), "content": "x"}),
+            ("Edit", {"file_path": "../outside.txt"}),
+            ("Glob", {"path": "../"}),
+            ("Grep", {"path": str(self.worktree)}),
+        ]
+        for tool, tool_input in cases:
+            with self.subTest(tool=tool, tool_input=tool_input):
+                result = asyncio.run(guard({"tool_name": tool, "tool_input": tool_input}, "id", None))
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
+    def test_guard_nativo_permite_paths_relativos_internos_incluso_destino_nuevo(self):
+        guard = self._options().hooks["PreToolUse"][0].hooks[0]
+        for tool, field in (("Read", "file_path"), ("Edit", "file_path"),
+                            ("Write", "file_path"), ("Grep", "path")):
+            result = asyncio.run(
+                guard({"tool_name": tool, "tool_input": {field: "subdir/new.txt"}}, "id", None)
+            )
+            self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_glob_pattern_reproduce_los_tres_bypasses_confirmados_por_emma(self):
+        outside_dir = self.worktree.parent / "glob-outside"
+        outside_dir.mkdir()
+        outside_file = outside_dir / "sentinel.txt"
+        outside_file.write_text("outside")
+        guard = self._options().hooks["PreToolUse"][0].hooks[0]
+        patterns = [
+            str(outside_file),
+            "../glob-outside/*",
+            str(outside_dir / "*"),
+        ]
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                result = asyncio.run(
+                    guard({"tool_name": "Glob", "tool_input": {"pattern": pattern}}, "id", None)
+                )
+                self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_glob_valida_path_y_pattern_independientemente(self):
+        guard = self._options().hooks["PreToolUse"][0].hooks[0]
+        cases = [
+            ({"pattern": "**/*.py"}, "allow"),
+            ({"path": "subdir", "pattern": "*.py"}, "allow"),
+            ({"path": "subdir", "pattern": "../outside-*"}, "deny"),
+            ({"path": "../", "pattern": "*.py"}, "deny"),
+            ({"path": "../", "pattern": "../outside-*"}, "deny"),
+            ({"path": "subdir"}, "deny"),
+            ({"pattern": None}, "deny"),
+            ({"pattern": True}, "deny"),
+        ]
+        for tool_input, expected in cases:
+            with self.subTest(tool_input=tool_input):
+                result = asyncio.run(
+                    guard({"tool_name": "Glob", "tool_input": tool_input}, "id", None)
+                )
+                self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], expected)
+
+    def test_glob_pattern_niega_escape_por_symlink(self):
+        outside_dir = self.worktree.parent / "glob-symlink-outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("outside")
+        (self.worktree / "glob-outside-link").symlink_to(outside_dir, target_is_directory=True)
+        guard = self._options().hooks["PreToolUse"][0].hooks[0]
+        result = asyncio.run(
+            guard(
+                {
+                    "tool_name": "Glob",
+                    "tool_input": {"pattern": "glob-outside-link/*.txt"},
+                },
+                "id",
+                None,
+            )
+        )
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_guard_nativo_niega_input_malformado_de_herramienta_con_path_requerido(self):
+        guard = self._options().hooks["PreToolUse"][0].hooks[0]
+        for tool in ("Read", "Edit", "Write"):
+            for tool_input in ({}, {"file_path": None}, {"file_path": True}):
+                result = asyncio.run(guard({"tool_name": tool, "tool_input": tool_input}, "id", None))
+                self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
+class PruebaAislamientoDeAutenticacion(ClaudeAdapterTestCase):
+    def test_ambient_api_key_y_auth_token_se_rechazan_sin_filtrar_valor(self):
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            with self.subTest(name=name), mock.patch.dict(os.environ, {name: "secret-shaped-never-read"}):
+                with self.assertRaises(self.ca.ClaudeAdapterError) as ctx:
+                    self._adapter().invoke(self._request())
+                self.assertIn(name, str(ctx.exception))
+                self.assertNotIn("secret-shaped-never-read", str(ctx.exception))
+
+    def test_ambient_se_rechaza_antes_de_leer_settings_invalidos(self):
+        self.settings.write_text("not json")
+        with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "never-read"}):
+            with self.assertRaises(self.ca.ClaudeAdapterError) as ctx:
+                self._adapter().invoke(self._request())
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", str(ctx.exception))
+        self.assertNotIn("invalid JSON", str(ctx.exception))
 
 
 class PruebaSinReintentoAutonomoNiSesionCompartida(ClaudeAdapterTestCase):
     def test_max_retries_cero_y_timeout_explicito_en_env(self):
-        adapter = self.ca.ClaudeAdapter(timeout_seconds=42.0)
+        adapter = self._adapter(timeout_seconds=42.0)
         options = adapter._build_options(self._request())
         self.assertEqual(options.env["CLAUDE_CODE_MAX_RETRIES"], "0")
         self.assertEqual(options.env["API_TIMEOUT_MS"], "42000")
@@ -369,7 +632,7 @@ class PruebaSinReintentoAutonomoNiSesionCompartida(ClaudeAdapterTestCase):
             return client
 
         with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=factory):
-            adapter = self.ca.ClaudeAdapter()
+            adapter = self._adapter()
             adapter.invoke(self._request())
             adapter.invoke(self._request())
 
@@ -377,7 +640,7 @@ class PruebaSinReintentoAutonomoNiSesionCompartida(ClaudeAdapterTestCase):
         self.assertIsNot(constructed[0], constructed[1])
 
     def test_adapter_no_retiene_estado_de_cliente_entre_llamadas(self):
-        adapter = self.ca.ClaudeAdapter()
+        adapter = self._adapter()
         self.assertFalse(hasattr(adapter, "_client"))
         self.assertFalse(hasattr(adapter, "client"))
 

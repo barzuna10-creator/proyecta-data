@@ -1,16 +1,10 @@
 """ClaudeAdapter -- orchestrator/adapters/claude_adapter.py
 
 Implements the `AgentInvoker` Protocol (`orchestrator/agent_invocation.py`)
-for Claude, per `orchestrator/PROVIDER_ROUTER_V1.md` sections 4/6/7 and
-`orchestrator/PROVIDER_INTEGRATION_V1.md` sections 2, 4-8, 10-11 (both
-already committed, both already independently reviewed by Emma). This
-module performs a real Claude Agent SDK call when actually invoked. No
-test in this increment calls it against a real provider, and nothing else
-in this repository imports or calls it yet -- the wiring connecting
-Chugel's state transitions to this adapter is out of scope for this
-increment, per Increment #14 Discovery's finding that it does not exist
-and per `orchestrator/CHUGEL_V1.md`'s own Evolution Path, which names that
-wiring as a separate, not-yet-designed architectural decision.
+for Claude. Each invocation uses a fresh SDK client, a dedicated
+`apiKeyHelper`, an infrastructure-owned provider schema projection, exact
+role tools, native-file-tool path guards, and an OS-enforced Bash sandbox.
+Tests use SDK fakes only and never invoke a provider.
 
 Disclosures against the committed design, verified fresh for this
 increment (2026-08-19) against live PyPI/documentation sources rather than
@@ -47,7 +41,7 @@ only inherited from Increment #10's research:
    found `output_format` as the current, directly-documented mechanism;
    the resulting structured payload is read from
    `ResultMessage.structured_output`.
-4. **Emma's `allowed_tools` excludes `Bash` entirely**, not merely a
+4. **Emma's `tools` and `allowed_tools` exclude `Bash` entirely**, not merely a
    "bounded, read-only" variant of it. `PROVIDER_INTEGRATION_V1.md`
    section 7 anticipated "whatever bounded command-execution tool the SDK
    exposes for read-only rerun checks" without confirming one exists; this
@@ -64,12 +58,10 @@ only inherited from Increment #10's research:
    (`DEFAULT_MODEL` below), not independently verified against live
    documentation this increment (search results did not surface this
    field's exact current name with certainty) -- labeled ASSUMPTION.
-6. **`ANTHROPIC_API_KEY` is never read into a Python variable by this
-   adapter.** The adapter only checks the key's *presence* in
-   `os.environ` before ever constructing a client, and fails closed if
-   absent -- the bundled CLI subprocess inherits the parent process
-   environment on its own, so the adapter never needs to hold, forward,
-   or format the credential value itself.
+6. **Ambient `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are refused.**
+   The adapter checks presence only and never reads either value; the
+   dedicated settings file's structurally validated `apiKeyHelper` is the
+   only accepted authentication mechanism.
 
 **Corrective cycle (Increment #14, closing Emma's P2 findings) -- verified
 this time against the actual installed `claude-agent-sdk==0.2.141`
@@ -118,10 +110,11 @@ package in a disposable venv:**
 from __future__ import annotations
 
 import asyncio
-import copy
+import glob
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import (
     CLIConnectionError,
@@ -130,6 +123,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ClaudeSDKError,
+    HookMatcher,
     ProcessError,
     ResultError,
     ResultMessage,
@@ -150,6 +144,21 @@ _ALLOWED_TOOLS = {
     "emma": ["Read", "Glob", "Grep"],
 }
 
+_INFRASTRUCTURE_IDENTITY_FIELDS = frozenset(
+    {"invocation_id", "provider", "provider_session_id", "provider_conversation_id"}
+)
+_NATIVE_FILESYSTEM_TOOLS = frozenset({"Read", "Edit", "Write", "Glob", "Grep"})
+_NATIVE_PATH_FIELD = {
+    "Read": "file_path",
+    "Edit": "file_path",
+    "Write": "file_path",
+    "Glob": "path",
+    "Grep": "path",
+}
+_PROVIDER_UNSUPPORTED_KEYWORDS = frozenset(
+    {"minLength", "maxLength", "minimum", "maximum", "multipleOf", "if", "then", "else"}
+)
+
 
 class ClaudeAdapterError(Exception):
     """Raised only for a pre-invocation fail-closed refusal (e.g. missing
@@ -157,28 +166,198 @@ class ClaudeAdapterError(Exception):
     reported via a returned AgentInvocationResult, never an exception."""
 
 
+def _refs_in(node: object) -> set[str]:
+    found: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and value.startswith("#/definitions/"):
+                found.add(value.rsplit("/", 1)[-1])
+            else:
+                found |= _refs_in(value)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _refs_in(item)
+    return found
+
+
+def _reachable_definitions(definitions: dict, entry_name: str) -> set[str]:
+    seen: set[str] = set()
+    frontier = {entry_name}
+    while frontier:
+        name = frontier.pop()
+        if name in seen or name not in definitions:
+            continue
+        seen.add(name)
+        frontier |= _refs_in(definitions[name])
+    return seen
+
+
+def _strip_provider_unsupported_keywords(node: object) -> object:
+    if isinstance(node, dict):
+        return {
+            key: _strip_provider_unsupported_keywords(value)
+            for key, value in node.items()
+            if key not in _PROVIDER_UNSUPPORTED_KEYWORDS
+        }
+    if isinstance(node, list):
+        return [_strip_provider_unsupported_keywords(item) for item in node]
+    return node
+
+
 def _load_evidence_schema(agent_role: str) -> dict:
-    """Returns a self-contained JSON Schema for the role's evidence entry,
-    keeping the full `definitions` map so internal `$ref`s (e.g. to
-    `artifact_identity`, `check_result`) resolve correctly -- this
-    duplicates the schema-loading logic Codex's adapter also needs
-    (see codex_adapter.py); no shared module is introduced for two small,
-    self-contained call sites, matching this increment's file-scope
-    authorization (adapters only, no new shared package module)."""
+    """Build a provider-compatible copy without weakening the canonical schema."""
     with open(_SCHEMA_PATH, encoding="utf-8") as f:
         full_schema = json.load(f)
     entry_name = _EVIDENCE_ENTRY_NAME[agent_role]
-    definitions = copy.deepcopy(full_schema["definitions"])
-    properties = definitions[entry_name]["properties"]
-    for field_name in (
-        "invocation_id", "provider", "provider_session_id", "provider_conversation_id",
-    ):
-        properties.pop(field_name, None)
-    return {
-        "$schema": full_schema.get("$schema", "http://json-schema.org/draft-07/schema#"),
-        "definitions": definitions,
-        "$ref": f"#/definitions/{entry_name}",
+    entry = dict(full_schema["definitions"][entry_name])
+    entry["properties"] = {
+        name: value
+        for name, value in entry["properties"].items()
+        if name not in _INFRASTRUCTURE_IDENTITY_FIELDS
     }
+    projection_definitions = dict(full_schema["definitions"])
+    projection_definitions[entry_name] = entry
+    reachable = _reachable_definitions(projection_definitions, entry_name)
+    projected = {
+        "$schema": full_schema.get("$schema", "http://json-schema.org/draft-07/schema#"),
+        **entry,
+        "definitions": {
+            name: definition
+            for name, definition in projection_definitions.items()
+            if name in reachable and name != entry_name
+        },
+    }
+    return _strip_provider_unsupported_keywords(projected)
+
+
+_AMBIENT_CREDENTIAL_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _verify_no_ambient_credential_env() -> None:
+    found = [name for name in _AMBIENT_CREDENTIAL_ENV_VARS if name in os.environ]
+    if found:
+        raise ClaudeAdapterError(
+            "Refusing to invoke because ambient credential variable(s) are present: "
+            + ", ".join(found)
+            + ". Values were not read; ambient credentials would outrank apiKeyHelper."
+        )
+
+
+def _validated_api_key_helper(settings_path: Path) -> Path:
+    """Validate only the dedicated helper and reject every unrelated setting."""
+    if not settings_path.is_file():
+        raise ClaudeAdapterError(f"Claude settings file not found: {settings_path}")
+    try:
+        content = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ClaudeAdapterError(f"Claude settings file is unreadable or invalid JSON: {settings_path}") from exc
+    if not isinstance(content, dict):
+        raise ClaudeAdapterError("Claude settings must contain a JSON object")
+    unexpected = set(content) - {"apiKeyHelper"}
+    if unexpected:
+        raise ClaudeAdapterError(
+            "Claude settings contain unsupported capability-affecting keys: "
+            + ", ".join(sorted(unexpected))
+        )
+    helper = content.get("apiKeyHelper")
+    if not isinstance(helper, str) or not helper.strip():
+        raise ClaudeAdapterError("Claude settings require a non-empty apiKeyHelper")
+    helper_path = Path(helper)
+    if not helper_path.is_absolute() or not helper_path.is_file() or not os.access(helper_path, os.X_OK):
+        raise ClaudeAdapterError("apiKeyHelper must be an absolute path to an executable file")
+    return helper_path
+
+
+def _resolve_authorized_worktree(raw_path: object) -> Path:
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ClaudeAdapterError("repository.worktree_path must be a non-empty absolute path")
+    supplied = Path(raw_path)
+    if not supplied.is_absolute():
+        raise ClaudeAdapterError("repository.worktree_path must be absolute")
+    try:
+        resolved = supplied.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ClaudeAdapterError("repository.worktree_path must resolve to an existing directory") from exc
+    if resolved != supplied.absolute() or not resolved.is_dir():
+        raise ClaudeAdapterError("repository.worktree_path must be a canonical, non-symlinked directory")
+    return resolved
+
+
+def _native_path_is_confined(raw_path: object, worktree: Path) -> bool:
+    if raw_path in (None, ""):
+        return True
+    if not isinstance(raw_path, str):
+        return False
+    candidate = Path(raw_path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    try:
+        resolved = (worktree / candidate).resolve(strict=False)
+        resolved.relative_to(worktree)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _glob_pattern_is_confined(raw_pattern: object, base_path: Path, worktree: Path) -> bool:
+    """Validate Glob.pattern separately from its optional path.
+
+    Lexical checks reject absolute/traversal/malformed patterns. Resolving
+    every current match additionally catches a relative pattern that reaches
+    outside through a symlink. This is deliberately independent of Glob.path
+    validation: omission of path never exempts pattern from confinement.
+    """
+    if not isinstance(raw_pattern, str) or not raw_pattern or "\x00" in raw_pattern:
+        return False
+    pattern = Path(raw_pattern)
+    if pattern.is_absolute() or ".." in pattern.parts:
+        return False
+    try:
+        base_path.resolve(strict=False).relative_to(worktree)
+        for match in glob.iglob(
+            str(base_path / raw_pattern), recursive=True, include_hidden=True
+        ):
+            Path(match).resolve(strict=False).relative_to(worktree)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _native_filesystem_guard(worktree: Path):
+    async def guard(input_data: dict[str, Any], _tool_use_id: str | None, _context: Any) -> dict:
+        tool_name = input_data.get("tool_name")
+        if tool_name not in _NATIVE_FILESYSTEM_TOOLS:
+            return {}
+        tool_input = input_data.get("tool_input")
+        if not isinstance(tool_input, dict):
+            allowed = False
+        elif tool_name == "Glob":
+            raw_path = tool_input.get("path")
+            path_allowed = _native_path_is_confined(raw_path, worktree)
+            base_path = worktree if raw_path in (None, "") else worktree / raw_path
+            pattern_allowed = _glob_pattern_is_confined(
+                tool_input.get("pattern"), base_path, worktree
+            )
+            allowed = path_allowed and pattern_allowed
+        else:
+            field = _NATIVE_PATH_FIELD[tool_name]
+            raw_path = tool_input.get(field)
+            allowed = not (
+                tool_name in {"Read", "Edit", "Write"} and raw_path in (None, "")
+            ) and _native_path_is_confined(raw_path, worktree)
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow" if allowed else "deny",
+                "permissionDecisionReason": (
+                    "native filesystem path is confined to the authorized worktree"
+                    if allowed
+                    else "native filesystem path escapes or ambiguously addresses the authorized worktree"
+                ),
+            }
+        }
+
+    return guard
 
 
 def _map_exception_to_outcome(exc: Exception) -> tuple[str, str]:
@@ -220,21 +399,27 @@ class ClaudeAdapter:
     that call -- never holds one as instance state between calls
     (PROVIDER_ROUTER_V1.md section 6)."""
 
-    def __init__(self, *, model: str = DEFAULT_MODEL, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        claude_settings_path: str | Path,
+        model: str = DEFAULT_MODEL,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        self._settings_path = Path(claude_settings_path)
         self._model = model
         self._timeout_seconds = timeout_seconds
 
     def invoke(self, request: AgentInvocationRequest) -> AgentInvocationResult:
-        if "ANTHROPIC_API_KEY" not in os.environ:
-            raise ClaudeAdapterError(
-                "ANTHROPIC_API_KEY is not set in the process environment -- refusing to "
-                "construct a Claude client. No fallback to an ambient CLI login state is "
-                "ever attempted (PROVIDER_INTEGRATION_V1.md section 2)."
-            )
+        _verify_no_ambient_credential_env()
+        # Build and validate every local boundary before entering the
+        # provider-outcome mapping block. Configuration errors are
+        # pre-dispatch refusals, never synthetic provider failures.
+        options = self._build_options(request)
 
         try:
             result_message = asyncio.run(
-                asyncio.wait_for(self._run(request), timeout=self._timeout_seconds)
+                asyncio.wait_for(self._run(request, options), timeout=self._timeout_seconds)
             )
         except Exception as exc:  # noqa: BLE001 -- deliberate: see _map_exception_to_outcome docstring
             outcome, error_detail = _map_exception_to_outcome(exc)
@@ -301,8 +486,13 @@ class ClaudeAdapter:
             error_detail=None,
         )
 
-    async def _run(self, request: AgentInvocationRequest) -> ResultMessage:
-        options = self._build_options(request)
+    async def _run(
+        self,
+        request: AgentInvocationRequest,
+        options: ClaudeAgentOptions | None = None,
+    ) -> ResultMessage:
+        if options is None:
+            options = self._build_options(request)
         last_result: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query(json.dumps(request.task))
@@ -315,12 +505,38 @@ class ClaudeAdapter:
 
     def _build_options(self, request: AgentInvocationRequest) -> ClaudeAgentOptions:
         repository = request.task.get("repository") or {}
-        worktree_path = repository.get("worktree_path")
+        worktree_path = _resolve_authorized_worktree(repository.get("worktree_path"))
+        helper_path = _validated_api_key_helper(self._settings_path)
         timeout_ms = str(int(self._timeout_seconds * 1000))
+        tools = list(_ALLOWED_TOOLS[request.agent_role])
+        sandbox = {
+            "enabled": True,
+            "failIfUnavailable": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+            "excludedCommands": [],
+            "filesystem": {
+                "denyRead": [worktree_path.anchor],
+                "allowRead": [str(worktree_path)],
+                "allowWrite": [],
+                "denyWrite": [],
+            },
+            "network": {
+                "allowedDomains": [],
+                "allowUnixSockets": [],
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
+            },
+        }
+        settings = {
+            "apiKeyHelper": str(helper_path),
+            "permissions": {"allow": tools, "ask": [], "deny": []},
+        }
         return ClaudeAgentOptions(
             model=self._model,
             cwd=worktree_path,
-            allowed_tools=_ALLOWED_TOOLS[request.agent_role],
+            tools=tools,
+            allowed_tools=tools,
             output_format={
                 "type": "json_schema",
                 "schema": _load_evidence_schema(request.agent_role),
@@ -328,6 +544,23 @@ class ClaudeAdapter:
             env={
                 "CLAUDE_CODE_MAX_RETRIES": "0",
                 "API_TIMEOUT_MS": timeout_ms,
+            },
+            settings=json.dumps(settings),
+            setting_sources=[],
+            sandbox=sandbox,
+            permission_mode="dontAsk",
+            strict_mcp_config=True,
+            mcp_servers={},
+            skills=[],
+            plugins=[],
+            add_dirs=[],
+            hooks={
+                "PreToolUse": [
+                    HookMatcher(
+                        matcher="Read|Edit|Write|Glob|Grep",
+                        hooks=[_native_filesystem_guard(worktree_path)],
+                    )
+                ]
             },
         )
 
