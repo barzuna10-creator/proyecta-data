@@ -354,6 +354,55 @@ class PruebaConsistenciaIdentidadDeArtefacto(unittest.TestCase):
 
 
 class PruebaAprobacionesObsoletas(unittest.TestCase):
+    def test_scope_approved_for_exige_version_entera_positiva(self):
+        invalid_values = (
+            {"note": "context only"},
+            {},
+            {"wrong_key": 1},
+            {"mission_definition_version": "1"},
+            {"mission_definition_version": True},
+            {"mission_definition_version": -1},
+        )
+        for approved_for in invalid_values:
+            with self.subTest(approved_for=approved_for):
+                record = _authorized_record()
+                record["human_gates"]["scope_authorization"]["approved_for"] = approved_for
+                self.assertFalse(validate_mission_record(record).valid)
+
+    def test_scope_approved_for_version_actual_es_valida(self):
+        record = _authorized_record()
+        record["human_gates"]["scope_authorization"]["approved_for"] = {
+            "mission_definition_version": 1,
+        }
+        self.assertTrue(validate_mission_record(record).valid)
+
+    def test_merge_approved_for_exige_head_sha_canonico(self):
+        invalid_values = (
+            {},
+            {"note": "context only"},
+            {"commit_sha": "b" * 40},
+            {"head_sha": "b" * 39},
+            {"head_sha": "B" * 40},
+            {"head_sha": "not-a-sha"},
+        )
+        for approved_for in invalid_values:
+            with self.subTest(approved_for=approved_for):
+                record = _completed_record()
+                record["human_gates"]["merge_authorization"]["approved_for"] = approved_for
+                self.assertFalse(validate_mission_record(record).valid)
+
+    def test_merge_approved_for_sha_distinto_es_obsoleto(self):
+        record = _completed_record()
+        record["human_gates"]["merge_authorization"]["approved_for"] = {"head_sha": "e" * 40}
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STALE_APPROVAL", error_codes(result))
+
+    def test_merge_approved_for_sha_actual_es_valido(self):
+        record = _completed_record()
+        record["human_gates"]["merge_authorization"]["approved_for"] = {"head_sha": "b" * 40}
+        self.assertTrue(validate_mission_record(record).valid)
+
     def test_merge_authorization_obsoleta(self):
         record = _completed_record()
         record["publish"]["commit_sha"] = "e" * 40  # nuevo push después de la aprobación
@@ -367,6 +416,20 @@ class PruebaAprobacionesObsoletas(unittest.TestCase):
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
         self.assertIn("STALE_APPROVAL", error_codes(result))
+
+    def test_aprobacion_malformada_no_respalda_authorized_ni_building(self):
+        for state in ("AUTHORIZED", "BUILDING"):
+            with self.subTest(state=state):
+                record = _authorized_record()
+                record["state"] = state
+                record["human_gates"]["scope_authorization"]["approved_for"] = {"note": "context only"}
+                if state == "BUILDING":
+                    record["repository"]["isolation_confirmed"] = True
+                    record["state_history"].append({
+                        "from_state": "AUTHORIZED", "to_state": "BUILDING",
+                        "at": "2026-08-19T12:11:00Z", "actor": "chugel", "reason": "start",
+                    })
+                self.assertFalse(validate_mission_record(record).valid)
 
 
 class PruebaAutorizacionDeAlcancePorAgente(unittest.TestCase):

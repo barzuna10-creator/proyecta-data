@@ -643,6 +643,25 @@ class PruebaRepositoryState(ChugelTestCase):
         updated = chugel.transition(mid, "BUILDING", actor="chugel", reason="now isolated")
         self.assertEqual(updated["state"], "BUILDING")
 
+    def test_aprobacion_scope_malformada_no_se_persiste_ni_autoriza_transicion(self):
+        mission = _create_intake_mission("algo")
+        mid = mission["mission_id"]
+
+        with self.assertRaises(chugel.MissionValidationFailed):
+            chugel.decide_gate(mid, "scope_authorization", _gate_decision(
+                approved_for={"note": "context only"},
+            ))
+
+        preserved = chugel.get_mission(mid)
+        self.assertEqual(preserved["human_gates"]["scope_authorization"], _gate_decision(
+            status="not_requested",
+        ))
+        chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="scope drafted")
+        with self.assertRaises(chugel.MissionTransitionRejected):
+            chugel.transition(mid, "AUTHORIZED", actor="jose", reason="invalid approval")
+        with self.assertRaises(chugel.MissionTransitionRejected):
+            chugel.transition(mid, "BUILDING", actor="chugel", reason="invalid approval")
+
 
 # --- registro inválido en disco -------------------------------------
 

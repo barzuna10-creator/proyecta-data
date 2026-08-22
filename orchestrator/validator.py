@@ -79,6 +79,7 @@ GATE_NAMES = ("scope_authorization", "publish_authorization", "merge_authorizati
 # agents/AGENT_STANDARD.md section 18 and every CONTRACT.md's precedence
 # chain: no agent name is ever valid here.
 HUMAN_DECIDER = "jose"
+CANONICAL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 SUPPORTED_SCHEMA_VERSION = "1.0.0"
 
@@ -652,7 +653,13 @@ def _check_stale_approvals(record: dict, gates: dict) -> list[ValidationError]:
         publish = record.get("publish") or {}
         expected_head = approved_for.get("head_sha")
         actual_head = publish.get("commit_sha")
-        if expected_head is not None and actual_head is not None and expected_head != actual_head:
+        if not isinstance(expected_head, str) or CANONICAL_SHA_RE.fullmatch(expected_head) is None:
+            errors.append(ValidationError(
+                "MALFORMED_GATE_SCOPE",
+                "merge_authorization approved_for must contain a canonical 40-character lowercase head_sha",
+                "$.human_gates.merge_authorization.approved_for",
+            ))
+        elif expected_head != actual_head:
             errors.append(ValidationError(
                 "STALE_APPROVAL",
                 "merge_authorization was approved for a head_sha that no longer matches "
@@ -667,7 +674,17 @@ def _check_stale_approvals(record: dict, gates: dict) -> list[ValidationError]:
         entries = [e for e in history if isinstance(e, dict)] if isinstance(history, list) else []
         current_version = entries[-1].get("version") if entries else None
         expected_version = approved_for.get("mission_definition_version")
-        if expected_version is not None and current_version is not None and expected_version != current_version:
+        if (
+            not isinstance(expected_version, int)
+            or isinstance(expected_version, bool)
+            or expected_version < 1
+        ):
+            errors.append(ValidationError(
+                "MALFORMED_GATE_SCOPE",
+                "scope_authorization approved_for must contain a positive integer mission_definition_version",
+                "$.human_gates.scope_authorization.approved_for",
+            ))
+        elif expected_version != current_version:
             errors.append(ValidationError(
                 "STALE_APPROVAL",
                 "scope_authorization was approved for a mission_definition_version that is "
@@ -831,15 +848,27 @@ def _check_state_evidence_consistency(record: dict) -> list[ValidationError]:
 
 def _evidence_authorized(record: dict) -> list[ValidationError]:
     gate = ((record.get("human_gates") or {}).get("scope_authorization")) or {}
-    if gate.get("status") != "approved":
+    approved_for = gate.get("approved_for") or {}
+    version = approved_for.get("mission_definition_version")
+    history = record.get("mission_definition_history") or []
+    current_version = history[-1].get("version") if history and isinstance(history[-1], dict) else None
+    if (
+        gate.get("status") != "approved"
+        or not isinstance(version, int)
+        or isinstance(version, bool)
+        or version < 1
+        or version != current_version
+    ):
         return [ValidationError(
-            "STATE_EVIDENCE_MISSING", "AUTHORIZED requires human_gates.scope_authorization to be approved", "$.state",
+            "STATE_EVIDENCE_MISSING",
+            "AUTHORIZED requires scope_authorization approved for the current mission_definition_version",
+            "$.state",
         )]
     return []
 
 
 def _evidence_building(record: dict) -> list[ValidationError]:
-    errors = []
+    errors = _evidence_authorized(record)
     repo = record.get("repository") or {}
     if not repo.get("isolation_confirmed"):
         errors.append(ValidationError(

@@ -156,9 +156,9 @@
       "additionalProperties": false,
       "required": ["scope_authorization", "publish_authorization", "merge_authorization"],
       "properties": {
-        "scope_authorization": { "$ref": "#/definitions/human_gate" },
+        "scope_authorization": { "$ref": "#/definitions/scope_authorization_gate" },
         "publish_authorization": { "$ref": "#/definitions/human_gate" },
-        "merge_authorization": { "$ref": "#/definitions/human_gate" }
+        "merge_authorization": { "$ref": "#/definitions/merge_authorization_gate" }
       }
     },
 
@@ -312,6 +312,42 @@
       "type": "string",
       "pattern": "^[0-9a-f]{40}$",
       "description": "Full 40-character Git commit SHA. Short SHAs are never sufficient identity."
+    },
+    "scope_authorization_gate": {
+      "allOf": [
+        { "$ref": "#/definitions/human_gate" },
+        {
+          "if": { "properties": { "status": { "const": "approved" } } },
+          "then": {
+            "properties": {
+              "approved_for": {
+                "type": "object",
+                "required": ["mission_definition_version"],
+                "properties": {
+                  "mission_definition_version": { "type": "integer", "minimum": 1 }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "merge_authorization_gate": {
+      "allOf": [
+        { "$ref": "#/definitions/human_gate" },
+        {
+          "if": { "properties": { "status": { "const": "approved" } } },
+          "then": {
+            "properties": {
+              "approved_for": {
+                "type": "object",
+                "required": ["head_sha"],
+                "properties": { "head_sha": { "$ref": "#/definitions/sha" } }
+              }
+            }
+          }
+        }
+      ]
     },
     "actor": {
       "type": "string",
