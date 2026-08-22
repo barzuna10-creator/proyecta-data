@@ -822,6 +822,14 @@ def _check_mission_definition_history_consistency(record: dict) -> list[Validati
 
     proposals_raw = record.get("proposed_scope_changes")
     proposals = [p for p in proposals_raw if isinstance(p, dict)] if isinstance(proposals_raw, list) else []
+    proposal_ids = [p.get("proposal_id") for p in proposals]
+    duplicate_ids = {proposal_id for proposal_id in proposal_ids if proposal_ids.count(proposal_id) > 1}
+    for proposal_id in sorted(duplicate_ids, key=repr):
+        errors.append(ValidationError(
+            "DUPLICATE_PROPOSAL_ID",
+            f"proposed_scope_changes contains duplicate proposal_id {proposal_id!r}",
+            "$.proposed_scope_changes",
+        ))
     proposals_by_id = {p.get("proposal_id"): p for p in proposals}
     history_entry_by_proposal_id: dict = {}
 
@@ -869,7 +877,18 @@ def _check_mission_definition_history_consistency(record: dict) -> list[Validati
                 ))
 
             resulting_version = proposal.get("resulting_mission_definition_version")
-            if resulting_version is not None:
+            if (
+                not isinstance(resulting_version, int)
+                or isinstance(resulting_version, bool)
+                or resulting_version < 1
+            ):
+                errors.append(ValidationError(
+                    "PROPOSAL_ACCEPTED_WITHOUT_RESULTING_VERSION",
+                    f"proposed_scope_changes[{p_idx}] is accepted but does not identify "
+                    "a positive integer resulting mission-definition version",
+                    p_path + ".resulting_mission_definition_version",
+                ))
+            else:
                 matching_entry = history_entry_by_proposal_id.get(proposal_id)
                 if matching_entry is None or matching_entry.get("version") != resulting_version:
                     errors.append(ValidationError(
@@ -879,13 +898,43 @@ def _check_mission_definition_history_consistency(record: dict) -> list[Validati
                         p_path + ".resulting_mission_definition_version",
                     ))
 
-        elif status in ("pending_human_decision", "rejected"):
+        elif status == "rejected":
+            if proposal.get("decided_by") != HUMAN_DECIDER or not proposal.get("decided_at"):
+                errors.append(ValidationError(
+                    "PROPOSAL_REJECTED_WITHOUT_JOSE_EVIDENCE",
+                    f"proposed_scope_changes[{p_idx}] is rejected without complete "
+                    f"decision evidence attributed to {HUMAN_DECIDER!r}",
+                    p_path,
+                ))
+            if proposal.get("resulting_mission_definition_version") is not None:
+                errors.append(ValidationError(
+                    "PROPOSAL_REJECTED_WITH_RESULTING_VERSION",
+                    f"proposed_scope_changes[{p_idx}] is rejected but claims a resulting version",
+                    p_path + ".resulting_mission_definition_version",
+                ))
             if history_entry_by_proposal_id.get(proposal_id) is not None:
                 errors.append(ValidationError(
                     "SCOPE_VERSION_PROPOSAL_MISMATCH",
                     f"proposed_scope_changes[{p_idx}] has status {status!r} but is linked to a "
                     "mission_definition_history entry -- only an accepted proposal may become "
                     "the active mission definition",
+                    p_path,
+                ))
+        elif status == "pending_human_decision":
+            if any(
+                proposal.get(field) is not None
+                for field in ("decided_by", "decided_at", "resulting_mission_definition_version")
+            ):
+                errors.append(ValidationError(
+                    "PROPOSAL_PENDING_WITH_DECISION_METADATA",
+                    f"proposed_scope_changes[{p_idx}] is pending but already contains decision metadata",
+                    p_path,
+                ))
+            if history_entry_by_proposal_id.get(proposal_id) is not None:
+                errors.append(ValidationError(
+                    "SCOPE_VERSION_PROPOSAL_MISMATCH",
+                    f"proposed_scope_changes[{p_idx}] is pending but is linked to a "
+                    "mission_definition_history entry",
                     p_path,
                 ))
 

@@ -663,7 +663,10 @@ class PruebaReplanAutorizacionDeAlcance(unittest.TestCase):
         record["mission_definition_history"].append(self._replan_history_entry())
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
-        self.assertIn("SCOPE_VERSION_PROPOSAL_MISMATCH", error_codes(result))
+        self.assertTrue(
+            {"SCOPE_VERSION_PROPOSAL_MISMATCH", "SCHEMA_TYPE_VIOLATION"}
+            & set(error_codes(result))
+        )
 
     def test_5b_propuesta_rejected_vinculada_a_historial_es_invalida(self):
         record = _authorized_record()
@@ -673,7 +676,10 @@ class PruebaReplanAutorizacionDeAlcance(unittest.TestCase):
         record["mission_definition_history"].append(self._replan_history_entry())
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
-        self.assertIn("SCOPE_VERSION_PROPOSAL_MISMATCH", error_codes(result))
+        self.assertTrue(
+            {"SCOPE_VERSION_PROPOSAL_MISMATCH", "SCHEMA_TYPE_VIOLATION"}
+            & set(error_codes(result))
+        )
 
     def test_5c_propuesta_pending_sin_vinculo_a_historial_no_afecta_nada(self):
         record = _authorized_record()
@@ -791,7 +797,10 @@ class PruebaEvidenciaDeAuditoriaDePropuestaAceptada(unittest.TestCase):
         record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
-        self.assertIn("PROPOSAL_ACCEPTED_WITHOUT_JOSE_EVIDENCE", error_codes(result))
+        self.assertTrue(
+            {"PROPOSAL_ACCEPTED_WITHOUT_JOSE_EVIDENCE", "SCHEMA_CONST_VIOLATION"}
+            & set(error_codes(result))
+        )
 
     def test_accepted_sin_decided_at_es_invalido(self):
         record = _authorized_record()
@@ -802,7 +811,10 @@ class PruebaEvidenciaDeAuditoriaDePropuestaAceptada(unittest.TestCase):
         record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
-        self.assertIn("PROPOSAL_ACCEPTED_WITHOUT_JOSE_EVIDENCE", error_codes(result))
+        self.assertTrue(
+            {"PROPOSAL_ACCEPTED_WITHOUT_JOSE_EVIDENCE", "SCHEMA_TYPE_VIOLATION"}
+            & set(error_codes(result))
+        )
 
     def test_accepted_con_version_resultante_sin_entrada_real_es_invalido(self):
         record = _authorized_record()
@@ -811,6 +823,78 @@ class PruebaEvidenciaDeAuditoriaDePropuestaAceptada(unittest.TestCase):
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
         self.assertIn("PROPOSAL_ACCEPTED_WITHOUT_RESULTING_VERSION", error_codes(result))
+
+
+class PruebaInvariantesCanonicosDeDecisionDePropuesta(unittest.TestCase):
+    def _proposal(self, status="pending_human_decision", **overrides):
+        proposal = {
+            "proposal_id": "p1", "proposed_at": "2026-08-19T12:15:00Z",
+            "proposed_by": "david", "label": "FACT", "rationale": "change",
+            "diff_against_current_scope": {"added": ["x"], "removed": []},
+            "status": status, "decided_by": None, "decided_at": None,
+            "resulting_mission_definition_version": None,
+        }
+        proposal.update(overrides)
+        return proposal
+
+    def test_proposal_id_duplicado_es_invalido(self):
+        record = _minimal_intake_record()
+        record["proposed_scope_changes"] = [self._proposal(), self._proposal()]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("DUPLICATE_PROPOSAL_ID", error_codes(result))
+
+    def test_pending_con_metadata_de_decision_es_invalido(self):
+        for field, value in (
+            ("decided_by", "jose"), ("decided_at", "2026-08-19T12:16:00Z"),
+            ("resulting_mission_definition_version", 1),
+        ):
+            record = _minimal_intake_record()
+            record["proposed_scope_changes"] = [self._proposal(**{field: value})]
+            with self.subTest(field=field):
+                self.assertFalse(validate_mission_record(record).valid)
+
+    def test_rejected_requiere_jose_timestamp_y_resultado_null(self):
+        invalid = (
+            {}, {"decided_by": "jose"},
+            {"decided_at": "2026-08-19T12:16:00Z"},
+            {"decided_by": "jose", "decided_at": "2026-08-19T12:16:00Z",
+             "resulting_mission_definition_version": 1},
+        )
+        for overrides in invalid:
+            record = _minimal_intake_record()
+            record["proposed_scope_changes"] = [self._proposal("rejected", **overrides)]
+            with self.subTest(overrides=overrides):
+                self.assertFalse(validate_mission_record(record).valid)
+
+    def test_rejected_canonico_es_valido(self):
+        record = _minimal_intake_record()
+        record["proposed_scope_changes"] = [self._proposal(
+            "rejected", decided_by="jose", decided_at="2026-08-19T12:16:00Z",
+        )]
+        self.assertTrue(validate_mission_record(record).valid)
+
+    def test_accepted_requiere_version_positiva_y_history_correspondiente(self):
+        for version in (None, 0, -1, True, "2"):
+            record = _minimal_intake_record()
+            record["proposed_scope_changes"] = [self._proposal(
+                "accepted", decided_by="jose", decided_at="2026-08-19T12:16:00Z",
+                resulting_mission_definition_version=version,
+            )]
+            with self.subTest(version=version):
+                self.assertFalse(validate_mission_record(record).valid)
+
+    def test_registro_historico_canonico_aceptado_permanece_valido(self):
+        record = _authorized_record()
+        record["proposed_scope_changes"] = [self._proposal(
+            "accepted", decided_by="jose", decided_at="2026-08-19T12:16:00Z",
+            resulting_mission_definition_version=2,
+        )]
+        record["mission_definition_history"].append(
+            _mission_definition_entry(version=2, source="david_replan", based_on="p1")
+        )
+        record["human_gates"]["scope_authorization"] = _approved_gate({"mission_definition_version": 2})
+        self.assertTrue(validate_mission_record(record).valid)
 
 
 class PruebaFormatCheckerFechaHoraYUri(unittest.TestCase):

@@ -111,6 +111,10 @@ _MISSION_ID_PATTERN = re.compile(_CANONICAL_SCHEMA["properties"]["mission_id"]["
 
 _GATE_NAMES = ("scope_authorization", "publish_authorization", "merge_authorization")
 
+_ATOMIC_SCOPE_REAUTHORIZATION_STATES = frozenset(
+    {"INTAKE", "SCOPE_AWAITING_AUTHORIZATION", "AUTHORIZED"}
+)
+
 # os.O_NOFOLLOW is POSIX-only; on a platform without it this degrades to the
 # pre-open os.path.islink()/Path.is_symlink() check alone (see _read_mission_record).
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -463,6 +467,15 @@ def record_reviewer_evidence(mission_id: str, evidence: dict) -> dict:
     return mutated
 
 
+def _apply_gate_decision(record: dict, gate_name: str, decision: dict) -> dict:
+    """Return a fresh record with one gate replaced; never reads or writes."""
+    mutated = copy.deepcopy(record)
+    mutated["human_gates"] = dict(mutated["human_gates"])
+    mutated["human_gates"][gate_name] = copy.deepcopy(decision)
+    mutated["updated_at"] = _now()
+    return mutated
+
+
 def decide_gate(mission_id: str, gate_name: str, decision: dict) -> dict:
     """The only path to setting a human_gates.<name> status. Hard-refuses
     before any read/write unless decision['decided_by'] is literally
@@ -476,10 +489,7 @@ def decide_gate(mission_id: str, gate_name: str, decision: dict) -> dict:
         )
 
     record = _read_mission_record(mission_id)
-    mutated = copy.deepcopy(record)
-    mutated["human_gates"] = dict(mutated["human_gates"])
-    mutated["human_gates"][gate_name] = copy.deepcopy(decision)
-    mutated["updated_at"] = _now()
+    mutated = _apply_gate_decision(record, gate_name, decision)
 
     result = validate_mission_record(mutated)
     if not result.valid:
@@ -502,6 +512,15 @@ def propose_scope_change(mission_id: str, proposal: dict) -> dict:
         )
 
     record = _read_mission_record(mission_id)
+    proposal_id = proposal.get("proposal_id")
+    if any(
+        existing.get("proposal_id") == proposal_id
+        for existing in record["proposed_scope_changes"]
+        if isinstance(existing, dict)
+    ):
+        raise ValueError(
+            f"mission {mission_id}: proposal_id {proposal_id!r} already exists"
+        )
     mutated = copy.deepcopy(record)
     mutated["proposed_scope_changes"] = mutated["proposed_scope_changes"] + [
         copy.deepcopy(proposal)
@@ -555,16 +574,43 @@ def decide_scope_change(mission_id: str, proposal_id: str, decision: dict) -> di
         )
 
     record = _read_mission_record(mission_id)
+    mutated = _apply_scope_change_decision(record, proposal_id, decision)
+
+    result = validate_mission_record(mutated)
+    if not result.valid:
+        raise MissionValidationFailed(
+            f"mission {mission_id}: scope-change decision failed validation", result.errors
+        )
+
+    _write_mission_record(mutated)
+    return mutated
+
+
+def _apply_scope_change_decision(record: dict, proposal_id: str, decision: dict) -> dict:
+    """Return a fresh record with one still-pending proposal decided.
+
+    This pure helper never reads, validates, or writes. Terminal proposal
+    decisions are immutable: only ``pending_human_decision`` may become
+    accepted or rejected.
+    """
     mutated = copy.deepcopy(record)
+    status = decision["status"]
 
     proposals = list(mutated["proposed_scope_changes"])
     index = next(
         (i for i, p in enumerate(proposals) if p.get("proposal_id") == proposal_id), None
     )
     if index is None:
-        raise ValueError(f"mission {mission_id}: no proposal with proposal_id={proposal_id!r}")
+        raise ValueError(
+            f"mission {mutated['mission_id']}: no proposal with proposal_id={proposal_id!r}"
+        )
 
     proposal = copy.deepcopy(proposals[index])
+    if proposal.get("status") != "pending_human_decision":
+        raise ValueError(
+            f"mission {mutated['mission_id']}: proposal {proposal_id!r} is already terminal "
+            f"with status {proposal.get('status')!r}"
+        )
     proposal["status"] = status
     proposal["decided_by"] = decision["decided_by"]
     proposal["decided_at"] = decision.get("decided_at")
@@ -586,11 +632,67 @@ def decide_scope_change(mission_id: str, proposal_id: str, decision: dict) -> di
     proposals[index] = proposal
     mutated["proposed_scope_changes"] = proposals
     mutated["updated_at"] = _now()
+    return mutated
+
+
+def decide_scope_change_and_reauthorize(
+    mission_id: str,
+    proposal_id: str,
+    scope_decision: dict,
+    gate_decision: dict,
+) -> dict:
+    """Atomically accept a pending scope change and authorize its version.
+
+    The two decisions are applied to one in-memory record, validated once,
+    and written once. This operation is pre-execution only; it never carries
+    build/review evidence across mission-definition versions or rewinds state.
+    """
+    if scope_decision.get("status") != "accepted":
+        raise ValueError(
+            "decide_scope_change_and_reauthorize() requires "
+            "scope_decision['status'] == 'accepted'"
+        )
+    if gate_decision.get("status") != "approved":
+        raise ValueError(
+            "decide_scope_change_and_reauthorize() requires "
+            "gate_decision['status'] == 'approved'"
+        )
+    if scope_decision.get("decided_by") != HUMAN_DECIDER:
+        raise ValueError(
+            "decide_scope_change_and_reauthorize() requires scope_decision "
+            f"attributed to {HUMAN_DECIDER!r}"
+        )
+    if gate_decision.get("decided_by") != HUMAN_DECIDER:
+        raise ValueError(
+            "decide_scope_change_and_reauthorize() requires gate_decision "
+            f"attributed to {HUMAN_DECIDER!r}"
+        )
+
+    record = _read_mission_record(mission_id)
+    if record.get("state") not in _ATOMIC_SCOPE_REAUTHORIZATION_STATES:
+        raise ValueError(
+            f"mission {mission_id}: atomic scope reauthorization is not allowed in "
+            f"state {record.get('state')!r}"
+        )
+    if record.get("builder_evidence") != [] or record.get("reviewer_evidence") != []:
+        raise ValueError(
+            f"mission {mission_id}: atomic scope reauthorization refuses to carry "
+            "builder/reviewer evidence across mission-definition versions"
+        )
+    if record.get("corrective_cycle_count") != 0:
+        raise ValueError(
+            f"mission {mission_id}: atomic scope reauthorization requires "
+            "corrective_cycle_count == 0"
+        )
+
+    mutated = _apply_scope_change_decision(record, proposal_id, scope_decision)
+    mutated = _apply_gate_decision(mutated, "scope_authorization", gate_decision)
 
     result = validate_mission_record(mutated)
     if not result.valid:
         raise MissionValidationFailed(
-            f"mission {mission_id}: scope-change decision failed validation", result.errors
+            f"mission {mission_id}: atomic scope-change reauthorization failed validation",
+            result.errors,
         )
 
     _write_mission_record(mutated)

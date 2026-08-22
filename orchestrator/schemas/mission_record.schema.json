@@ -104,7 +104,7 @@
     },
 
     "mission_definition_history": {
-      "description": "Versioned, append-only record of the AUTHORIZED mission definition. Entry [length-1] (highest `version`) is the current authorized scope. An entry is written only when human_gates.scope_authorization records a matching approval -- this array is never mutated by an agent on its own, and a new version never silently replaces an old one; it is appended alongside it. See 'Re-planning model' in MISSION_RECORD.md.",
+      "description": "Versioned, append-only record of human-accepted mission definitions. Entry [length-1] (highest `version`) is the current scope definition; execution authorization is tracked separately by human_gates.scope_authorization and must match that current version before gated execution. This array is never mutated by an agent on its own, and a new version never replaces an old one. See 'Re-planning model' in MISSION_RECORD.md.",
       "type": "array",
       "minItems": 0,
       "items": { "$ref": "#/definitions/mission_definition_version" }
@@ -117,6 +117,40 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["proposal_id", "proposed_at", "proposed_by", "label", "rationale", "diff_against_current_scope", "status"],
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "pending_human_decision" } }, "required": ["status"] },
+            "then": {
+              "properties": {
+                "decided_by": { "type": "null" },
+                "decided_at": { "type": "null" },
+                "resulting_mission_definition_version": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "status": { "const": "rejected" } }, "required": ["status"] },
+            "then": {
+              "required": ["decided_by", "decided_at", "resulting_mission_definition_version"],
+              "properties": {
+                "decided_by": { "const": "jose" },
+                "decided_at": { "$ref": "#/definitions/timestamp" },
+                "resulting_mission_definition_version": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "status": { "const": "accepted" } }, "required": ["status"] },
+            "then": {
+              "required": ["decided_by", "decided_at", "resulting_mission_definition_version"],
+              "properties": {
+                "decided_by": { "const": "jose" },
+                "decided_at": { "$ref": "#/definitions/timestamp" },
+                "resulting_mission_definition_version": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        ],
         "properties": {
           "proposal_id": { "type": "string", "minLength": 1 },
           "proposed_at": { "$ref": "#/definitions/timestamp" },

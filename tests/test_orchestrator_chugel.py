@@ -16,6 +16,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import orchestrator.chugel as chugel
 
@@ -588,6 +589,202 @@ class PruebaDecideScopeChangeAtribucion(ChugelTestCase):
         self.assertEqual(len(current["mission_definition_history"]), 1)
         p2 = next(p for p in current["proposed_scope_changes"] if p["proposal_id"] == "p2")
         self.assertEqual(p2["status"], "pending_human_decision")
+
+
+class PruebaReautorizacionAtomicaDeScope(ChugelTestCase):
+    def _prepare(self, *, state="INTAKE", proposal_id="p2"):
+        mission = _create_intake_mission("scope atomico")
+        mid = mission["mission_id"]
+        chugel.decide_gate(
+            mid, "scope_authorization",
+            _gate_decision(approved_for={"mission_definition_version": 1}),
+        )
+        if state in {"SCOPE_AWAITING_AUTHORIZATION", "AUTHORIZED", "BUILDING"}:
+            chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="ready")
+        if state in {"AUTHORIZED", "BUILDING"}:
+            chugel.transition(mid, "AUTHORIZED", actor="jose", reason="approved")
+        if state == "BUILDING":
+            chugel.record_repository_state(mid, {
+                "worktree_path": "/tmp/synthetic", "branch": "local/test",
+                "base_sha": "a" * 40, "isolation_confirmed": True,
+            })
+            chugel.transition(mid, "BUILDING", actor="chugel", reason="build")
+        chugel.propose_scope_change(mid, _proposal(proposal_id=proposal_id))
+        return mid
+
+    def _scope_decision(self, status="accepted"):
+        decision = {
+            "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z",
+            "status": status,
+        }
+        if status == "accepted":
+            decision["mission_definition_entry"] = _mission_definition_entry()
+        return decision
+
+    def _invoke(self, mid, *, scope_status="accepted", gate_status="approved", version=2):
+        return chugel.decide_scope_change_and_reauthorize(
+            mid, "p2", self._scope_decision(scope_status),
+            _gate_decision(status=gate_status, approved_for={"mission_definition_version": version}),
+        )
+
+    def test_happy_path_valida_y_escribe_exactamente_una_vez(self):
+        mid = self._prepare(state="AUTHORIZED")
+        pre_mutation = chugel.get_mission(mid)
+        with mock.patch.object(chugel, "_read_mission_record", return_value=pre_mutation), \
+             mock.patch.object(chugel, "validate_mission_record", wraps=chugel.validate_mission_record) as validate, \
+             mock.patch.object(chugel, "_write_mission_record", wraps=chugel._write_mission_record) as write:
+            updated = self._invoke(mid)
+        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual([e["version"] for e in updated["mission_definition_history"]], [1, 2])
+        self.assertEqual(updated["human_gates"]["scope_authorization"]["approved_for"], {
+            "mission_definition_version": 2,
+        })
+
+    def test_status_scope_no_accepted_falla_antes_de_read_write(self):
+        missing = object()
+        for status in ("rejected", "pending_human_decision", None, True, False, "maybe", missing):
+            decision = {"decided_by": "jose"}
+            if status is not missing:
+                decision["status"] = status
+            with self.subTest(status=status), \
+                 mock.patch.object(chugel, "_read_mission_record") as read, \
+                 mock.patch.object(chugel, "_write_mission_record") as write:
+                with self.assertRaises(ValueError):
+                    chugel.decide_scope_change_and_reauthorize(
+                        "not-even-read", "p2", decision,
+                        _gate_decision(approved_for={"mission_definition_version": 2}),
+                    )
+                read.assert_not_called()
+                write.assert_not_called()
+
+    def test_status_gate_no_approved_falla_antes_de_read_write(self):
+        missing = object()
+        for status in ("rejected", "pending", "not_requested", None, True, False, "maybe", missing):
+            gate = _gate_decision(status="rejected")
+            if status is not missing:
+                gate["status"] = status
+            else:
+                gate.pop("status")
+            gate["decided_by"] = "jose"
+            with self.subTest(status=status), \
+                 mock.patch.object(chugel, "_read_mission_record") as read, \
+                 mock.patch.object(chugel, "_write_mission_record") as write:
+                with self.assertRaises(ValueError):
+                    chugel.decide_scope_change_and_reauthorize(
+                        "not-even-read", "p2", self._scope_decision(), gate,
+                    )
+                read.assert_not_called()
+                write.assert_not_called()
+
+    def test_version_gate_incorrecta_no_escribe(self):
+        mid = self._prepare()
+        before = chugel._mission_path(mid).read_bytes()
+        with self.assertRaises(chugel.MissionValidationFailed):
+            self._invoke(mid, version=1)
+        self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
+
+    def test_solo_estados_pre_ejecucion_son_elegibles(self):
+        for state in ("INTAKE", "SCOPE_AWAITING_AUTHORIZATION", "AUTHORIZED"):
+            with self.subTest(state=state):
+                mid = self._prepare(state=state)
+                self.assertEqual(self._invoke(mid)["state"], state)
+
+    def test_building_falla_sin_rebobinar_estado(self):
+        mid = self._prepare(state="BUILDING")
+        before = chugel._mission_path(mid).read_bytes()
+        with self.assertRaises(ValueError):
+            self._invoke(mid)
+        self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
+        self.assertEqual(chugel.get_mission(mid)["state"], "BUILDING")
+
+    def test_evidencia_builder_o_reviewer_impide_reautorizar_scope(self):
+        for field, evidence in (
+            ("builder_evidence", _builder_evidence(0)),
+            ("reviewer_evidence", _reviewer_evidence(0)),
+        ):
+            with self.subTest(field=field):
+                mid = self._prepare()
+                record = chugel.get_mission(mid)
+                record[field] = [evidence]
+                chugel._write_mission_record(record)
+                before = chugel._mission_path(mid).read_bytes()
+                with self.assertRaises(ValueError):
+                    self._invoke(mid)
+                self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
+
+    def test_corrective_cycle_no_cero_impide_reautorizar_scope(self):
+        mid = self._prepare()
+        record = chugel.get_mission(mid)
+        record["corrective_cycle_count"] = 1
+        before = chugel._mission_path(mid).read_bytes()
+        with mock.patch.object(chugel, "_read_mission_record", return_value=record), \
+             mock.patch.object(chugel, "_write_mission_record") as write:
+            with self.assertRaises(ValueError):
+                self._invoke(mid)
+            write.assert_not_called()
+        self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
+
+    def test_helpers_y_operacion_no_mutan_inputs(self):
+        mid = self._prepare()
+        scope = self._scope_decision()
+        gate = _gate_decision(approved_for={"mission_definition_version": 2})
+        scope_before = json.loads(json.dumps(scope))
+        gate_before = json.loads(json.dumps(gate))
+        self.assertEqual(chugel.decide_scope_change_and_reauthorize(mid, "p2", scope, gate)["state"], "INTAKE")
+        self.assertEqual(scope, scope_before)
+        self.assertEqual(gate, gate_before)
+
+
+class PruebaInmutabilidadYUnicidadDePropuestas(ChugelTestCase):
+    def test_rechazo_standalone_legitimo_se_preserva(self):
+        mission = _create_intake_mission("rechazo")
+        mid = mission["mission_id"]
+        chugel.propose_scope_change(mid, _proposal())
+        updated = chugel.decide_scope_change(mid, "p1", {
+            "decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z", "status": "rejected",
+        })
+        self.assertEqual(updated["proposed_scope_changes"][0]["status"], "rejected")
+
+    def test_decisiones_terminales_no_se_pueden_reescribir_ni_repetir(self):
+        for initial, later in (
+            ("rejected", "accepted"), ("accepted", "rejected"),
+            ("rejected", "rejected"), ("accepted", "accepted"),
+        ):
+            with self.subTest(initial=initial, later=later):
+                mission = _create_intake_mission(f"{initial}-{later}")
+                mid = mission["mission_id"]
+                chugel.propose_scope_change(mid, _proposal())
+                first = {"decided_by": "jose", "decided_at": "2026-08-19T12:30:00Z", "status": initial}
+                if initial == "accepted":
+                    first["mission_definition_entry"] = _mission_definition_entry()
+                chugel.decide_scope_change(mid, "p1", first)
+                before = chugel._mission_path(mid).read_bytes()
+                second = {"decided_by": "jose", "decided_at": "2026-08-19T12:31:00Z", "status": later}
+                if later == "accepted":
+                    second["mission_definition_entry"] = _mission_definition_entry()
+                with self.assertRaises(ValueError):
+                    chugel.decide_scope_change(mid, "p1", second)
+                self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
+
+    def test_helper_puro_rechaza_directamente_propuesta_terminal(self):
+        mission = _create_intake_mission("helper-terminal")
+        record = mission | {"proposed_scope_changes": [_proposal(status="rejected")]}
+        decision = {
+            "decided_by": "jose", "decided_at": "2026-08-19T12:31:00Z",
+            "status": "accepted", "mission_definition_entry": _mission_definition_entry(),
+        }
+        with self.assertRaises(ValueError):
+            chugel._apply_scope_change_decision(record, "p1", decision)
+
+    def test_proposal_id_duplicado_falla_sin_append(self):
+        mission = _create_intake_mission("duplicado")
+        mid = mission["mission_id"]
+        chugel.propose_scope_change(mid, _proposal(proposal_id="same"))
+        before = chugel._mission_path(mid).read_bytes()
+        with self.assertRaises(ValueError):
+            chugel.propose_scope_change(mid, _proposal(proposal_id="same"))
+        self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
 
 
 # --- corrective_cycle_count atómico ---------------------------------
