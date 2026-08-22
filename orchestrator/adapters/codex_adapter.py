@@ -166,7 +166,7 @@ import json
 import os
 from pathlib import Path
 
-from openai_codex import Codex, Sandbox
+from openai_codex import Codex, CodexConfig, Sandbox
 from openai_codex.errors import (
     CodexError,
     InternalRpcError,
@@ -200,6 +200,8 @@ _INFRASTRUCTURE_EVIDENCE_FIELDS = frozenset(
 _CODEX_UNSUPPORTED_KEYWORDS = frozenset(
     {"if", "then", "else", "allOf", "not", "dependentRequired", "dependentSchemas"}
 )
+
+_CODEX_CONFIG_OVERRIDES = ("features.multi_agent=false",)
 
 
 class CodexAdapterError(Exception):
@@ -487,7 +489,7 @@ class CodexAdapter:
         repository = request.task.get("repository") or {}
         worktree_path = repository.get("worktree_path")
 
-        with Codex() as codex:
+        with Codex(config=CodexConfig(config_overrides=_CODEX_CONFIG_OVERRIDES)) as codex:
             codex.login_api_key(os.environ["OPENAI_API_KEY"])
             _verify_api_key_identity_active(codex)
 

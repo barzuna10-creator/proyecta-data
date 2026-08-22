@@ -151,10 +151,15 @@ def _install_fake_openai_codex():
             self.account = account
             self.requires_openai_auth = requires_openai_auth
 
+    class CodexConfig:
+        def __init__(self, *, config_overrides=(), **kwargs):
+            self.config_overrides = config_overrides
+
     class Codex:
         instances = []
 
         def __init__(self, config=None):
+            self.config = config
             self.logged_in_with = None
             self.chatgpt_login_called = False
             self._account_response = GetAccountResponse(account=Account(ApiKeyAccount()))
@@ -206,6 +211,7 @@ def _install_fake_openai_codex():
 
     fake.Sandbox = Sandbox
     fake.Codex = Codex
+    fake.CodexConfig = CodexConfig
     fake.Thread = Thread
     fake.TurnResult = TurnResult
     fake.TurnStatus = TurnStatus
@@ -516,6 +522,54 @@ class PruebaCompatibilidadConSDKReal(CodexAdapterTestCase):
         thread.run("prompt", output_schema={})
         self.assertEqual(thread.run_called_count, 1)
 
+
+class PruebaRestriccionMultiAgente(CodexAdapterTestCase):
+    def test_codex_se_construye_con_multi_agent_deshabilitado(self):
+        thread = self._fake_sdk.Thread(
+            id="t-1",
+            turn_result=self._fake_sdk.TurnResult(
+                status=self._fake_sdk.TurnStatus.completed,
+                final_response=json.dumps({"attempt": 0}),
+            ),
+        )
+        with self._patch_thread_start(thread):
+            self.coa.CodexAdapter().invoke(self._request())
+
+        instance = self._fake_sdk.Codex.instances[-1]
+        self.assertIsNotNone(instance.config)
+        self.assertEqual(
+            instance.config.config_overrides,
+            ("features.multi_agent=false",),
+        )
+
+    def test_restriccion_aplica_a_ambos_roles_sin_cambiar_sandbox(self):
+        for role, expected_sandbox in (
+            ("emilio", self._fake_sdk.Sandbox.workspace_write),
+            ("emma", self._fake_sdk.Sandbox.read_only),
+        ):
+            captured = {}
+
+            def fake_thread_start(self_codex, **kwargs):
+                captured.update(kwargs)
+                return self._fake_sdk.Thread(
+                    id=f"t-{role}",
+                    turn_result=self._fake_sdk.TurnResult(
+                        status=self._fake_sdk.TurnStatus.completed,
+                        final_response=json.dumps({"attempt": 0}),
+                    ),
+                )
+
+            with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
+                self.coa.CodexAdapter().invoke(self._request(agent_role=role))
+
+            self.assertEqual(captured["sandbox"], expected_sandbox)
+            self.assertEqual(
+                self._fake_sdk.Codex.instances[-1].config.config_overrides,
+                ("features.multi_agent=false",),
+            )
+
+
+class PruebaCompatibilidadConSDKRealContinuacion(CodexAdapterTestCase):
     def test_adapter_real_invoca_thread_start_con_sandbox_y_cwd(self):
         captured = {}
 
