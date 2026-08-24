@@ -52,15 +52,10 @@ inherited claims:**
       identity, the adapter fails closed -- "cannot reliably determine"
       and "conflicting credential found" are both refused, per
       `PROVIDER_INTEGRATION_V1.md` section 3's unchanged requirement.
-   The file-based backend check (`_inspect_file_backend()`) is retained as
-   a cheap, early, defense-in-depth pre-check (catches an obviously
-   conflicting on-disk credential before ever touching the SDK's login
-   flow) but is no longer the sole or decisive trust boundary -- `account()`
-   is. No credential is ever deleted, logged out, or modified by this
-   adapter, in either check. **This closes the gap the prior increment
-   could not honestly close** -- no dependency beyond the two already
-   authorized (`openai-codex`) was needed; the mechanism existed in the
-   SDK's own public API and was missed, not absent.
+   The adapter no longer examines any ambient `~/.codex/auth.json` backend.
+   Every invocation instead gives the child app-server a fresh isolated
+   CODEX_HOME and authenticates it only through `login_api_key()`. The
+   post-login `account()` check remains the decisive trust boundary.
 4. **Fake-module test fidelity**: the fake `Codex`/`Thread` classes in
    `tests/test_orchestrator_codex_adapter.py` are now written to match the
    *real* signatures exactly (verified against the installed package,
@@ -152,10 +147,16 @@ Remaining disclosures, still true after these corrections:
   concern (a hidden SDK-level retry silently turning one Chugel-authorized
   invocation into multiple provider attempts) is resolved, not merely
   bounded, on the specific path this adapter uses.
-- **Sandbox presets** (`Sandbox.workspace_write` for Emilio,
-  `Sandbox.read_only` for Emma) reconfirmed by direct introspection this
-  correction (`Sandbox.read_only`/`Sandbox.workspace_write`/
-  `Sandbox.full_access` all present).
+- **Isolated-home capability confinement**: every invocation validates one
+  canonical non-symlink worktree, creates a private CODEX_HOME containing
+  only infrastructure-owned configuration, disables ambient integrations,
+  selects a role-specific permission profile, denies approval escalation,
+  and removes the home on every exit path. Legacy `sandbox=` presets are not
+  passed because Codex 0.147.0 gives them precedence over permission profiles.
+  Emilio receives worktree read/write; Emma receives worktree read-only; both
+  receive no command network. Codex may bootstrap its bundled `.system`
+  skills inside the isolated home, but no ambient/user skills are inherited
+  and skill search/dependency installation remain disabled.
 """
 
 from __future__ import annotations
@@ -164,9 +165,13 @@ import asyncio
 import copy
 import json
 import os
+import shutil
+import tempfile
+import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 
-from openai_codex import Codex, CodexConfig, Sandbox
+from openai_codex import ApprovalMode, Codex, CodexConfig
 from openai_codex.errors import (
     CodexError,
     InternalRpcError,
@@ -186,10 +191,6 @@ _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "mission_rec
 
 _EVIDENCE_ENTRY_NAME = {"emilio": "builder_evidence_entry", "emma": "reviewer_evidence_entry"}
 
-_SANDBOX = {"emilio": "workspace_write", "emma": "read_only"}
-
-_CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
-
 # The real "completed" enum member's value, per openai_codex.generated.v2_all.TurnStatus.
 _TURN_STATUS_COMPLETED = "completed"
 
@@ -201,7 +202,23 @@ _CODEX_UNSUPPORTED_KEYWORDS = frozenset(
     {"if", "then", "else", "allOf", "not", "dependentRequired", "dependentSchemas"}
 )
 
-_CODEX_CONFIG_OVERRIDES = ("features.multi_agent=false",)
+_ROLE_WORKTREE_ACCESS = {"emilio": "write", "emma": "read"}
+
+_DISABLED_CODEX_FEATURES = (
+    "multi_agent",
+    "apps",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+    "in_app_browser",
+    "plugins",
+    "plugin_sharing",
+    "remote_plugin",
+    "enable_mcp_apps",
+    "skill_search",
+    "skill_mcp_dependency_install",
+)
 
 
 class CodexAdapterError(Exception):
@@ -311,34 +328,6 @@ def _load_evidence_schema(agent_role: str) -> dict:
     return _strip_ref_sibling_keywords(projected)
 
 
-def _inspect_file_backend() -> str | None:
-    """Cheap, early, defense-in-depth pre-check only -- see module
-    docstring point 3. Returns None if the file-based credential store is
-    absent or looks exclusively like an API-key credential; otherwise
-    returns a string describing why it looks conflicting/unverifiable.
-    ASSUMPTION: the exact schema of ~/.codex/auth.json was not
-    independently confirmed against the real installed SDK -- this is a
-    best-effort, conservative heuristic, not a verified parser, and is no
-    longer this adapter's decisive trust boundary."""
-    if not _CODEX_AUTH_FILE.exists():
-        return None
-    try:
-        with open(_CODEX_AUTH_FILE, encoding="utf-8") as f:
-            content = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        return f"~/.codex/auth.json exists but could not be read/parsed: {exc!r}"
-    if not isinstance(content, dict):
-        return "~/.codex/auth.json exists but its content is not a JSON object"
-    suspicious_markers = ("chatgpt", "oauth", "access_token", "refresh_token", "id_token")
-    serialized_keys = " ".join(str(k).lower() for k in content.keys())
-    if any(marker in serialized_keys for marker in suspicious_markers):
-        return (
-            "~/.codex/auth.json contains a field name suggestive of a "
-            "ChatGPT/OAuth-derived credential, not an API-key-only credential"
-        )
-    return None
-
-
 def _verify_api_key_identity_active(codex: Codex) -> None:
     """The decisive trust boundary (module docstring point 3). Must be
     called only after login_api_key() has already been called on `codex`.
@@ -395,15 +384,129 @@ def _verify_api_key_identity_active(codex: Codex) -> None:
         )
 
 
-def _verify_codex_host_trust_or_raise() -> None:
-    """Cheap pre-check only, run before touching the SDK's login flow at
-    all -- see module docstring point 3. The decisive check is
-    _verify_api_key_identity_active(), run later, after login_api_key()."""
-    file_backend_issue = _inspect_file_backend()
-    if file_backend_issue is not None:
+def _validate_worktree_path(raw_path: object) -> Path:
+    """Return one existing canonical directory, rejecting ambiguity.
+
+    A relative path, ``..`` spelling, missing/non-directory target, or any
+    symlink component is refused before an isolated home or SDK client exists.
+    The exact resolved path is both the thread cwd and sole runtime workspace
+    root in the role permission profile.
+    """
+    if not isinstance(raw_path, str) or not raw_path:
+        raise CodexAdapterError("repository.worktree_path must be a non-empty string")
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        raise CodexAdapterError("repository.worktree_path must be absolute")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise CodexAdapterError(f"repository.worktree_path cannot be resolved: {exc!r}") from exc
+    if candidate != resolved:
         raise CodexAdapterError(
-            f"Codex file-based credential backend check failed closed: {file_backend_issue}"
+            "repository.worktree_path must already be canonical and contain no symlink or traversal"
         )
+    if not resolved.is_dir():
+        raise CodexAdapterError("repository.worktree_path must resolve to a directory")
+    return resolved
+
+
+def _render_isolated_config(agent_role: str, worktree: Path) -> str:
+    """Render the complete infrastructure-owned config for one invocation.
+
+    ``json.dumps`` produces a valid TOML basic string for the canonical path.
+    The empty MCP/hooks/skills tables are defense in depth; isolation from the
+    user's normal config comes from the fresh CODEX_HOME itself. Codex 0.147.0
+    may bootstrap its bundled ``skills/.system`` directory in that home. Those
+    runtime-owned skills are not ambient/user skills; search and dependency
+    installation remain disabled below.
+    """
+    if agent_role not in _ROLE_WORKTREE_ACCESS:
+        raise CodexAdapterError(f"unsupported Codex agent role: {agent_role!r}")
+    profile = f"zentra-{agent_role}"
+    quoted_worktree = json.dumps(str(worktree))
+    feature_lines = "\n".join(f"{name} = false" for name in _DISABLED_CODEX_FEATURES)
+    return f'''default_permissions = "{profile}"
+web_search = "disabled"
+allow_login_shell = false
+
+[features]
+{feature_lines}
+
+[agents]
+enabled = false
+
+[apps._default]
+enabled = false
+
+[shell_environment_policy]
+inherit = "core"
+ignore_default_excludes = false
+
+[hooks]
+
+[mcp_servers]
+
+[skills]
+config = []
+
+[permissions.{profile}.workspace_roots]
+{quoted_worktree} = true
+
+[permissions.{profile}.filesystem]
+":minimal" = "read"
+
+[permissions.{profile}.filesystem.":workspace_roots"]
+"." = "{_ROLE_WORKTREE_ACCESS[agent_role]}"
+
+[permissions.{profile}.network]
+enabled = false
+'''
+
+
+@contextmanager
+def _isolated_codex_home(agent_role: str, worktree: Path):
+    """Create, validate, yield, and reliably remove a private CODEX_HOME."""
+    try:
+        home = Path(tempfile.mkdtemp(prefix="zentra-codex-home-"))
+        home.chmod(0o700)
+        config_path = home / "config.toml"
+        config_text = _render_isolated_config(agent_role, worktree)
+        config_path.write_text(config_text, encoding="utf-8")
+        config_path.chmod(0o600)
+        parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        if parsed.get("default_permissions") != f"zentra-{agent_role}":
+            raise CodexAdapterError("generated isolated Codex config failed validation")
+        if set(home.iterdir()) != {config_path}:
+            raise CodexAdapterError("isolated CODEX_HOME contains unexpected pre-launch state")
+    except CodexAdapterError:
+        if "home" in locals() and home.exists():
+            try:
+                shutil.rmtree(home)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                raise CodexAdapterError(
+                    f"isolated CODEX_HOME setup failed and cleanup also failed: {cleanup_exc!r}"
+                ) from cleanup_exc
+        raise
+    except Exception as exc:  # noqa: BLE001 -- setup must fail closed
+        if "home" in locals() and home.exists():
+            try:
+                shutil.rmtree(home)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                raise CodexAdapterError(
+                    "could not create isolated CODEX_HOME and could not remove its residue: "
+                    f"setup={exc!r}, cleanup={cleanup_exc!r}"
+                ) from cleanup_exc
+        raise CodexAdapterError(f"could not create isolated CODEX_HOME: {exc!r}") from exc
+
+    try:
+        yield home
+    finally:
+        try:
+            shutil.rmtree(home)
+        except Exception as exc:  # noqa: BLE001 -- residual home is a security failure
+            raise CodexAdapterError(
+                f"could not safely remove isolated CODEX_HOME {home}: {exc!r}"
+            ) from exc
 
 
 def _map_turn_status_to_outcome(status, error) -> tuple[str, str] | None:
@@ -455,8 +558,6 @@ class CodexAdapter:
                 "OPENAI_API_KEY is not set in the process environment -- refusing to "
                 "construct a Codex client."
             )
-        _verify_codex_host_trust_or_raise()
-
         try:
             outcome, evidence, error_detail, thread_id = asyncio.run(
                 asyncio.wait_for(self._run(request), timeout=self._timeout_seconds)
@@ -485,28 +586,34 @@ class CodexAdapter:
         raises for a legitimate non-"completed" turn outcome -- only for a
         genuine transport/protocol exception, which invoke() maps via
         _map_exception_to_outcome()."""
-        sandbox_name = _SANDBOX[request.agent_role]
         repository = request.task.get("repository") or {}
-        worktree_path = repository.get("worktree_path")
+        worktree = _validate_worktree_path(repository.get("worktree_path"))
 
-        with Codex(config=CodexConfig(config_overrides=_CODEX_CONFIG_OVERRIDES)) as codex:
-            codex.login_api_key(os.environ["OPENAI_API_KEY"])
-            _verify_api_key_identity_active(codex)
+        with _isolated_codex_home(request.agent_role, worktree) as codex_home:
+            # The child cannot authenticate from the parent's ambient key;
+            # authentication is introduced only through login_api_key() below.
+            child_env = {"CODEX_HOME": str(codex_home), "OPENAI_API_KEY": ""}
+            with Codex(config=CodexConfig(env=child_env)) as codex:
+                codex.login_api_key(os.environ["OPENAI_API_KEY"])
+                _verify_api_key_identity_active(codex)
 
-            thread = codex.thread_start(sandbox=getattr(Sandbox, sandbox_name), cwd=worktree_path)
-            thread_id = getattr(thread, "id", None)
-            schema = _load_evidence_schema(request.agent_role)
-            result = thread.run(json.dumps(request.task), output_schema=schema)
+                thread = codex.thread_start(
+                    approval_mode=ApprovalMode.deny_all,
+                    cwd=str(worktree),
+                )
+                thread_id = getattr(thread, "id", None)
+                schema = _load_evidence_schema(request.agent_role)
+                result = thread.run(json.dumps(request.task), output_schema=schema)
 
-            non_completed = _map_turn_status_to_outcome(
-                getattr(result, "status", None), getattr(result, "error", None)
-            )
-            if non_completed is not None:
-                outcome, error_detail = non_completed
-                return outcome, None, error_detail, thread_id
+                non_completed = _map_turn_status_to_outcome(
+                    getattr(result, "status", None), getattr(result, "error", None)
+                )
+                if non_completed is not None:
+                    outcome, error_detail = non_completed
+                    return outcome, None, error_detail, thread_id
 
-            evidence = json.loads(result.final_response)
-            return "completed", evidence, None, thread_id
+                evidence = json.loads(result.final_response)
+                return "completed", evidence, None, thread_id
 
 
 def _now() -> str:

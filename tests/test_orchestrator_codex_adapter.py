@@ -44,11 +44,11 @@ import json
 import os
 import sys
 import tempfile
+import tomllib
 import types
 import unittest
 from pathlib import Path
 from enum import Enum
-from pathlib import Path
 from unittest import mock
 
 
@@ -59,6 +59,10 @@ def _install_fake_openai_codex():
         read_only = "read_only"
         workspace_write = "workspace_write"
         full_access = "full_access"
+
+    class ApprovalMode(Enum):
+        deny_all = "deny_all"
+        auto_review = "auto_review"
 
     class TurnStatus(Enum):
         completed = "completed"
@@ -152,8 +156,9 @@ def _install_fake_openai_codex():
             self.requires_openai_auth = requires_openai_auth
 
     class CodexConfig:
-        def __init__(self, *, config_overrides=(), **kwargs):
+        def __init__(self, *, config_overrides=(), env=None, **kwargs):
             self.config_overrides = config_overrides
+            self.env = env
 
     class Codex:
         instances = []
@@ -210,6 +215,7 @@ def _install_fake_openai_codex():
             return Thread(id="codex-thread-default")
 
     fake.Sandbox = Sandbox
+    fake.ApprovalMode = ApprovalMode
     fake.Codex = Codex
     fake.CodexConfig = CodexConfig
     fake.Thread = Thread
@@ -291,17 +297,14 @@ class CodexAdapterTestCase(unittest.TestCase):
         importlib.reload(coa)
         self.coa = coa
         self._tmpdir = tempfile.TemporaryDirectory()
-        self._auth_file_patch = mock.patch.object(
-            self.coa, "_CODEX_AUTH_FILE", Path(self._tmpdir.name) / "auth.json"
-        )
-        self._auth_file_patch.start()
+        self._worktree = Path(self._tmpdir.name).resolve() / "worktree"
+        self._worktree.mkdir()
         self._env_patch = mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-codex-test-value"})
         self._env_patch.start()
         os.environ.pop("CODEX_TRUSTED_HOST_VERIFIED", None)
 
     def tearDown(self):
         self._env_patch.stop()
-        self._auth_file_patch.stop()
         self._tmpdir.cleanup()
         sys.modules.pop("openai_codex.errors", None)
         sys.modules.pop("openai_codex", None)
@@ -313,7 +316,7 @@ class CodexAdapterTestCase(unittest.TestCase):
             mission_id="mission-1",
             agent_role=agent_role,
             attempt=attempt,
-            task=task or {"repository": {"worktree_path": "/tmp/worktree"}},
+            task=task or {"repository": {"worktree_path": str(self._worktree)}},
             requested_at="2026-08-19T12:00:00Z",
             requested_fresh_context=(agent_role == "emma"),
         )
@@ -455,24 +458,24 @@ class PruebaFronteraDeConfianzaReal(CodexAdapterTestCase):
         for func in (
             self.coa.CodexAdapter.invoke,
             self.coa.CodexAdapter._run,
-            self.coa._verify_codex_host_trust_or_raise,
             self.coa._verify_api_key_identity_active,
         ):
             self.assertNotIn("CODEX_TRUSTED_HOST_VERIFIED", func.__code__.co_names)
             self.assertNotIn("CODEX_TRUSTED_HOST_VERIFIED", func.__code__.co_consts)
 
         os.environ["CODEX_TRUSTED_HOST_VERIFIED"] = "1"
-        self.coa._CODEX_AUTH_FILE.write_text(json.dumps({"chatgpt_account_id": "abc123"}))
-        adapter = self.coa.CodexAdapter()
-        with self.assertRaises(self.coa.CodexAdapterError):
-            adapter.invoke(self._request())
+        turn = self._fake_sdk.TurnResult(
+            status=self._fake_sdk.TurnStatus.completed,
+            final_response=json.dumps({"attempt": 0}),
+        )
+        with self._patch_thread_start(self._fake_sdk.Thread(id="t-1", turn_result=turn)):
+            result = self.coa.CodexAdapter().invoke(self._request())
+        self.assertEqual(result.outcome, "completed")
         os.environ.pop("CODEX_TRUSTED_HOST_VERIFIED", None)
 
-    def test_archivo_auth_json_con_marcador_chatgpt_bloquea_como_prechequeo_barato(self):
-        self.coa._CODEX_AUTH_FILE.write_text(json.dumps({"chatgpt_account_id": "abc123"}))
-        adapter = self.coa.CodexAdapter()
-        with self.assertRaises(self.coa.CodexAdapterError):
-            adapter.invoke(self._request())
+    def test_adapter_no_define_ni_lee_auth_json_ambiental(self):
+        self.assertFalse(hasattr(self.coa, "_CODEX_AUTH_FILE"))
+        self.assertFalse(hasattr(self.coa, "_inspect_file_backend"))
 
     def test_nunca_llama_login_chatgpt(self):
         for func in (self.coa.CodexAdapter.invoke, self.coa.CodexAdapter._run):
@@ -537,16 +540,13 @@ class PruebaRestriccionMultiAgente(CodexAdapterTestCase):
 
         instance = self._fake_sdk.Codex.instances[-1]
         self.assertIsNotNone(instance.config)
-        self.assertEqual(
-            instance.config.config_overrides,
-            ("features.multi_agent=false",),
-        )
+        home = Path(instance.config.env["CODEX_HOME"])
+        self.assertFalse(home.exists())
+        self.assertEqual(instance.config.env["OPENAI_API_KEY"], "")
+        self.assertEqual(instance.config.config_overrides, ())
 
-    def test_restriccion_aplica_a_ambos_roles_sin_cambiar_sandbox(self):
-        for role, expected_sandbox in (
-            ("emilio", self._fake_sdk.Sandbox.workspace_write),
-            ("emma", self._fake_sdk.Sandbox.read_only),
-        ):
+    def test_restriccion_aplica_a_ambos_roles_sin_sandbox_legacy(self):
+        for role in ("emilio", "emma"):
             captured = {}
 
             def fake_thread_start(self_codex, **kwargs):
@@ -562,15 +562,151 @@ class PruebaRestriccionMultiAgente(CodexAdapterTestCase):
             with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
                 self.coa.CodexAdapter().invoke(self._request(agent_role=role))
 
-            self.assertEqual(captured["sandbox"], expected_sandbox)
-            self.assertEqual(
-                self._fake_sdk.Codex.instances[-1].config.config_overrides,
-                ("features.multi_agent=false",),
+            self.assertNotIn("sandbox", captured)
+            self.assertEqual(captured["approval_mode"], self._fake_sdk.ApprovalMode.deny_all)
+            self.assertEqual(self._fake_sdk.Codex.instances[-1].config.config_overrides, ())
+
+
+class PruebaHomeCodexAislado(CodexAdapterTestCase):
+    PROHIBITED_FEATURES = {
+        "multi_agent",
+        "apps",
+        "browser_use",
+        "browser_use_external",
+        "browser_use_full_cdp_access",
+        "computer_use",
+        "in_app_browser",
+        "plugins",
+        "plugin_sharing",
+        "remote_plugin",
+        "enable_mcp_apps",
+        "skill_search",
+        "skill_mcp_dependency_install",
+    }
+
+    def _invoke_and_capture(self, role="emilio", *, raise_exc=None):
+        captured = {}
+
+        def fake_thread_start(codex, **kwargs):
+            home = Path(codex.config.env["CODEX_HOME"])
+            captured["home"] = home
+            captured["config"] = tomllib.loads((home / "config.toml").read_text())
+            captured["entries"] = sorted(path.name for path in home.iterdir())
+            captured["thread_kwargs"] = kwargs
+            return self._fake_sdk.Thread(
+                id="isolated-thread",
+                turn_result=self._fake_sdk.TurnResult(
+                    status=self._fake_sdk.TurnStatus.completed,
+                    final_response=json.dumps({"attempt": 0}),
+                ),
+                raise_exc=raise_exc,
             )
+
+        with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
+            result = self.coa.CodexAdapter().invoke(self._request(agent_role=role))
+        captured["result"] = result
+        return captured
+
+    def test_home_unico_por_invocacion_y_limpiado_sin_mutar_parent(self):
+        original = os.environ.get("CODEX_HOME")
+        first = self._invoke_and_capture()
+        second = self._invoke_and_capture()
+        self.assertNotEqual(first["home"], second["home"])
+        self.assertFalse(first["home"].exists())
+        self.assertFalse(second["home"].exists())
+        self.assertEqual(os.environ.get("CODEX_HOME"), original)
+
+    def test_config_exacta_falla_cerrado_sin_capacidades_ambientales(self):
+        captured = self._invoke_and_capture()
+        config = captured["config"]
+        self.assertEqual(config["web_search"], "disabled")
+        self.assertFalse(config["allow_login_shell"])
+        self.assertFalse(config["agents"]["enabled"])
+        self.assertFalse(config["apps"]["_default"]["enabled"])
+        self.assertEqual(config["mcp_servers"], {})
+        self.assertEqual(config["hooks"], {})
+        self.assertEqual(config["skills"]["config"], [])
+        self.assertTrue(self.PROHIBITED_FEATURES <= set(config["features"]))
+        self.assertTrue(all(config["features"][name] is False for name in self.PROHIBITED_FEATURES))
+        self.assertEqual(config["shell_environment_policy"]["inherit"], "core")
+        self.assertFalse(config["shell_environment_policy"]["ignore_default_excludes"])
+        self.assertNotIn("node_repl", json.dumps(config))
+        self.assertNotIn("auth.json", captured["entries"])
+        self.assertNotIn("plugins", captured["entries"])
+        child_env = self._fake_sdk.Codex.instances[-1].config.env
+        self.assertEqual(set(child_env), {"CODEX_HOME", "OPENAI_API_KEY"})
+        self.assertEqual(child_env["OPENAI_API_KEY"], "")
+
+    def test_deny_all_y_sin_sandbox_legacy_para_ambos_roles(self):
+        for role in ("emilio", "emma"):
+            captured = self._invoke_and_capture(role)
+            kwargs = captured["thread_kwargs"]
+            self.assertEqual(kwargs["approval_mode"], self._fake_sdk.ApprovalMode.deny_all)
+            self.assertNotIn("sandbox", kwargs)
+            self.assertEqual(kwargs["cwd"], str(self._worktree.resolve()))
+
+    def test_perfiles_por_rol_solo_worktree_y_sin_red(self):
+        for role, access in (("emilio", "write"), ("emma", "read")):
+            config = self._invoke_and_capture(role)["config"]
+            profile_name = f"zentra-{role}"
+            self.assertEqual(config["default_permissions"], profile_name)
+            profile = config["permissions"][profile_name]
+            self.assertEqual(profile["workspace_roots"], {str(self._worktree.resolve()): True})
+            self.assertEqual(profile["filesystem"][":minimal"], "read")
+            self.assertEqual(profile["filesystem"][":workspace_roots"]["."], access)
+            self.assertFalse(profile["network"]["enabled"])
+
+    def test_worktree_no_canonico_inexistente_archivo_y_symlink_fallan_antes_de_codex(self):
+        outside = Path(self._tmpdir.name) / "outside"
+        outside.mkdir()
+        symlink = Path(self._tmpdir.name) / "link"
+        symlink.symlink_to(outside, target_is_directory=True)
+        regular = Path(self._tmpdir.name) / "regular.txt"
+        regular.write_text("x")
+        invalid = (
+            "relative/path",
+            str(Path(self._tmpdir.name) / "missing"),
+            str(regular),
+            str(symlink),
+            str(self._worktree / ".." / "worktree"),
+        )
+        before = len(self._fake_sdk.Codex.instances)
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(self.coa.CodexAdapterError):
+                self.coa.CodexAdapter().invoke(
+                    self._request(task={"repository": {"worktree_path": value}})
+                )
+        self.assertEqual(len(self._fake_sdk.Codex.instances), before)
+
+    def test_home_se_limpia_en_error_de_provider(self):
+        captured = self._invoke_and_capture(raise_exc=self._fake_errors.TransportClosedError("x"))
+        self.assertEqual(captured["result"].outcome, "unavailable")
+        self.assertFalse(captured["home"].exists())
+
+    def test_fallos_de_creacion_config_y_cleanup_fallan_cerrado(self):
+        with mock.patch.object(self.coa.tempfile, "mkdtemp", side_effect=OSError("no home")):
+            with self.assertRaises(self.coa.CodexAdapterError):
+                self.coa.CodexAdapter().invoke(self._request())
+        with mock.patch.object(Path, "write_text", side_effect=OSError("no config")):
+            with self.assertRaises(self.coa.CodexAdapterError):
+                self.coa.CodexAdapter().invoke(self._request())
+        captured_home = []
+        real_rmtree = self.coa.shutil.rmtree
+
+        def broken_cleanup(path):
+            captured_home.append(Path(path))
+            raise OSError("cannot clean")
+
+        with mock.patch.object(self.coa.shutil, "rmtree", side_effect=broken_cleanup):
+            with self.assertRaises(self.coa.CodexAdapterError):
+                self.coa.CodexAdapter().invoke(self._request())
+        self.assertTrue(captured_home)
+        for path in captured_home:
+            real_rmtree(path, ignore_errors=True)
 
 
 class PruebaCompatibilidadConSDKRealContinuacion(CodexAdapterTestCase):
-    def test_adapter_real_invoca_thread_start_con_sandbox_y_cwd(self):
+    def test_adapter_real_invoca_thread_start_con_perfil_y_cwd(self):
         captured = {}
 
         def fake_thread_start(self_codex, **kwargs):
@@ -584,9 +720,10 @@ class PruebaCompatibilidadConSDKRealContinuacion(CodexAdapterTestCase):
 
         with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
             adapter = self.coa.CodexAdapter()
-            adapter.invoke(self._request(agent_role="emma", task={"repository": {"worktree_path": "/tmp/wt"}}))
-        self.assertEqual(captured.get("sandbox"), self._fake_sdk.Sandbox.read_only)
-        self.assertEqual(captured.get("cwd"), "/tmp/wt")
+            adapter.invoke(self._request(agent_role="emma"))
+        self.assertNotIn("sandbox", captured)
+        self.assertEqual(captured.get("approval_mode"), self._fake_sdk.ApprovalMode.deny_all)
+        self.assertEqual(captured.get("cwd"), str(self._worktree.resolve()))
 
     def test_adapter_real_invoca_run_con_output_schema_keyword(self):
         thread = self._fake_sdk.Thread(
@@ -745,11 +882,19 @@ class PruebaTimeoutAdapter(CodexAdapterTestCase):
 
 
 class PruebaPermisosPorRol(CodexAdapterTestCase):
-    def test_emilio_usa_workspace_write(self):
-        self.assertEqual(self.coa._SANDBOX["emilio"], "workspace_write")
+    def test_emilio_usa_perfil_write(self):
+        parsed = tomllib.loads(self.coa._render_isolated_config("emilio", self._worktree))
+        self.assertEqual(
+            parsed["permissions"]["zentra-emilio"]["filesystem"][":workspace_roots"]["."],
+            "write",
+        )
 
-    def test_emma_usa_read_only(self):
-        self.assertEqual(self.coa._SANDBOX["emma"], "read_only")
+    def test_emma_usa_perfil_read(self):
+        parsed = tomllib.loads(self.coa._render_isolated_config("emma", self._worktree))
+        self.assertEqual(
+            parsed["permissions"]["zentra-emma"]["filesystem"][":workspace_roots"]["."],
+            "read",
+        )
 
 
 class PruebaEsquemaDeEvidencia(CodexAdapterTestCase):
