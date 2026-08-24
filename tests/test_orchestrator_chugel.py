@@ -11,6 +11,7 @@ o subprocess: chugel.py es filesystem + funciones puras sobre dicts."""
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -152,6 +153,44 @@ def _mission_definition_entry():
     }
 
 
+def _mission_at_publishing():
+    """Build the shortest canonical PASS path to the publication state."""
+    m = _create_intake_mission("publish identity")
+    mid = m["mission_id"]
+    chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="ready")
+    chugel.decide_gate(mid, "scope_authorization", _gate_decision(
+        approved_for={"mission_definition_version": 1}
+    ))
+    chugel.record_repository_state(mid, {
+        "worktree_path": "/tmp/publish-worktree",
+        "branch": "local/publish",
+        "base_sha": "b" * 40,
+        "isolation_confirmed": True,
+    })
+    chugel.transition(mid, "AUTHORIZED", actor="jose", reason="authorized")
+    chugel.transition(mid, "BUILDING", actor="chugel", reason="build")
+    chugel.record_builder_evidence(mid, _builder_evidence())
+    chugel.transition(mid, "VERIFYING", actor="chugel", reason="verified")
+    chugel.transition(mid, "AWAITING_REVIEW", actor="chugel", reason="handoff")
+    chugel.transition(mid, "REVIEWING", actor="emma", reason="review")
+    chugel.record_reviewer_evidence(mid, _reviewer_evidence(verdict="PASS"))
+    chugel.transition(mid, "PUBLISH_AWAITING_AUTHORIZATION", actor="chugel", reason="pass")
+    chugel.transition(mid, "PUBLISHING", actor="jose", reason="publish authorized")
+    return chugel.get_mission(mid)
+
+
+def _mission_at_merge_awaiting_without_publish_identity():
+    """Reach the merge gate through the real lifecycle with no recorded SHA."""
+    record = _mission_at_publishing()
+    mid = record["mission_id"]
+    chugel.transition(mid, "CI_PENDING", actor="chugel", reason="ci")
+    chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="green")
+    record = chugel.get_mission(mid)
+    if record["publish"]["commit_sha"] is not None:
+        raise AssertionError("fixture must reach merge authorization without publication identity")
+    return record
+
+
 class ChugelTestCase(unittest.TestCase):
     """Redirige orchestrator.chugel a un directorio temporal por prueba."""
 
@@ -248,6 +287,125 @@ class PruebaCicloDeVidaBasico(ChugelTestCase):
         self.assertEqual(final["state"], "MERGE_AWAITING_AUTHORIZATION")
         self.assertEqual(len(final["builder_evidence"]), 2)
         self.assertEqual(len(final["reviewer_evidence"]), 2)
+
+
+class PruebaRegistroAtomicoDeCommitPublicado(ChugelTestCase):
+    def test_sha_valido_se_persiste_y_solo_cambia_publish_y_updated_at(self):
+        before = _mission_at_merge_awaiting_without_publish_identity()
+        sha = "c" * 40
+
+        updated = chugel.record_publish_commit(before["mission_id"], sha)
+
+        self.assertEqual(updated["publish"]["commit_sha"], sha)
+        persisted = chugel.get_mission(before["mission_id"])
+        self.assertEqual(persisted["publish"]["commit_sha"], sha)
+        expected = copy.deepcopy(before)
+        expected["publish"]["commit_sha"] = sha
+        expected["updated_at"] = updated["updated_at"]
+        self.assertEqual(updated, expected)
+
+    def test_valida_registro_completo_una_vez_y_escribe_una_vez(self):
+        record = _mission_at_merge_awaiting_without_publish_identity()
+        with (
+            mock.patch.object(chugel, "_read_mission_record", return_value=record),
+            mock.patch.object(
+                chugel,
+                "validate_mission_record",
+                wraps=chugel.validate_mission_record,
+            ) as validate,
+            mock.patch.object(chugel, "_write_mission_record") as write,
+        ):
+            updated = chugel.record_publish_commit(record["mission_id"], "c" * 40)
+
+        validate.assert_called_once_with(updated)
+        write.assert_called_once_with(updated)
+
+    def test_fallo_de_validacion_no_escribe(self):
+        record = _mission_at_merge_awaiting_without_publish_identity()
+        invalid = mock.Mock(valid=False, errors=("forced",))
+        with (
+            mock.patch.object(chugel, "_read_mission_record", return_value=record),
+            mock.patch.object(chugel, "validate_mission_record", return_value=invalid) as validate,
+            mock.patch.object(chugel, "_write_mission_record") as write,
+            self.assertRaises(chugel.MissionValidationFailed),
+        ):
+            chugel.record_publish_commit(record["mission_id"], "c" * 40)
+
+        validate.assert_called_once()
+        write.assert_not_called()
+
+    def test_sha_ausente_malformado_o_coercionado_falla_antes_de_leer(self):
+        invalid = (None, True, False, 1, b"c" * 40, "", "c" * 39, "C" * 40, "g" * 40)
+        with mock.patch.object(chugel, "_read_mission_record") as read:
+            for value in invalid:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    chugel.record_publish_commit("11111111-1111-4111-8111-111111111111", value)
+        read.assert_not_called()
+
+    def test_estado_incorrecto_y_terminal_fallan_sin_escribir(self):
+        publishing = _mission_at_publishing()
+        variants = [publishing]
+        ci_pending = copy.deepcopy(publishing)
+        ci_pending["state"] = "CI_PENDING"
+        variants.append(ci_pending)
+        unrelated = copy.deepcopy(publishing)
+        unrelated["state"] = "INTAKE"
+        variants.append(unrelated)
+        terminal = copy.deepcopy(publishing)
+        terminal["state"] = "CANCELLED"
+        variants.append(terminal)
+        for record in variants:
+            with (
+                self.subTest(state=record["state"]),
+                mock.patch.object(chugel, "_read_mission_record", return_value=record),
+                mock.patch.object(chugel, "_write_mission_record") as write,
+                self.assertRaises(ValueError),
+            ):
+                chugel.record_publish_commit(record["mission_id"], "c" * 40)
+            write.assert_not_called()
+
+    def test_identidad_duplicada_o_conflictiva_es_inmutable(self):
+        record = _mission_at_merge_awaiting_without_publish_identity()
+        mid = record["mission_id"]
+        chugel.record_publish_commit(mid, "c" * 40)
+        path = chugel._mission_path(mid)
+        before = path.read_bytes()
+
+        for sha in ("c" * 40, "d" * 40):
+            with self.subTest(sha=sha), self.assertRaises(ValueError):
+                chugel.record_publish_commit(mid, sha)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_merge_authorization_correcta_pasa_y_stale_falla(self):
+        record = _mission_at_merge_awaiting_without_publish_identity()
+        mid = record["mission_id"]
+        sha = "c" * 40
+        chugel.record_publish_commit(mid, sha)
+
+        with self.assertRaises(chugel.MissionValidationFailed) as stale:
+            chugel.decide_gate(mid, "merge_authorization", _gate_decision(
+                approved_for={"head_sha": "d" * 40}
+            ))
+        self.assertTrue(any(error.code == "STALE_APPROVAL" for error in stale.exception.errors))
+
+        approved = chugel.decide_gate(mid, "merge_authorization", _gate_decision(
+            approved_for={"head_sha": sha}
+        ))
+        self.assertEqual(approved["human_gates"]["merge_authorization"]["status"], "approved")
+        merged = chugel.transition(mid, "MERGING", actor="jose", reason="merge authorized")
+        self.assertEqual(merged["state"], "MERGING")
+
+    def test_merge_authorization_sin_identidad_publicada_sigue_rechazada(self):
+        record = _mission_at_merge_awaiting_without_publish_identity()
+        mid = record["mission_id"]
+
+        with self.assertRaises(chugel.MissionValidationFailed) as rejected:
+            chugel.decide_gate(mid, "merge_authorization", _gate_decision(
+                approved_for={"head_sha": "c" * 40}
+            ))
+
+        self.assertTrue(any(error.code == "STALE_APPROVAL" for error in rejected.exception.errors))
+        self.assertIsNone(chugel.get_mission(mid)["publish"]["commit_sha"])
 
 
 # --- escritura atómica y fallo cerrado ------------------------------------

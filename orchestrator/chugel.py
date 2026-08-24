@@ -43,7 +43,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from orchestrator.validator import HUMAN_DECIDER, validate_mission_record
+from orchestrator.validator import CANONICAL_SHA_RE, HUMAN_DECIDER, validate_mission_record
 from orchestrator.state_machine import can_transition
 
 
@@ -461,6 +461,51 @@ def record_reviewer_evidence(mission_id: str, evidence: dict) -> dict:
     if not result.valid:
         raise MissionValidationFailed(
             f"mission {mission_id}: reviewer evidence append failed validation", result.errors
+        )
+
+    _write_mission_record(mutated)
+    return mutated
+
+
+def record_publish_commit(mission_id: str, commit_sha: str) -> dict:
+    """Persist the infrastructure-observed publication commit identity.
+
+    This operation records identity only; it never runs git, pushes, creates
+    or updates a pull request, or grants merge authorization. Publication is
+    eligible only while the mission awaits merge authorization, after the
+    publication/CI lifecycle has completed. The first canonical SHA becomes
+    immutable, so neither a duplicate call nor a conflicting caller-controlled
+    value can rewrite the identity later.
+
+    The SHA is checked before reading the Mission Record. After the validated
+    read, the complete mutation is assembled in memory, canonically validated
+    once, and written once through Chugel's existing atomic writer.
+    """
+    if not isinstance(commit_sha, str) or CANONICAL_SHA_RE.fullmatch(commit_sha) is None:
+        raise ValueError("commit_sha must be a canonical 40-character lowercase SHA")
+
+    record = _read_mission_record(mission_id)
+    if record.get("state") != "MERGE_AWAITING_AUTHORIZATION":
+        raise ValueError(
+            f"mission {mission_id}: publication identity may only be recorded in "
+            f"state 'MERGE_AWAITING_AUTHORIZATION', got {record.get('state')!r}"
+        )
+    existing_sha = (record.get("publish") or {}).get("commit_sha")
+    if existing_sha is not None:
+        raise ValueError(
+            f"mission {mission_id}: publication commit identity is already recorded"
+        )
+
+    mutated = copy.deepcopy(record)
+    mutated["publish"] = dict(mutated["publish"])
+    mutated["publish"]["commit_sha"] = commit_sha
+    mutated["updated_at"] = _now()
+
+    result = validate_mission_record(mutated)
+    if not result.valid:
+        raise MissionValidationFailed(
+            f"mission {mission_id}: publication commit update failed validation",
+            result.errors,
         )
 
     _write_mission_record(mutated)
