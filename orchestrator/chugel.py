@@ -33,6 +33,7 @@ work for the new scope.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import datetime
 import json
@@ -43,8 +44,19 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from orchestrator.validator import CANONICAL_SHA_RE, HUMAN_DECIDER, validate_mission_record
+from orchestrator.validator import (
+    CANONICAL_SHA_RE,
+    DISPATCH_RETRYABLE_CLASSIFICATIONS,
+    HUMAN_DECIDER,
+    validate_mission_record,
+)
 from orchestrator.state_machine import can_transition
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover -- POSIX-only, matching this module's
+    # existing O_NOFOLLOW/_fsync_directory portability stance.
+    fcntl = None
 
 
 # --- exception taxonomy ------------------------------------------------
@@ -97,6 +109,24 @@ class MissionTransitionRejected(ChugelError):
         self.reasons = reasons
 
 
+class DispatchNotEligible(ChugelError):
+    """reserve_dispatch() refused before any write: wrong state for this
+    role/attempt, evidence for this attempt already exists, or a live
+    (non-FINALIZED) ledger entry for this exact (role, attempt) already
+    exists and is not a durably-recorded retryable result. The caller must
+    not infer *why* redispatch is unsafe from this exception alone beyond
+    what it reports -- an unknown-provenance reservation and a genuine
+    state mismatch both raise this identically, both fail closed the same
+    way."""
+
+
+class DispatchEntryNotFound(ChugelError):
+    """mark_dispatch_in_flight()/record_dispatch_result()/finalize_dispatch()
+    found no ledger entry for the given invocation_id, or found one whose
+    current status does not permit the requested transition. The caller
+    holds a stale or already-processed invocation_id."""
+
+
 # --- module-level constants ---------------------------------------------
 
 _MISSIONS_DIR = Path(__file__).resolve().parent / "missions"
@@ -114,6 +144,16 @@ _GATE_NAMES = ("scope_authorization", "publish_authorization", "merge_authorizat
 _ATOMIC_SCOPE_REAUTHORIZATION_STATES = frozenset(
     {"INTAKE", "SCOPE_AWAITING_AUTHORIZATION", "AUTHORIZED"}
 )
+
+# Mirrors agent_invocation.py's require_eligible_invocation() expected-state
+# mapping exactly -- duplicated here (not imported) because chugel.py must
+# not depend on agent_invocation.py, which already depends on chugel.py.
+_MISSION_ROLE_EXPECTED_STATE = {
+    ("emilio", 0): "BUILDING",
+    ("emilio", 1): "CORRECTING",
+    ("emma", 0): "REVIEWING",
+    ("emma", 1): "REVIEWING",
+}
 
 # os.O_NOFOLLOW is POSIX-only; on a platform without it this degrades to the
 # pre-open os.path.islink()/Path.is_symlink() check alone (see _read_mission_record).
@@ -259,6 +299,89 @@ def _write_mission_record(record: dict) -> None:
     _fsync_directory(_MISSIONS_DIR)
 
 
+# --- persistence core: cross-process mission-record write lock ------------
+
+def _mission_lock_path(mission_id: str) -> Path:
+    _validate_mission_id(mission_id)
+    return _MISSIONS_DIR / f".{mission_id}.reservation.lock"
+
+
+@contextlib.contextmanager
+def _mission_lock(mission_id: str):
+    """Cross-process exclusive lock serializing EVERY read-modify-write
+    mutation this module performs against one Mission Record -- not just
+    reserve_dispatch(). A real OS-level advisory lock (fcntl.flock on a
+    dedicated lock file), not a process-local primitive: it is effective
+    between two independent `python3` processes contending for the same
+    Mission Record, which plain atomic os.replace() alone does not
+    provide -- os.replace() prevents a torn write, it is not
+    compare-and-swap and does nothing to stop two concurrent readers from
+    both computing a conflicting mutation and both successfully writing
+    (a lost update).
+
+    Generalized from the original reservation-only lock (Emma's P2-1
+    finding, autonomous-runner corrective cycle): a dispatch reservation
+    written under this lock could previously still be silently lost if a
+    concurrent transition()/decide_gate()/record_builder_evidence()/etc.
+    call raced it outside any lock at all, re-reading the pre-reservation
+    record and overwriting the reservation on write. Every public mutator
+    in this module now acquires this exact same per-mission lock around
+    its own read-modify-write critical section, so there is exactly one
+    serialization point per mission, and no conflicting mutation --
+    dispatch-ledger or otherwise -- can race another. No mutator in this
+    module ever calls another lock-acquiring mutator while already
+    holding this lock (each critical section calls only the private,
+    lock-free _read_mission_record()/_write_mission_record() and pure
+    helpers) -- this is a single, non-reentrant, non-nested acquisition
+    per call, so it cannot deadlock against itself.
+
+    The kernel releases this lock automatically if the holding process
+    dies while it is held, so a crash mid-mutation can never permanently
+    block future mutations -- the record's own persisted content (re-read
+    fresh, under the lock, by every mutator) remains the sole source of
+    truth; this lock only prevents two racing writers from both believing
+    they were first. POSIX-only, matching this module's existing
+    O_NOFOLLOW/_fsync_directory portability stance -- a no-op (no
+    exclusion at all) on a platform without fcntl, which is a documented
+    portability boundary, never a silent safety claim."""
+    _MISSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = _mission_lock_path(mission_id)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _find_ledger_index(ledger: list, invocation_id: str) -> int:
+    for idx, entry in enumerate(ledger):
+        if isinstance(entry, dict) and entry.get("invocation_id") == invocation_id:
+            return idx
+    return -1
+
+
+def _finalize_ledger_entry_for_evidence(ledger: list, invocation_id: Any) -> list:
+    """Pure helper: if `invocation_id` names a RESULT_RECORDED ledger
+    entry, returns a new ledger list with that entry marked FINALIZED;
+    otherwise returns `ledger` unchanged (covers callers/tests that never
+    used the ledger at all -- fully backward compatible)."""
+    if not isinstance(invocation_id, str) or not invocation_id:
+        return ledger
+    idx = _find_ledger_index(ledger, invocation_id)
+    if idx == -1 or ledger[idx].get("status") != "RESULT_RECORDED":
+        return ledger
+    updated = list(ledger)
+    entry = dict(updated[idx])
+    entry["status"] = "FINALIZED"
+    entry["updated_at"] = _now()
+    updated[idx] = entry
+    return updated
+
+
 # --- public operations ------------------------------------------------
 
 def create_mission(
@@ -315,12 +438,24 @@ def create_mission(
         )
 
     new_id = mission_id if mission_id is not None else str(uuid.uuid4())
-    path = _mission_path(new_id)
-    if path.is_symlink() or path.exists():
-        raise MissionRecordAlreadyExists(
-            f"mission {new_id}: something already exists at {path}"
-        )
 
+    with _mission_lock(new_id):
+        path = _mission_path(new_id)
+        if path.is_symlink() or path.exists():
+            raise MissionRecordAlreadyExists(
+                f"mission {new_id}: something already exists at {path}"
+            )
+        return _create_mission_locked(new_id, intent_text, mission_definition, repository)
+
+
+def _create_mission_locked(
+    new_id: str, intent_text: str, mission_definition: dict, repository: dict | None
+) -> dict:
+    """The existence-check-then-write critical section of create_mission(),
+    factored out only so its body can sit inside the `with _mission_lock`
+    block above without an extra indentation level -- called from exactly
+    one place, under the lock, with the explicit-mission_id collision
+    check already done by the caller under the same lock acquisition."""
     timestamp = _now()
     initial_definition = {
         "version": 1,
@@ -363,6 +498,7 @@ def create_mission(
         ),
         "builder_evidence": [],
         "reviewer_evidence": [],
+        "dispatch_ledger": [],
         "corrective_cycle_count": 0,
         "publish": {
             "commit_sha": None,
@@ -411,60 +547,335 @@ def record_repository_state(mission_id: str, repository: dict) -> dict:
     function does not itself decide isolation is real, it only records
     what the caller asserts, subject to the same validation every other
     mutation goes through."""
-    record = _read_mission_record(mission_id)
-    mutated = copy.deepcopy(record)
-    mutated["repository"] = copy.deepcopy(repository)
-    mutated["updated_at"] = _now()
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        mutated = copy.deepcopy(record)
+        mutated["repository"] = copy.deepcopy(repository)
+        mutated["updated_at"] = _now()
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: repository-state update failed validation", result.errors
-        )
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: repository-state update failed validation", result.errors
+            )
 
-    _write_mission_record(mutated)
-    return mutated
+        _write_mission_record(mutated)
+        return mutated
 
 
 def record_builder_evidence(mission_id: str, evidence: dict) -> dict:
     """Appends one entry to builder_evidence[]. If evidence['attempt'] == 1,
     atomically sets corrective_cycle_count to 1 in the same mutation/write
     (never a separate call) -- see orchestrator/CHUGEL_V1.md section 11.
-    An attempt == 0 entry never changes corrective_cycle_count."""
-    record = _read_mission_record(mission_id)
-    mutated = copy.deepcopy(record)
-    mutated["builder_evidence"] = mutated["builder_evidence"] + [copy.deepcopy(evidence)]
-    if evidence.get("attempt") == 1:
-        mutated["corrective_cycle_count"] = 1
-    mutated["updated_at"] = _now()
+    An attempt == 0 entry never changes corrective_cycle_count.
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: builder evidence append failed validation", result.errors
+    If evidence carries an 'invocation_id' matching a RESULT_RECORDED
+    dispatch_ledger entry, that entry is finalized in the same
+    validate/write -- completed evidence and dispatch finalization are one
+    atomic operation, never two, so a crash cannot leave evidence
+    persisted with its reservation still open (or vice versa). Evidence
+    with no matching ledger entry (including every caller that predates
+    the ledger) is written exactly as before, ledger untouched."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        mutated = copy.deepcopy(record)
+        mutated["builder_evidence"] = mutated["builder_evidence"] + [copy.deepcopy(evidence)]
+        if evidence.get("attempt") == 1:
+            mutated["corrective_cycle_count"] = 1
+        mutated["dispatch_ledger"] = _finalize_ledger_entry_for_evidence(
+            mutated.get("dispatch_ledger") or [], evidence.get("invocation_id")
         )
+        mutated["updated_at"] = _now()
 
-    _write_mission_record(mutated)
-    return mutated
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: builder evidence append failed validation", result.errors
+            )
+
+        _write_mission_record(mutated)
+        return mutated
 
 
 def record_reviewer_evidence(mission_id: str, evidence: dict) -> dict:
     """Appends one entry to reviewer_evidence[]. Never reads verdict/
     findings content to make a decision -- stored verbatim, validated by
-    the existing cross-field checks exactly like every other field."""
-    record = _read_mission_record(mission_id)
-    mutated = copy.deepcopy(record)
-    mutated["reviewer_evidence"] = mutated["reviewer_evidence"] + [copy.deepcopy(evidence)]
-    mutated["updated_at"] = _now()
+    the existing cross-field checks exactly like every other field.
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: reviewer evidence append failed validation", result.errors
+    Finalizes the matching dispatch_ledger entry atomically with the
+    evidence write, exactly like record_builder_evidence() -- see that
+    function's docstring."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        mutated = copy.deepcopy(record)
+        mutated["reviewer_evidence"] = mutated["reviewer_evidence"] + [copy.deepcopy(evidence)]
+        mutated["dispatch_ledger"] = _finalize_ledger_entry_for_evidence(
+            mutated.get("dispatch_ledger") or [], evidence.get("invocation_id")
         )
+        mutated["updated_at"] = _now()
 
-    _write_mission_record(mutated)
-    return mutated
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: reviewer evidence append failed validation", result.errors
+            )
+
+        _write_mission_record(mutated)
+        return mutated
+
+
+# --- dispatch reservation ledger --------------------------------------
+
+def reserve_dispatch(mission_id: str, *, role: str, attempt: int) -> tuple[dict, str]:
+    """The only path to durably reserving a provider dispatch before it
+    happens. No supported code path may call an adapter's invoke() for
+    (mission_id, role, attempt) without first calling this function and
+    receiving back the invocation_id it reserved.
+
+    Atomic under a cross-process exclusive lock (_mission_lock): reads
+    the record fresh, checks state-machine eligibility for (role,
+    attempt), checks no evidence for this attempt already exists, and
+    checks the ledger has no live (non-FINALIZED) entry for this exact
+    (role, attempt) unless that entry is a durably-recorded retryable
+    result -- in which case it is finalized in the same write that
+    reserves the fresh attempt. All of this happens under one lock
+    acquisition, so two racing processes can never both believe they
+    reserved the same slot: the second to acquire the lock re-reads the
+    first's already-written reservation and fails closed.
+
+    Generates and returns a fresh invocation_id -- the caller never
+    supplies one, so a reservation identity can never be forged or
+    predicted outside this function. Fails closed (DispatchNotEligible)
+    without writing anything if any check fails."""
+    if role not in ("emilio", "emma"):
+        raise ValueError(f"role {role!r} is not one of ('emilio', 'emma')")
+    if type(attempt) is not int or attempt not in (0, 1):
+        raise ValueError(f"attempt must be exactly the integer 0 or 1, got {attempt!r}")
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+
+        expected_state = _MISSION_ROLE_EXPECTED_STATE[(role, attempt)]
+        if record.get("state") != expected_state:
+            raise DispatchNotEligible(
+                f"mission {mission_id}: {role} attempt {attempt} requires state "
+                f"{expected_state!r}, got {record.get('state')!r}"
+            )
+
+        evidence_field = "builder_evidence" if role == "emilio" else "reviewer_evidence"
+        if any(
+            isinstance(entry, dict) and entry.get("attempt") == attempt
+            for entry in record.get(evidence_field) or []
+        ):
+            raise DispatchNotEligible(
+                f"mission {mission_id}: {evidence_field} already contains attempt "
+                f"{attempt}; refusing a duplicate provider invocation"
+            )
+
+        if role == "emma":
+            # Emma's independence check (consume_emma_result()) can only
+            # ever run meaningfully against a builder attempt that itself
+            # persisted enough infrastructure identity -- a historical
+            # builder_evidence entry from before this ledger existed has
+            # none. Refusing the dispatch *before* it happens (not merely
+            # before the independence check fires, after a wasted real
+            # provider call) is a stronger guarantee than the pre-ledger
+            # design offered, not a weaker one.
+            builder_entry = next(
+                (
+                    entry for entry in record.get("builder_evidence") or []
+                    if isinstance(entry, dict) and entry.get("attempt") == attempt
+                ),
+                None,
+            )
+            if (
+                not isinstance(builder_entry, dict)
+                or builder_entry.get("invocation_id") is None
+                or builder_entry.get("provider") is None
+                or (
+                    builder_entry.get("provider_session_id") is None
+                    and builder_entry.get("provider_conversation_id") is None
+                )
+            ):
+                raise DispatchNotEligible(
+                    f"mission {mission_id}: builder_evidence attempt {attempt} lacks "
+                    "invocation_id/provider and at least one persisted provider "
+                    "identity -- Emma's independence check could never succeed "
+                    "against it, so no dispatch is reserved"
+                )
+
+        ledger = list(record.get("dispatch_ledger") or [])
+        live_index = None
+        for idx, entry in enumerate(ledger):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("role") != role or entry.get("attempt") != attempt:
+                continue
+            if entry.get("status") == "FINALIZED":
+                continue
+            live_index = idx
+            break
+
+        if live_index is not None:
+            live_entry = ledger[live_index]
+            if (
+                live_entry.get("status") != "RESULT_RECORDED"
+                or live_entry.get("result_classification") not in DISPATCH_RETRYABLE_CLASSIFICATIONS
+            ):
+                raise DispatchNotEligible(
+                    f"mission {mission_id}: an existing dispatch reservation for "
+                    f"role={role!r} attempt={attempt!r} has unresolved or "
+                    "non-retryable execution provenance; refusing automatic redispatch"
+                )
+            superseded = dict(live_entry)
+            superseded["status"] = "FINALIZED"
+            superseded["updated_at"] = _now()
+            ledger[live_index] = superseded
+
+        invocation_id = str(uuid.uuid4())
+        timestamp = _now()
+        ledger.append({
+            "role": role,
+            "attempt": attempt,
+            "invocation_id": invocation_id,
+            "provider": None,
+            "model": None,
+            "status": "RESERVED",
+            "result_classification": None,
+            "reserved_at": timestamp,
+            "updated_at": timestamp,
+        })
+
+        mutated = copy.deepcopy(record)
+        mutated["dispatch_ledger"] = ledger
+        mutated["updated_at"] = timestamp
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: dispatch reservation failed validation", result.errors
+            )
+
+        _write_mission_record(mutated)
+        return mutated, invocation_id
+
+
+def mark_dispatch_in_flight(
+    mission_id: str, invocation_id: str, *, provider: str, model: str | None = None
+) -> dict:
+    """Transition one RESERVED ledger entry to IN_FLIGHT, recording which
+    provider was actually routed to. Called immediately before the single
+    authorized adapter.invoke() call.
+
+    Acquires the same per-mission _mission_lock as every other mutator
+    (Emma's P2-1 finding): invocation_id still uniquely names an entry
+    only the process that reserved it can know, so there is no
+    lost-update race between two callers of *this* function for the same
+    invocation_id -- but without the lock, a concurrent, unrelated
+    mutation (decide_gate(), transition(), etc.) on the same mission could
+    still read the record before this write and overwrite it afterward,
+    silently discarding the IN_FLIGHT transition. The lock closes that
+    window uniformly, the same way it does for every other mutator."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        ledger = list(record.get("dispatch_ledger") or [])
+        idx = _find_ledger_index(ledger, invocation_id)
+        if idx == -1 or ledger[idx].get("status") != "RESERVED":
+            raise DispatchEntryNotFound(
+                f"mission {mission_id}: no RESERVED dispatch_ledger entry for "
+                f"invocation_id {invocation_id!r}"
+            )
+        entry = dict(ledger[idx])
+        entry["status"] = "IN_FLIGHT"
+        entry["provider"] = provider
+        entry["model"] = model
+        entry["updated_at"] = _now()
+        ledger[idx] = entry
+
+        mutated = copy.deepcopy(record)
+        mutated["dispatch_ledger"] = ledger
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: dispatch in-flight marker failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_dispatch_result(mission_id: str, invocation_id: str, *, outcome: str) -> dict:
+    """Transition one IN_FLIGHT ledger entry to RESULT_RECORDED, durably
+    capturing the raw provider outcome before any evidence is
+    constructed or written. This is the checkpoint that lets a later
+    restart distinguish 'we know exactly what happened' from 'execution
+    is unknown' -- and, for a retryable outcome, is exactly what
+    reserve_dispatch() reads to authorize a fresh attempt.
+
+    Acquires _mission_lock, same reason as mark_dispatch_in_flight()."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        ledger = list(record.get("dispatch_ledger") or [])
+        idx = _find_ledger_index(ledger, invocation_id)
+        if idx == -1 or ledger[idx].get("status") != "IN_FLIGHT":
+            raise DispatchEntryNotFound(
+                f"mission {mission_id}: no IN_FLIGHT dispatch_ledger entry for "
+                f"invocation_id {invocation_id!r}"
+            )
+        entry = dict(ledger[idx])
+        entry["status"] = "RESULT_RECORDED"
+        entry["result_classification"] = outcome
+        entry["updated_at"] = _now()
+        ledger[idx] = entry
+
+        mutated = copy.deepcopy(record)
+        mutated["dispatch_ledger"] = ledger
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: dispatch result recording failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def finalize_dispatch(mission_id: str, invocation_id: str) -> dict:
+    """Transition one RESULT_RECORDED ledger entry to FINALIZED with no
+    other mutation -- the path for a non-completed outcome, which writes
+    no evidence. A completed outcome is instead finalized atomically
+    together with its evidence write inside record_builder_evidence()/
+    record_reviewer_evidence(); this function must not be called for an
+    invocation_id already finalized that way.
+
+    Acquires _mission_lock, same reason as mark_dispatch_in_flight()."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        ledger = list(record.get("dispatch_ledger") or [])
+        idx = _find_ledger_index(ledger, invocation_id)
+        if idx == -1 or ledger[idx].get("status") != "RESULT_RECORDED":
+            raise DispatchEntryNotFound(
+                f"mission {mission_id}: no RESULT_RECORDED dispatch_ledger entry for "
+                f"invocation_id {invocation_id!r}"
+            )
+        entry = dict(ledger[idx])
+        entry["status"] = "FINALIZED"
+        entry["updated_at"] = _now()
+        ledger[idx] = entry
+
+        mutated = copy.deepcopy(record)
+        mutated["dispatch_ledger"] = ledger
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: dispatch finalization failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
 
 
 def record_publish_commit(mission_id: str, commit_sha: str) -> dict:
@@ -484,32 +895,33 @@ def record_publish_commit(mission_id: str, commit_sha: str) -> dict:
     if not isinstance(commit_sha, str) or CANONICAL_SHA_RE.fullmatch(commit_sha) is None:
         raise ValueError("commit_sha must be a canonical 40-character lowercase SHA")
 
-    record = _read_mission_record(mission_id)
-    if record.get("state") != "MERGE_AWAITING_AUTHORIZATION":
-        raise ValueError(
-            f"mission {mission_id}: publication identity may only be recorded in "
-            f"state 'MERGE_AWAITING_AUTHORIZATION', got {record.get('state')!r}"
-        )
-    existing_sha = (record.get("publish") or {}).get("commit_sha")
-    if existing_sha is not None:
-        raise ValueError(
-            f"mission {mission_id}: publication commit identity is already recorded"
-        )
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "MERGE_AWAITING_AUTHORIZATION":
+            raise ValueError(
+                f"mission {mission_id}: publication identity may only be recorded in "
+                f"state 'MERGE_AWAITING_AUTHORIZATION', got {record.get('state')!r}"
+            )
+        existing_sha = (record.get("publish") or {}).get("commit_sha")
+        if existing_sha is not None:
+            raise ValueError(
+                f"mission {mission_id}: publication commit identity is already recorded"
+            )
 
-    mutated = copy.deepcopy(record)
-    mutated["publish"] = dict(mutated["publish"])
-    mutated["publish"]["commit_sha"] = commit_sha
-    mutated["updated_at"] = _now()
+        mutated = copy.deepcopy(record)
+        mutated["publish"] = dict(mutated["publish"])
+        mutated["publish"]["commit_sha"] = commit_sha
+        mutated["updated_at"] = _now()
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: publication commit update failed validation",
-            result.errors,
-        )
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: publication commit update failed validation",
+                result.errors,
+            )
 
-    _write_mission_record(mutated)
-    return mutated
+        _write_mission_record(mutated)
+        return mutated
 
 
 def _apply_gate_decision(record: dict, gate_name: str, decision: dict) -> dict:
@@ -533,17 +945,18 @@ def decide_gate(mission_id: str, gate_name: str, decision: dict) -> dict:
             f"{HUMAN_DECIDER!r}, got {decision.get('decided_by')!r}"
         )
 
-    record = _read_mission_record(mission_id)
-    mutated = _apply_gate_decision(record, gate_name, decision)
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        mutated = _apply_gate_decision(record, gate_name, decision)
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: gate decision failed validation", result.errors
-        )
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: gate decision failed validation", result.errors
+            )
 
-    _write_mission_record(mutated)
-    return mutated
+        _write_mission_record(mutated)
+        return mutated
 
 
 def propose_scope_change(mission_id: str, proposal: dict) -> dict:
@@ -556,30 +969,31 @@ def propose_scope_change(mission_id: str, proposal: dict) -> dict:
             "use decide_scope_change() to accept or reject a proposal"
         )
 
-    record = _read_mission_record(mission_id)
-    proposal_id = proposal.get("proposal_id")
-    if any(
-        existing.get("proposal_id") == proposal_id
-        for existing in record["proposed_scope_changes"]
-        if isinstance(existing, dict)
-    ):
-        raise ValueError(
-            f"mission {mission_id}: proposal_id {proposal_id!r} already exists"
-        )
-    mutated = copy.deepcopy(record)
-    mutated["proposed_scope_changes"] = mutated["proposed_scope_changes"] + [
-        copy.deepcopy(proposal)
-    ]
-    mutated["updated_at"] = _now()
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        proposal_id = proposal.get("proposal_id")
+        if any(
+            existing.get("proposal_id") == proposal_id
+            for existing in record["proposed_scope_changes"]
+            if isinstance(existing, dict)
+        ):
+            raise ValueError(
+                f"mission {mission_id}: proposal_id {proposal_id!r} already exists"
+            )
+        mutated = copy.deepcopy(record)
+        mutated["proposed_scope_changes"] = mutated["proposed_scope_changes"] + [
+            copy.deepcopy(proposal)
+        ]
+        mutated["updated_at"] = _now()
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: proposed scope change failed validation", result.errors
-        )
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: proposed scope change failed validation", result.errors
+            )
 
-    _write_mission_record(mutated)
-    return mutated
+        _write_mission_record(mutated)
+        return mutated
 
 
 def decide_scope_change(mission_id: str, proposal_id: str, decision: dict) -> dict:
@@ -618,17 +1032,18 @@ def decide_scope_change(mission_id: str, proposal_id: str, decision: dict) -> di
             "decide_scope_change() requires decision['status'] to be 'accepted' or 'rejected'"
         )
 
-    record = _read_mission_record(mission_id)
-    mutated = _apply_scope_change_decision(record, proposal_id, decision)
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        mutated = _apply_scope_change_decision(record, proposal_id, decision)
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: scope-change decision failed validation", result.errors
-        )
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: scope-change decision failed validation", result.errors
+            )
 
-    _write_mission_record(mutated)
-    return mutated
+        _write_mission_record(mutated)
+        return mutated
 
 
 def _apply_scope_change_decision(record: dict, proposal_id: str, decision: dict) -> dict:
@@ -713,35 +1128,36 @@ def decide_scope_change_and_reauthorize(
             f"attributed to {HUMAN_DECIDER!r}"
         )
 
-    record = _read_mission_record(mission_id)
-    if record.get("state") not in _ATOMIC_SCOPE_REAUTHORIZATION_STATES:
-        raise ValueError(
-            f"mission {mission_id}: atomic scope reauthorization is not allowed in "
-            f"state {record.get('state')!r}"
-        )
-    if record.get("builder_evidence") != [] or record.get("reviewer_evidence") != []:
-        raise ValueError(
-            f"mission {mission_id}: atomic scope reauthorization refuses to carry "
-            "builder/reviewer evidence across mission-definition versions"
-        )
-    if record.get("corrective_cycle_count") != 0:
-        raise ValueError(
-            f"mission {mission_id}: atomic scope reauthorization requires "
-            "corrective_cycle_count == 0"
-        )
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") not in _ATOMIC_SCOPE_REAUTHORIZATION_STATES:
+            raise ValueError(
+                f"mission {mission_id}: atomic scope reauthorization is not allowed in "
+                f"state {record.get('state')!r}"
+            )
+        if record.get("builder_evidence") != [] or record.get("reviewer_evidence") != []:
+            raise ValueError(
+                f"mission {mission_id}: atomic scope reauthorization refuses to carry "
+                "builder/reviewer evidence across mission-definition versions"
+            )
+        if record.get("corrective_cycle_count") != 0:
+            raise ValueError(
+                f"mission {mission_id}: atomic scope reauthorization requires "
+                "corrective_cycle_count == 0"
+            )
 
-    mutated = _apply_scope_change_decision(record, proposal_id, scope_decision)
-    mutated = _apply_gate_decision(mutated, "scope_authorization", gate_decision)
+        mutated = _apply_scope_change_decision(record, proposal_id, scope_decision)
+        mutated = _apply_gate_decision(mutated, "scope_authorization", gate_decision)
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: atomic scope-change reauthorization failed validation",
-            result.errors,
-        )
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: atomic scope-change reauthorization failed validation",
+                result.errors,
+            )
 
-    _write_mission_record(mutated)
-    return mutated
+        _write_mission_record(mutated)
+        return mutated
 
 
 def transition(mission_id: str, target_state: str, *, actor: str, reason: str) -> dict:
@@ -750,34 +1166,35 @@ def transition(mission_id: str, target_state: str, *, actor: str, reason: str) -
     record; only if allowed does this function append the state_history
     entry, set state, and run the full post-mutation
     validate_mission_record() check before writing."""
-    record = _read_mission_record(mission_id)
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
 
-    check = can_transition(record, target_state)
-    if not check.allowed:
-        raise MissionTransitionRejected(
-            f"mission {mission_id}: {record.get('state')!r} -> {target_state!r} not allowed",
-            check.reasons,
-        )
+        check = can_transition(record, target_state)
+        if not check.allowed:
+            raise MissionTransitionRejected(
+                f"mission {mission_id}: {record.get('state')!r} -> {target_state!r} not allowed",
+                check.reasons,
+            )
 
-    mutated = copy.deepcopy(record)
-    timestamp = _now()
-    mutated["state_history"] = mutated["state_history"] + [
-        {
-            "from_state": mutated["state"],
-            "to_state": target_state,
-            "at": timestamp,
-            "actor": actor,
-            "reason": reason,
-        }
-    ]
-    mutated["state"] = target_state
-    mutated["updated_at"] = timestamp
+        mutated = copy.deepcopy(record)
+        timestamp = _now()
+        mutated["state_history"] = mutated["state_history"] + [
+            {
+                "from_state": mutated["state"],
+                "to_state": target_state,
+                "at": timestamp,
+                "actor": actor,
+                "reason": reason,
+            }
+        ]
+        mutated["state"] = target_state
+        mutated["updated_at"] = timestamp
 
-    result = validate_mission_record(mutated)
-    if not result.valid:
-        raise MissionValidationFailed(
-            f"mission {mission_id}: transition mutation failed validation", result.errors
-        )
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: transition mutation failed validation", result.errors
+            )
 
-    _write_mission_record(mutated)
-    return mutated
+        _write_mission_record(mutated)
+        return mutated

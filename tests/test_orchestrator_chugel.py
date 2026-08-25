@@ -14,6 +14,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1082,6 +1084,402 @@ class PruebaPureza(ChugelTestCase):
         a["state"] = "TAMPERED"
         b = chugel.get_mission(mid)
         self.assertEqual(b["state"], "INTAKE")
+
+
+# --- dispatch_ledger: reserva durable antes de despachar -----------------
+
+def _persisted_builder_evidence(attempt=0, invocation_id="11111111-1111-4111-8111-111111111111",
+                                 provider="codex", conversation_id="builder-thread"):
+    """A builder_evidence entry carrying enough infrastructure identity for
+    reserve_dispatch(role='emma', ...) to accept it -- see chugel.py's
+    reserve_dispatch() Emma-independence precheck."""
+    evidence = _builder_evidence(attempt=attempt)
+    evidence.update({
+        "invocation_id": invocation_id,
+        "provider": provider,
+        "provider_session_id": None,
+        "provider_conversation_id": conversation_id,
+    })
+    return evidence
+
+
+class DispatchLedgerTestCase(ChugelTestCase):
+    """Shared fixtures reaching real BUILDING/REVIEWING states through the
+    genuine lifecycle -- no shortcuts, exactly like WiringTestCase's own
+    fixtures in tests/test_orchestrator_wiring.py."""
+
+    def _mission_ready_for_emilio(self):
+        m = _create_intake_mission("algo")
+        mid = m["mission_id"]
+        chugel.record_repository_state(mid, {
+            "worktree_path": "/tmp/synthetic-worktree",
+            "branch": "overnight/synthetic",
+            "base_sha": "b" * 40,
+            "isolation_confirmed": True,
+        })
+        chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="scope ready")
+        chugel.decide_gate(mid, "scope_authorization",
+            _gate_decision(approved_for={"mission_definition_version": 1}))
+        chugel.transition(mid, "AUTHORIZED", actor="jose", reason="scope approved")
+        chugel.transition(mid, "BUILDING", actor="chugel", reason="isolated build starts")
+        return mid
+
+    def _mission_ready_for_emma(self, attempt=0):
+        mid = self._mission_ready_for_emilio()
+        chugel.record_builder_evidence(mid, _persisted_builder_evidence(attempt=attempt))
+        chugel.transition(mid, "VERIFYING", actor="chugel", reason="builder finished")
+        chugel.transition(mid, "AWAITING_REVIEW", actor="chugel", reason="checks complete")
+        chugel.transition(mid, "REVIEWING", actor="chugel", reason="review starts")
+        return mid
+
+
+class PruebaReserveDispatchEligibilidad(DispatchLedgerTestCase):
+    def test_reserva_exitosa_escribe_entrada_reserved(self):
+        mid = self._mission_ready_for_emilio()
+        record, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        self.assertTrue(invocation_id)
+        ledger = record["dispatch_ledger"]
+        self.assertEqual(len(ledger), 1)
+        entry = ledger[0]
+        self.assertEqual(entry["role"], "emilio")
+        self.assertEqual(entry["attempt"], 0)
+        self.assertEqual(entry["invocation_id"], invocation_id)
+        self.assertEqual(entry["status"], "RESERVED")
+        self.assertIsNone(entry["provider"])
+        self.assertIsNone(entry["model"])
+        self.assertIsNone(entry["result_classification"])
+        # Persisted -- not just returned in memory.
+        self.assertEqual(chugel.get_mission(mid)["dispatch_ledger"], ledger)
+
+    def test_estado_incorrecto_para_role_attempt_falla_sin_escribir(self):
+        mid = self._mission_ready_for_emilio()  # BUILDING, not CORRECTING
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emilio", attempt=1)
+        self.assertEqual(chugel.get_mission(mid)["dispatch_ledger"], [])
+
+    def test_emma_fuera_de_reviewing_falla(self):
+        mid = self._mission_ready_for_emilio()  # BUILDING, not REVIEWING
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emma", attempt=0)
+
+    def test_evidencia_ya_persistida_para_ese_attempt_falla(self):
+        mid = self._mission_ready_for_emilio()
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        # Still BUILDING (state itself is eligible) -- refused because
+        # builder_evidence already carries an attempt=0 entry.
+        self.assertEqual(chugel.get_mission(mid)["state"], "BUILDING")
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+
+    def test_role_invalido_lanza_value_error_sin_tocar_disco(self):
+        mid = self._mission_ready_for_emilio()
+        with self.assertRaises(ValueError):
+            chugel.reserve_dispatch(mid, role="david", attempt=0)
+        self.assertEqual(chugel.get_mission(mid)["dispatch_ledger"], [])
+
+    def test_attempt_bool_o_fuera_de_rango_lanza_value_error(self):
+        mid = self._mission_ready_for_emilio()
+        for bad_attempt in (True, False, None, -1, 2, "0"):
+            with self.assertRaises(ValueError, msg=repr(bad_attempt)):
+                chugel.reserve_dispatch(mid, role="emilio", attempt=bad_attempt)
+        self.assertEqual(chugel.get_mission(mid)["dispatch_ledger"], [])
+
+    def test_emma_sin_identidad_persistida_en_builder_evidence_falla(self):
+        mid = self._mission_ready_for_emilio()
+        chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))  # no persisted identity
+        chugel.transition(mid, "VERIFYING", actor="chugel", reason="x")
+        chugel.transition(mid, "AWAITING_REVIEW", actor="chugel", reason="x")
+        chugel.transition(mid, "REVIEWING", actor="chugel", reason="x")
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emma", attempt=0)
+        self.assertEqual(chugel.get_mission(mid)["dispatch_ledger"], [])
+
+    def test_emma_con_identidad_persistida_reserva_exitosamente(self):
+        mid = self._mission_ready_for_emma(attempt=0)
+        record, invocation_id = chugel.reserve_dispatch(mid, role="emma", attempt=0)
+        self.assertTrue(invocation_id)
+        self.assertEqual(len(record["dispatch_ledger"]), 1)
+
+
+class PruebaReserveDispatchDuplicadoYConflicto(DispatchLedgerTestCase):
+    def test_reserva_duplicada_mientras_la_primera_sigue_viva_falla(self):
+        mid = self._mission_ready_for_emilio()
+        chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        self.assertEqual(len(chugel.get_mission(mid)["dispatch_ledger"]), 1)
+
+    def test_reserva_conflictiva_tras_in_flight_sin_resultado_falla(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+
+    def test_resultado_no_reintentable_bloquea_redespacho(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="invalid_output")
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+
+    def test_resultado_completed_no_finalizado_bloquea_redespacho(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        # Deliberately not finalized here -- record_builder_evidence() is
+        # the only path that finalizes a "completed" entry.
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+
+    def test_resultado_reintentable_permite_reserva_fresca_y_supera_la_previa(self):
+        mid = self._mission_ready_for_emilio()
+        _, first_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, first_id, provider="codex")
+        chugel.record_dispatch_result(mid, first_id, outcome="timeout")
+
+        record, second_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        self.assertNotEqual(first_id, second_id)
+        ledger = record["dispatch_ledger"]
+        self.assertEqual(len(ledger), 2)
+        first_entry = next(e for e in ledger if e["invocation_id"] == first_id)
+        second_entry = next(e for e in ledger if e["invocation_id"] == second_id)
+        self.assertEqual(first_entry["status"], "FINALIZED")
+        self.assertEqual(second_entry["status"], "RESERVED")
+
+    def test_las_tres_clasificaciones_reintentables_permiten_redespacho(self):
+        for outcome in ("failed", "timeout", "unavailable"):
+            mid = self._mission_ready_for_emilio()
+            _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+            chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+            chugel.record_dispatch_result(mid, invocation_id, outcome=outcome)
+            chugel.reserve_dispatch(mid, role="emilio", attempt=0)  # must not raise
+
+    def test_finalized_no_cuenta_como_reserva_viva(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        chugel.finalize_dispatch(mid, invocation_id)
+        record, fresh_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        self.assertNotEqual(fresh_id, invocation_id)
+
+
+class PruebaLedgerLifecycleTransiciones(DispatchLedgerTestCase):
+    def test_mark_in_flight_requiere_reserved(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex", model="codex-1")
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+
+    def test_mark_in_flight_id_desconocido_falla(self):
+        mid = self._mission_ready_for_emilio()
+        chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.mark_dispatch_in_flight(mid, "no-such-id", provider="codex")
+
+    def test_record_result_requiere_in_flight(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+
+    def test_record_result_dos_veces_falla_la_segunda(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="failed")
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.record_dispatch_result(mid, invocation_id, outcome="failed")
+
+    def test_finalize_requiere_result_recorded(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.finalize_dispatch(mid, invocation_id)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.finalize_dispatch(mid, invocation_id)
+
+    def test_finalize_dos_veces_falla_la_segunda(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        chugel.finalize_dispatch(mid, invocation_id)
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.finalize_dispatch(mid, invocation_id)
+
+
+class PruebaEvidenciaFinalizaLedgerAtomicamente(DispatchLedgerTestCase):
+    def test_record_builder_evidence_finaliza_entrada_result_recorded_coincidente(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        evidence = _builder_evidence(attempt=0)
+        evidence["invocation_id"] = invocation_id
+        evidence["provider"] = "codex"
+        evidence["provider_conversation_id"] = "thread-1"
+        record = chugel.record_builder_evidence(mid, evidence)
+        entry = next(e for e in record["dispatch_ledger"] if e["invocation_id"] == invocation_id)
+        self.assertEqual(entry["status"], "FINALIZED")
+
+    def test_record_builder_evidence_sin_invocation_id_no_toca_el_ledger(self):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        # Evidence written for the same attempt but with no matching
+        # invocation_id (a caller that never went through reserve_dispatch,
+        # or a mismatched id) must leave the RESERVED entry untouched --
+        # _finalize_ledger_entry_for_evidence() only ever finalizes an
+        # exact invocation_id match.
+        record = chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
+        entry = next(e for e in record["dispatch_ledger"] if e["invocation_id"] == invocation_id)
+        self.assertEqual(entry["status"], "RESERVED")
+
+    def test_record_reviewer_evidence_finaliza_entrada_result_recorded_coincidente(self):
+        mid = self._mission_ready_for_emma(attempt=0)
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emma", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="claude")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        evidence = _reviewer_evidence(attempt=0, verdict="PASS")
+        evidence["invocation_id"] = invocation_id
+        record = chugel.record_reviewer_evidence(mid, evidence)
+        entry = next(e for e in record["dispatch_ledger"] if e["invocation_id"] == invocation_id)
+        self.assertEqual(entry["status"], "FINALIZED")
+
+    def test_validacion_fallida_no_deja_escritura_parcial(self):
+        mid = self._mission_ready_for_emilio()
+        before = chugel.get_mission(mid)
+        with self.assertRaises(chugel.MissionValidationFailed):
+            chugel.record_builder_evidence(mid, {"attempt": 0})  # missing required fields
+        after = chugel.get_mission(mid)
+        self.assertEqual(before, after)
+
+
+class PruebaConcurrenciaReservaCrossProceso(DispatchLedgerTestCase):
+    """A genuine multi-thread test exercising the real fcntl.flock()
+    exclusion inside _mission_lock() -- each thread performs its own
+    os.open() of the lock file (mirroring what two independent OS
+    processes would each do), so this exercises real kernel-level mutual
+    exclusion, not merely Python-level thread scheduling."""
+
+    def test_dos_hilos_compitiendo_por_la_misma_reserva_solo_uno_gana(self):
+        import threading
+
+        mid = self._mission_ready_for_emilio()
+        results = []
+        errors = []
+        barrier = threading.Barrier(2)
+
+        def attempt_reserve():
+            barrier.wait()
+            try:
+                _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+                results.append(invocation_id)
+            except chugel.DispatchNotEligible as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=attempt_reserve) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(results), 1, "exactly one thread must win the reservation")
+        self.assertEqual(len(errors), 1, "the other thread must fail closed, not silently skip")
+        ledger = chugel.get_mission(mid)["dispatch_ledger"]
+        self.assertEqual(len(ledger), 1, "no lost update -- only one entry was ever written")
+        self.assertEqual(ledger[0]["invocation_id"], results[0])
+
+
+# --- generalized lock: reservation vs. unrelated concurrent mutation -----
+
+class PruebaBloqueoGeneralizadoCrossProceso(DispatchLedgerTestCase):
+    """Emma's P2-1 finding (autonomous-runner P2 hardening cycle): the
+    original per-mission lock only serialized reserve_dispatch() against
+    other reserve_dispatch() calls -- a concurrent, unrelated mutation
+    (decide_gate(), transition(), record_repository_state(), etc.) on the
+    same mission raced entirely outside any lock, and could silently lose
+    either write (a lost update) since every mutator's own
+    read-modify-write cycle used the same _read_mission_record() ->
+    compute -> _write_mission_record() shape with no serialization
+    between DIFFERENT mutators.
+
+    This test spawns two genuinely separate OS processes -- not threads
+    in this process -- one calling reserve_dispatch(), the other calling
+    the completely unrelated record_repository_state(), against the same
+    mission at the same time, synchronized to maximize overlap. Both
+    mutations must survive: this is the real regression test proving a
+    reservation cannot be silently lost through a concurrent unrelated
+    Chugel mutation, now that every public mutator acquires the same
+    generalized _mission_lock()."""
+
+    _WORKER = str(Path(__file__).resolve().parent / "_chugel_cross_process_race_worker.py")
+    _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+    def _run_race(self, mid, missions_dir, barrier_prefix):
+        for suffix in (".0", ".1"):
+            Path(barrier_prefix + suffix).unlink(missing_ok=True)
+        p_reserve = subprocess.Popen(
+            [sys.executable, self._WORKER, self._REPO_ROOT, str(missions_dir),
+             mid, "reserve", barrier_prefix, "0"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        p_mutate = subprocess.Popen(
+            [sys.executable, self._WORKER, self._REPO_ROOT, str(missions_dir),
+             mid, "mutate", barrier_prefix, "1"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        out_reserve, _ = p_reserve.communicate(timeout=10)
+        out_mutate, _ = p_mutate.communicate(timeout=10)
+        for suffix in (".0", ".1"):
+            Path(barrier_prefix + suffix).unlink(missing_ok=True)
+        return out_reserve.strip(), out_mutate.strip()
+
+    def test_reserva_y_mutacion_no_relacionada_concurrentes_no_pierden_ninguna_escritura(self):
+        mid = self._mission_ready_for_emilio()
+        missions_dir = chugel._MISSIONS_DIR
+        barrier_prefix = str(Path(tempfile.gettempdir()) / f"chugel_race_{mid}")
+
+        out_reserve, out_mutate = self._run_race(mid, missions_dir, barrier_prefix)
+
+        self.assertTrue(out_reserve.startswith("OK "), out_reserve)
+        self.assertTrue(out_mutate.startswith("OK "), out_mutate)
+
+        record = chugel.get_mission(mid)
+        # The reservation was not silently lost -- the mutate side's write
+        # (record_repository_state(), a completely different top-level
+        # field) did not race in between reserve_dispatch()'s read and
+        # write and overwrite it with a pre-reservation copy of the record.
+        ledger = record["dispatch_ledger"]
+        self.assertEqual(len(ledger), 1, ledger)
+        self.assertEqual(ledger[0]["role"], "emilio")
+        self.assertEqual(ledger[0]["attempt"], 0)
+        self.assertEqual(ledger[0]["status"], "RESERVED")
+        # The unrelated mutation was not silently lost either -- the
+        # reservation's write did not race in and overwrite it with a
+        # pre-mutation copy of the record.
+        self.assertTrue(record["repository"]["worktree_path"].startswith("/tmp/race-worktree-"))
+        self.assertEqual(record["repository"]["branch"].split("/")[0], "race")
+
+    def test_diez_rondas_repetidas_nunca_pierden_una_escritura(self):
+        """A handful of repeated rounds against fresh missions, to guard
+        against a race window narrow enough that a single round could
+        pass by luck even with the lock generalization reverted."""
+        for i in range(5):
+            mid = self._mission_ready_for_emilio()
+            missions_dir = chugel._MISSIONS_DIR
+            barrier_prefix = str(Path(tempfile.gettempdir()) / f"chugel_race_round_{i}_{mid}")
+            out_reserve, out_mutate = self._run_race(mid, missions_dir, barrier_prefix)
+            self.assertTrue(out_reserve.startswith("OK "), (i, out_reserve))
+            self.assertTrue(out_mutate.startswith("OK "), (i, out_mutate))
+            record = chugel.get_mission(mid)
+            self.assertEqual(len(record["dispatch_ledger"]), 1, (i, record["dispatch_ledger"]))
+            self.assertTrue(record["repository"]["worktree_path"].startswith("/tmp/race-worktree-"), i)
 
 
 if __name__ == "__main__":

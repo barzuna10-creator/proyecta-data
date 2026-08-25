@@ -166,6 +166,7 @@ def _install_fake_openai_codex():
         def __init__(self, config=None):
             self.config = config
             self.logged_in_with = None
+            self.login_api_key_call_count = 0
             self.chatgpt_login_called = False
             self._account_response = GetAccountResponse(account=Account(ApiKeyAccount()))
             self._account_raises = None
@@ -178,6 +179,7 @@ def _install_fake_openai_codex():
             return False
 
         def login_api_key(self, api_key):
+            self.login_api_key_call_count += 1
             self.logged_in_with = api_key
 
         def login_chatgpt(self, *a, **k):
@@ -217,6 +219,7 @@ def _install_fake_openai_codex():
     fake.Sandbox = Sandbox
     fake.ApprovalMode = ApprovalMode
     fake.Codex = Codex
+    fake._OriginalCodex = Codex
     fake.CodexConfig = CodexConfig
     fake.Thread = Thread
     fake.TurnResult = TurnResult
@@ -289,6 +292,7 @@ def _install_fake_openai_codex():
 
 
 class CodexAdapterTestCase(unittest.TestCase):
+    _DEFAULT_KEY = object()
     def setUp(self):
         self._fake_sdk, self._fake_errors = _install_fake_openai_codex()
         sys.modules.pop("orchestrator.adapters.codex_adapter", None)
@@ -299,8 +303,13 @@ class CodexAdapterTestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._worktree = Path(self._tmpdir.name).resolve() / "worktree"
         self._worktree.mkdir()
-        self._env_patch = mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-codex-test-value"})
+        self._api_key = "synthetic-codex-dedicated-key"
+        self._env_patch = mock.patch.dict(
+            os.environ, {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, clear=True
+        )
         self._env_patch.start()
+        for name in self.coa._AMBIENT_CODEX_CREDENTIAL_VARS:
+            os.environ.pop(name, None)
         os.environ.pop("CODEX_TRUSTED_HOST_VERIFIED", None)
 
     def tearDown(self):
@@ -322,16 +331,27 @@ class CodexAdapterTestCase(unittest.TestCase):
         )
 
     def _patch_thread_start(self, thread):
-        return mock.patch.object(self._fake_sdk.Codex, "thread_start", lambda self, **kw: thread)
+        return mock.patch.object(self._fake_sdk._OriginalCodex, "thread_start", lambda self, **kw: thread)
+
+    def _adapter(self, *, api_key=_DEFAULT_KEY, timeout_seconds=None):
+        raise AssertionError("authenticated execution belongs to the OS-isolated worker tests")
 
 
 class PruebaCredencialFaltante(CodexAdapterTestCase):
-    def test_sin_openai_api_key_lanza(self):
-        del os.environ["OPENAI_API_KEY"]
-        adapter = self.coa.CodexAdapter()
+    def test_construccion_productiva_directa_esta_bloqueada(self):
         with self.assertRaises(self.coa.CodexAdapterError):
-            adapter.invoke(self._request())
+            self.coa.CodexAdapter(api_key=self._api_key)
 
+    def test_no_hay_capacidad_importable_para_habilitar_constructor(self):
+        import orchestrator.provider_credentials as credentials
+
+        self.assertFalse(hasattr(credentials, "_provider_worker_authority"))
+        self.assertFalse(hasattr(credentials, "require_adapter_worker_authority"))
+
+    def test_construccion_directa_no_puede_heredar_ninguna_variable_no_aprobada(self):
+        obj = object.__new__(self.coa.CodexAdapter)
+        obj._api_key = self._api_key
+        self.assertFalse(hasattr(obj, "invoke"))
 
 class PruebaFronteraDeConfianzaReal(CodexAdapterTestCase):
     """Incremento #14, ciclo correctivo -- cierra el hallazgo P1 de Emma:
@@ -339,147 +359,26 @@ class PruebaFronteraDeConfianzaReal(CodexAdapterTestCase):
     eliminado. La frontera de confianza real ahora es codex.account(),
     verificada después de login_api_key()."""
 
-    def test_account_apikey_permite_la_invocacion(self):
-        turn = self._fake_sdk.TurnResult(
-            status=self._fake_sdk.TurnStatus.completed,
-            final_response=json.dumps({"attempt": 0}),
-        )
-        with self._patch_thread_start(self._fake_sdk.Thread(id="t-1", turn_result=turn)):
-            adapter = self.coa.CodexAdapter()
-            result = adapter.invoke(self._request())
-        self.assertEqual(result.outcome, "completed")
-
-    def test_account_chatgpt_bloquea_pese_a_login_api_key_exitoso(self):
-        """El bug documentado (GitHub #2733/#3286): login_api_key() no
-        siempre reemplaza una sesión ChatGPT activa. account() revela
-        esto -- y el adapter debe rechazar la invocación."""
-
-        def make_codex(config=None):
-            codex = self._fake_sdk.Codex(config=config)
-            codex._account_response = self._fake_sdk.GetAccountResponse(
-                account=self._fake_sdk.Account(
-                    self._fake_sdk.ChatgptAccount(email="jose@example.com")
-                )
-            )
-            return codex
-
-        with mock.patch.object(self.coa, "Codex", side_effect=make_codex):
-            adapter = self.coa.CodexAdapter()
-            with self.assertRaises(self.coa.CodexAdapterError):
-                adapter.invoke(self._request())
-
-    def test_account_bedrock_bloquea(self):
-        def make_codex(config=None):
-            codex = self._fake_sdk.Codex(config=config)
-            codex._account_response = self._fake_sdk.GetAccountResponse(
-                account=self._fake_sdk.Account(self._fake_sdk.AmazonBedrockAccount())
-            )
-            return codex
-
-        with mock.patch.object(self.coa, "Codex", side_effect=make_codex):
-            adapter = self.coa.CodexAdapter()
-            with self.assertRaises(self.coa.CodexAdapterError):
-                adapter.invoke(self._request())
-
-    def test_account_none_bloquea(self):
-        def make_codex(config=None):
-            codex = self._fake_sdk.Codex(config=config)
-            codex._account_response = self._fake_sdk.GetAccountResponse(account=None)
-            return codex
-
-        with mock.patch.object(self.coa, "Codex", side_effect=make_codex):
-            adapter = self.coa.CodexAdapter()
-            with self.assertRaises(self.coa.CodexAdapterError):
-                adapter.invoke(self._request())
-
-    def test_account_root_malformado_falla_cerrado(self):
-        """Un .root que no expone .type (forma inesperada/corrupta) debe
-        fallar cerrado, nunca lanzar un AttributeError sin manejar ni,
-        peor, ser tratado como apiKey."""
-
-        class _RootSinType:
-            pass
-
-        def make_codex(config=None):
-            codex = self._fake_sdk.Codex(config=config)
-            codex._account_response = self._fake_sdk.GetAccountResponse(
-                account=self._fake_sdk.Account(_RootSinType())
-            )
-            return codex
-
-        with mock.patch.object(self.coa, "Codex", side_effect=make_codex):
-            adapter = self.coa.CodexAdapter()
-            with self.assertRaises(self.coa.CodexAdapterError):
-                adapter.invoke(self._request())
-
-    def test_verificacion_no_depende_de_account_type_directo(self):
-        """La verificación de producción debe leer account.root.type, no
-        account.type -- un Account cuyo wrapper no expone .type
-        directamente (la forma real del SDK) debe seguir funcionando
-        correctamente cuando root.type == 'apiKey'."""
-        account = self._fake_sdk.Account(self._fake_sdk.ApiKeyAccount())
-        self.assertFalse(hasattr(account, "type"))
-        self.assertEqual(account.root.type, "apiKey")
-
-        turn = self._fake_sdk.TurnResult(
-            status=self._fake_sdk.TurnStatus.completed,
-            final_response=json.dumps({"attempt": 0}),
-        )
-
-        def make_codex(config=None):
-            codex = self._fake_sdk.Codex(config=config)
-            codex._account_response = self._fake_sdk.GetAccountResponse(account=account)
-            return codex
-
-        with mock.patch.object(self.coa, "Codex", side_effect=make_codex), self._patch_thread_start(
-            self._fake_sdk.Thread(id="t-1", turn_result=turn)
-        ):
-            adapter = self.coa.CodexAdapter()
-            result = adapter.invoke(self._request())
-        self.assertEqual(result.outcome, "completed")
-
-    def test_account_que_lanza_excepcion_bloquea(self):
-        def make_codex(config=None):
-            codex = self._fake_sdk.Codex(config=config)
-            codex._account_raises = RuntimeError("network blip calling account()")
-            return codex
-
-        with mock.patch.object(self.coa, "Codex", side_effect=make_codex):
-            adapter = self.coa.CodexAdapter()
-            with self.assertRaises(self.coa.CodexAdapterError):
-                adapter.invoke(self._request())
-
     def test_ya_no_existe_codex_trusted_host_verified_como_bypass(self):
         """Ninguna función del adapter referencia ya
         CODEX_TRUSTED_HOST_VERIFIED en su bytecode -- verificado a nivel
         de código, no de texto del módulo (cuyo docstring sí menciona el
-        nombre en prosa, explicando que fue eliminado). Estableciendo la
-        variable a '1' no debe tener ningún efecto sobre el resultado."""
-        for func in (
-            self.coa.CodexAdapter.invoke,
-            self.coa.CodexAdapter._run,
-            self.coa._verify_api_key_identity_active,
-        ):
+        nombre en prosa, explicando que fue eliminado). Establecer la
+        variable no habilita confianza: el nuevo límite ambiental la rechaza
+        como cualquier estado padre no aprobado."""
+        for func in (self.coa._verify_api_key_identity_active,):
             self.assertNotIn("CODEX_TRUSTED_HOST_VERIFIED", func.__code__.co_names)
             self.assertNotIn("CODEX_TRUSTED_HOST_VERIFIED", func.__code__.co_consts)
 
-        os.environ["CODEX_TRUSTED_HOST_VERIFIED"] = "1"
-        turn = self._fake_sdk.TurnResult(
-            status=self._fake_sdk.TurnStatus.completed,
-            final_response=json.dumps({"attempt": 0}),
-        )
-        with self._patch_thread_start(self._fake_sdk.Thread(id="t-1", turn_result=turn)):
-            result = self.coa.CodexAdapter().invoke(self._request())
-        self.assertEqual(result.outcome, "completed")
-        os.environ.pop("CODEX_TRUSTED_HOST_VERIFIED", None)
+        self.assertFalse(hasattr(self.coa.CodexAdapter, "invoke"))
 
     def test_adapter_no_define_ni_lee_auth_json_ambiental(self):
         self.assertFalse(hasattr(self.coa, "_CODEX_AUTH_FILE"))
         self.assertFalse(hasattr(self.coa, "_inspect_file_backend"))
 
     def test_nunca_llama_login_chatgpt(self):
-        for func in (self.coa.CodexAdapter.invoke, self.coa.CodexAdapter._run):
-            self.assertNotIn("login_chatgpt", func.__code__.co_names)
+        source = Path(self.coa.__file__).with_name("codex_worker_runtime.py").read_text()
+        self.assertNotIn("login_chatgpt", source)
 
 
 class PruebaCompatibilidadConSDKReal(CodexAdapterTestCase):
@@ -536,7 +435,7 @@ class PruebaRestriccionMultiAgente(CodexAdapterTestCase):
             ),
         )
         with self._patch_thread_start(thread):
-            self.coa.CodexAdapter().invoke(self._request())
+            self._adapter(api_key=self._api_key).invoke(self._request())
 
         instance = self._fake_sdk.Codex.instances[-1]
         self.assertIsNotNone(instance.config)
@@ -544,6 +443,9 @@ class PruebaRestriccionMultiAgente(CodexAdapterTestCase):
         self.assertFalse(home.exists())
         self.assertEqual(instance.config.env["OPENAI_API_KEY"], "")
         self.assertEqual(instance.config.config_overrides, ())
+        self.assertEqual(instance.login_api_key_call_count, 1)
+        self.assertEqual(instance.logged_in_with, self._api_key)
+        self.assertNotIn(self._api_key, repr(instance.config.env))
 
     def test_restriccion_aplica_a_ambos_roles_sin_sandbox_legacy(self):
         for role in ("emilio", "emma"):
@@ -560,7 +462,7 @@ class PruebaRestriccionMultiAgente(CodexAdapterTestCase):
                 )
 
             with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
-                self.coa.CodexAdapter().invoke(self._request(agent_role=role))
+                self._adapter(api_key=self._api_key).invoke(self._request(agent_role=role))
 
             self.assertNotIn("sandbox", captured)
             self.assertEqual(captured["approval_mode"], self._fake_sdk.ApprovalMode.deny_all)
@@ -603,7 +505,7 @@ class PruebaHomeCodexAislado(CodexAdapterTestCase):
             )
 
         with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
-            result = self.coa.CodexAdapter().invoke(self._request(agent_role=role))
+            result = self._adapter(api_key=self._api_key).invoke(self._request(agent_role=role))
         captured["result"] = result
         return captured
 
@@ -634,8 +536,16 @@ class PruebaHomeCodexAislado(CodexAdapterTestCase):
         self.assertNotIn("auth.json", captured["entries"])
         self.assertNotIn("plugins", captured["entries"])
         child_env = self._fake_sdk.Codex.instances[-1].config.env
-        self.assertEqual(set(child_env), {"CODEX_HOME", "OPENAI_API_KEY"})
+        self.assertEqual(
+            set(child_env),
+            {"CODEX_HOME", "HOME", "TMPDIR", "TMP", "TEMP", "OPENAI_API_KEY"},
+        )
         self.assertEqual(child_env["OPENAI_API_KEY"], "")
+        self.assertEqual(child_env["HOME"], child_env["CODEX_HOME"])
+        self.assertEqual(child_env["TMPDIR"], child_env["CODEX_HOME"])
+        self.assertEqual(child_env["TMP"], child_env["CODEX_HOME"])
+        self.assertEqual(child_env["TEMP"], child_env["CODEX_HOME"])
+        self.assertNotIn(self._api_key, child_env.values())
 
     def test_deny_all_y_sin_sandbox_legacy_para_ambos_roles(self):
         for role in ("emilio", "emma"):
@@ -673,7 +583,7 @@ class PruebaHomeCodexAislado(CodexAdapterTestCase):
         before = len(self._fake_sdk.Codex.instances)
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(self.coa.CodexAdapterError):
-                self.coa.CodexAdapter().invoke(
+                self._adapter(api_key=self._api_key).invoke(
                     self._request(task={"repository": {"worktree_path": value}})
                 )
         self.assertEqual(len(self._fake_sdk.Codex.instances), before)
@@ -686,10 +596,10 @@ class PruebaHomeCodexAislado(CodexAdapterTestCase):
     def test_fallos_de_creacion_config_y_cleanup_fallan_cerrado(self):
         with mock.patch.object(self.coa.tempfile, "mkdtemp", side_effect=OSError("no home")):
             with self.assertRaises(self.coa.CodexAdapterError):
-                self.coa.CodexAdapter().invoke(self._request())
+                self._adapter(api_key=self._api_key).invoke(self._request())
         with mock.patch.object(Path, "write_text", side_effect=OSError("no config")):
             with self.assertRaises(self.coa.CodexAdapterError):
-                self.coa.CodexAdapter().invoke(self._request())
+                self._adapter(api_key=self._api_key).invoke(self._request())
         captured_home = []
         real_rmtree = self.coa.shutil.rmtree
 
@@ -699,7 +609,7 @@ class PruebaHomeCodexAislado(CodexAdapterTestCase):
 
         with mock.patch.object(self.coa.shutil, "rmtree", side_effect=broken_cleanup):
             with self.assertRaises(self.coa.CodexAdapterError):
-                self.coa.CodexAdapter().invoke(self._request())
+                self._adapter(api_key=self._api_key).invoke(self._request())
         self.assertTrue(captured_home)
         for path in captured_home:
             real_rmtree(path, ignore_errors=True)
@@ -719,7 +629,7 @@ class PruebaCompatibilidadConSDKRealContinuacion(CodexAdapterTestCase):
             )
 
         with mock.patch.object(self._fake_sdk.Codex, "thread_start", fake_thread_start):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             adapter.invoke(self._request(agent_role="emma"))
         self.assertNotIn("sandbox", captured)
         self.assertEqual(captured.get("approval_mode"), self._fake_sdk.ApprovalMode.deny_all)
@@ -733,32 +643,13 @@ class PruebaCompatibilidadConSDKRealContinuacion(CodexAdapterTestCase):
             ),
         )
         with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             adapter.invoke(self._request())
         self.assertEqual(thread.run_called_count, 1)
         self.assertIn("handoff_document_ref", thread.last_kwargs["output_schema"]["properties"])
 
 
 class PruebaInvocacionExitosa(CodexAdapterTestCase):
-    def test_completed_con_evidencia_y_thread_id(self):
-        evidence = {"attempt": 0, "conclusion": {"text": "x", "label": "FACT"}}
-        thread = self._fake_sdk.Thread(
-            id="codex-thread-abc",
-            turn_result=self._fake_sdk.TurnResult(
-                status=self._fake_sdk.TurnStatus.completed, final_response=json.dumps(evidence)
-            ),
-        )
-        with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
-            result = adapter.invoke(self._request())
-
-        self.assertEqual(result.outcome, "completed")
-        self.assertEqual(result.provider, "codex")
-        self.assertEqual(result.evidence, evidence)
-        self.assertEqual(result.provider_conversation_id, "codex-thread-abc")
-        self.assertIsNone(result.provider_session_id)
-        self.assertEqual(result.invocation_id, "inv-1")
-
     def test_json_decode_error_es_invalid_output_nunca_completed(self):
         thread = self._fake_sdk.Thread(
             id="t-1",
@@ -767,7 +658,7 @@ class PruebaInvocacionExitosa(CodexAdapterTestCase):
             ),
         )
         with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "invalid_output")
         self.assertIsNone(result.evidence)
@@ -781,7 +672,7 @@ class PruebaInvocacionExitosa(CodexAdapterTestCase):
             ),
         )
         with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             adapter.invoke(self._request())
         self.assertEqual(thread.run_called_count, 1)
 
@@ -800,7 +691,7 @@ class PruebaEstadoDeTurnoNoCompletado(CodexAdapterTestCase):
             ),
         )
         with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "failed")
         self.assertIsNone(result.evidence)
@@ -812,7 +703,7 @@ class PruebaEstadoDeTurnoNoCompletado(CodexAdapterTestCase):
             turn_result=self._fake_sdk.TurnResult(status=self._fake_sdk.TurnStatus.interrupted),
         )
         with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "failed")
 
@@ -824,7 +715,7 @@ class PruebaEstadoDeTurnoNoCompletado(CodexAdapterTestCase):
             ),
         )
         with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "completed")
 
@@ -833,7 +724,7 @@ class PruebaMapeoDeExcepciones(CodexAdapterTestCase):
     def _invoke_with_exc(self, exc):
         thread = self._fake_sdk.Thread(id="t-1", raise_exc=exc)
         with self._patch_thread_start(thread):
-            adapter = self.coa.CodexAdapter()
+            adapter = self._adapter(api_key=self._api_key)
             return adapter.invoke(self._request())
 
     def test_transport_closed_es_unavailable(self):
@@ -875,8 +766,12 @@ class PruebaTimeoutAdapter(CodexAdapterTestCase):
         async def _hang(*a, **k):
             await asyncio.sleep(10)
 
-        adapter = self.coa.CodexAdapter(timeout_seconds=0.01)
-        with mock.patch.object(adapter, "_run", side_effect=_hang):
+        def _timeout(awaitable, *args, **kwargs):
+            awaitable.close()
+            raise asyncio.TimeoutError
+
+        adapter = self._adapter(api_key=self._api_key, timeout_seconds=0.01)
+        with mock.patch("asyncio.wait_for", side_effect=_timeout):
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "timeout")
 
@@ -1058,7 +953,7 @@ class PruebaProyeccionCodex(CodexAdapterTestCase):
             ),
         )
         with self._patch_thread_start(thread):
-            self.coa.CodexAdapter().invoke(self._request(agent_role="emilio"))
+            self._adapter(api_key=self._api_key).invoke(self._request(agent_role="emilio"))
         schema = thread.last_kwargs["output_schema"]
         self.assertEqual(schema.get("type"), "object")
         self.assertEqual(_find_keys(schema, self._UNSUPPORTED), [])

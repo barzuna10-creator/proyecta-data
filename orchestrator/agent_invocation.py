@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import copy
 import datetime
-import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -188,41 +187,81 @@ def _persisted_builder_identity(mission_id: str, attempt: int) -> dict:
     return copy.deepcopy(entry)
 
 
-def require_eligible_invocation(mission_id: str, *, role: str, attempt: int) -> None:
-    """Fail closed before provider dispatch for state, attempt and duplicate
-    evidence.  A provider call is an authorized state-machine action, not a
-    harmless precursor whose invalidity may be discovered only while
-    persisting its result."""
-    record = chugel.get_mission(mission_id)
+def require_eligible_invocation(mission_id: str, *, role: str, attempt: int) -> str:
+    """Fail closed before provider dispatch for state, attempt, and
+    duplicate evidence -- AND durably reserve the dispatch, atomically, in
+    the same call. This is the sole insertion point for durable dispatch:
+    no supported code path may call an adapter's invoke() for this
+    (mission_id, role, attempt) without going through this function first
+    and using the invocation_id it returns. The actual eligibility check
+    and reservation write both happen inside chugel.reserve_dispatch(),
+    under a cross-process lock (see that function's own docstring for the
+    concurrency argument) -- this function is a thin wrapper translating
+    chugel's exception into this module's own taxonomy, so callers only
+    ever need to catch AgentInvocationError subclasses from this module,
+    never chugel's directly. A malformed `attempt` (non-int, bool, or
+    outside {0, 1}) is refused here, as InvocationNotAuthorized, before
+    chugel.reserve_dispatch() is ever called -- chugel's own ValueError
+    for the same malformed input is a defensive check for any other
+    direct caller of chugel, not something this module's own callers
+    should ever need to catch separately."""
     if type(attempt) is not int or attempt not in (0, 1):
         raise InvocationNotAuthorized(
-            f"mission {record.get('mission_id')}: {role} attempt must be the integer 0 or 1, "
-            f"got {attempt!r}"
+            f"mission {mission_id}: {role} attempt must be the integer 0 or 1, got {attempt!r}"
         )
-
-    expected_state = ("BUILDING" if attempt == 0 else "CORRECTING") if role == "emilio" else "REVIEWING"
-    if record.get("state") != expected_state:
-        raise InvocationNotAuthorized(
-            f"mission {record.get('mission_id')}: {role} attempt {attempt} requires state "
-            f"{expected_state}, got {record.get('state')!r}"
-        )
-
-    evidence_field = "builder_evidence" if role == "emilio" else "reviewer_evidence"
-    entries = record.get(evidence_field) or []
-    if any(isinstance(entry, dict) and entry.get("attempt") == attempt for entry in entries):
-        raise InvocationNotAuthorized(
-            f"mission {record.get('mission_id')}: {evidence_field} already contains "
-            f"attempt {attempt}; refusing a duplicate provider invocation"
-        )
-    if role == "emma":
-        _persisted_builder_identity(mission_id, attempt)
+    try:
+        _, invocation_id = chugel.reserve_dispatch(mission_id, role=role, attempt=attempt)
+    except chugel.DispatchNotEligible as exc:
+        raise InvocationNotAuthorized(str(exc)) from exc
+    return invocation_id
 
 
-def build_emilio_invocation_request(mission_id: str, attempt: int) -> AgentInvocationRequest:
+def _finalize_dispatch_if_reserved(mission_id: str, invocation_id: str) -> None:
+    """Close out the durable ledger entry for a non-"completed" outcome,
+    if one exists. Every real production path (wiring.py) always has one
+    -- require_eligible_invocation() reserved it before dispatch, and
+    record_invocation_result() already durably recorded this exact
+    outcome before this function is ever reached, so finalize_dispatch()
+    only needs to flip RESULT_RECORDED -> FINALIZED. A caller that never
+    went through require_eligible_invocation() at all (this module's own
+    unit tests construct AgentInvocationRequest objects directly, testing
+    allow-list/identity-injection/independence logic in isolation from
+    dispatch reservation) has no matching ledger entry -- that is not a
+    protocol violation of anything this function itself is responsible
+    for, so it is silently a no-op rather than raising."""
+    try:
+        chugel.finalize_dispatch(mission_id, invocation_id)
+    except chugel.DispatchEntryNotFound:
+        pass
+
+
+def mark_invocation_dispatched(mission_id: str, invocation_id: str, *, provider: str) -> None:
+    """Thin wrapper so wiring.py never imports chugel directly (see
+    tests/test_orchestrator_wiring.py's own bytecode-level invariant) --
+    transitions the reserved ledger entry to IN_FLIGHT immediately before
+    the single authorized adapter.invoke() call."""
+    chugel.mark_dispatch_in_flight(mission_id, invocation_id, provider=provider)
+
+
+def record_invocation_result(mission_id: str, invocation_id: str, *, outcome: str) -> None:
+    """Thin wrapper, same reason as mark_invocation_dispatched() -- durably
+    records the raw provider outcome immediately after adapter.invoke()
+    returns, before any evidence is constructed."""
+    chugel.record_dispatch_result(mission_id, invocation_id, outcome=outcome)
+
+
+def build_emilio_invocation_request(
+    mission_id: str, attempt: int, invocation_id: str
+) -> AgentInvocationRequest:
     """Section 6's allow-list exactly: mission_definition content,
     repository, and -- for attempt 1 only -- Emma's attempt-0 cited
     findings, never his own prior builder_evidence fields and never her
-    verdict enum value."""
+    verdict enum value.
+
+    `invocation_id` is always the value require_eligible_invocation()
+    already durably reserved for this exact (mission_id, "emilio",
+    attempt) -- this function never generates its own, so a request can
+    never carry an identity that was not reserved before this call."""
     record = chugel.get_mission(mission_id)
 
     task: dict = {
@@ -233,7 +272,7 @@ def build_emilio_invocation_request(mission_id: str, attempt: int) -> AgentInvoc
         task["cited_findings"] = _cited_findings(record)
 
     return AgentInvocationRequest(
-        invocation_id=str(uuid.uuid4()),
+        invocation_id=invocation_id,
         mission_id=mission_id,
         agent_role="emilio",
         attempt=attempt,
@@ -243,7 +282,9 @@ def build_emilio_invocation_request(mission_id: str, attempt: int) -> AgentInvoc
     )
 
 
-def build_emma_invocation_request(mission_id: str, attempt: int) -> AgentInvocationRequest:
+def build_emma_invocation_request(
+    mission_id: str, attempt: int, invocation_id: str
+) -> AgentInvocationRequest:
     """Section 7's allow-list exactly: mission_definition content,
     builder_evidence[attempt]'s artifact/changed_files/checks/
     handoff_document_ref (factual evidence, per the Increment #7
@@ -251,7 +292,11 @@ def build_emma_invocation_request(mission_id: str, attempt: int) -> AgentInvocat
     section 5), repository, and -- for attempt 1 only -- her own
     attempt-0 findings. Never conclusion/assumptions/risks/
     rollback_notes/safety_confirmation, and never a prior
-    reviewer_evidence entry from a different attempt number."""
+    reviewer_evidence entry from a different attempt number.
+
+    `invocation_id` is always the value require_eligible_invocation()
+    already durably reserved for this exact (mission_id, "emma",
+    attempt) -- see build_emilio_invocation_request()'s docstring."""
     record = chugel.get_mission(mission_id)
 
     builder_entries = record.get("builder_evidence") or []
@@ -274,7 +319,7 @@ def build_emma_invocation_request(mission_id: str, attempt: int) -> AgentInvocat
         task["own_prior_findings"] = _cited_findings(record)
 
     return AgentInvocationRequest(
-        invocation_id=str(uuid.uuid4()),
+        invocation_id=invocation_id,
         mission_id=mission_id,
         agent_role="emma",
         attempt=attempt,
@@ -367,6 +412,12 @@ def consume_emilio_result(
 
     evidence = _augmented_completed_evidence(request, result)
     if evidence is None:
+        # A non-"completed" outcome writes no evidence, but its dispatch
+        # reservation must still be closed out -- record_dispatch_result()
+        # has already durably recorded this outcome (wiring.py, before this
+        # function is ever called), so finalize_dispatch() only needs to
+        # close the ledger entry, never re-derive the classification.
+        _finalize_dispatch_if_reserved(request.mission_id, request.invocation_id)
         return None
     return chugel.record_builder_evidence(request.mission_id, evidence)
 
@@ -404,6 +455,10 @@ def consume_emma_result(
     # Keeping this boundary immediately before the completed write preserves
     # fail-closed persistence while leaving an unpersisted attempt retryable.
     if result.outcome != "completed":
+        # record_dispatch_result() (wiring.py) already durably recorded this
+        # outcome before this function was ever called; only the ledger
+        # entry itself still needs closing.
+        _finalize_dispatch_if_reserved(request.mission_id, request.invocation_id)
         return None
     _check_persisted_builder_independence(request, result)
     evidence = _augmented_completed_evidence(request, result)

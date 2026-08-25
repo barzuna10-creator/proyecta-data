@@ -333,6 +333,12 @@
       },
       "if": { "properties": { "configured": { "type": "null" } } },
       "then": { "properties": { "exhausted": { "const": false } } }
+    },
+
+    "dispatch_ledger": {
+      "description": "Durable reservation ledger for provider dispatch, binding (role, attempt, invocation_id) before any provider process is launched. Deliberately absent from 'required' -- an existing Mission Record with no dispatch_ledger key predates this field and is treated identically to one with an empty ledger; no historical record is rewritten to add it. Entries are appended once (at RESERVED) and thereafter updated in place as the same invocation_id progresses through its lifecycle -- this is metadata about dispatch attempts, not a new Mission state.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/dispatch_ledger_entry" }
     }
   },
 
@@ -362,6 +368,79 @@
       "anyOf": [
         { "type": "null" },
         { "type": "string", "minLength": 1 }
+      ]
+    },
+    "dispatch_ledger_entry": {
+      "description": "One durable reservation for exactly one provider dispatch attempt, identified by invocation_id. Written (status RESERVED) strictly before any provider process may be launched for this (role, attempt), then updated in place -- never appended again -- as the same invocation_id progresses RESERVED -> IN_FLIGHT -> RESULT_RECORDED -> FINALIZED. provider/model are null until IN_FLIGHT (the routing decision is not yet known at reservation time); result_classification is null until RESULT_RECORDED.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role", "attempt", "invocation_id", "provider", "model",
+        "status", "result_classification", "reserved_at", "updated_at"
+      ],
+      "properties": {
+        "role": { "type": "string", "enum": ["emilio", "emma"] },
+        "attempt": { "type": "integer", "enum": [0, 1] },
+        "invocation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "provider": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "enum": ["codex", "claude"] }]
+        },
+        "model": { "$ref": "#/definitions/nullable_provider_identity" },
+        "status": {
+          "type": "string",
+          "enum": ["RESERVED", "IN_FLIGHT", "RESULT_RECORDED", "FINALIZED"]
+        },
+        "result_classification": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "enum": ["completed", "failed", "timeout", "invalid_output", "unavailable"]
+            }
+          ]
+        },
+        "reserved_at": { "$ref": "#/definitions/timestamp" },
+        "updated_at": { "$ref": "#/definitions/timestamp" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "RESERVED" } } },
+          "then": {
+            "properties": {
+              "provider": { "type": "null" },
+              "model": { "type": "null" },
+              "result_classification": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "IN_FLIGHT" } } },
+          "then": {
+            "properties": {
+              "provider": { "type": "string", "enum": ["codex", "claude"] },
+              "result_classification": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": { "enum": ["RESULT_RECORDED", "FINALIZED"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "provider": { "type": "string", "enum": ["codex", "claude"] },
+              "result_classification": {
+                "type": "string",
+                "enum": ["completed", "failed", "timeout", "invalid_output", "unavailable"]
+              }
+            }
+          }
+        }
       ]
     },
     "scope_authorization_gate": {

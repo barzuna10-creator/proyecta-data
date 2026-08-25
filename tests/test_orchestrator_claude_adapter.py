@@ -149,15 +149,14 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         self.worktree = root / "worktree"
         self.worktree.mkdir()
         self.worktree = self.worktree.resolve()
-        self.helper = root / "api-key-helper"
-        self.helper.write_text("#!/bin/sh\nexit 0\n")
-        self.helper.chmod(0o700)
-        self.settings = root / "claude-settings.json"
-        self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper)}))
-        self._env_patch = mock.patch.dict(os.environ, {}, clear=False)
+        self._api_key = "synthetic-claude-dedicated-key"
+        self._env_patch = mock.patch.dict(
+            os.environ, {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, clear=True
+        )
         self._env_patch.start()
         os.environ.pop("ANTHROPIC_API_KEY", None)
         os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
 
     def tearDown(self):
         self._env_patch.stop()
@@ -165,7 +164,7 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         sys.modules.pop("claude_agent_sdk", None)
         sys.modules.pop("orchestrator.adapters.claude_adapter", None)
 
-    def _request(self, agent_role="emilio", attempt=0, task=None):
+    def _request(self, agent_role="emma", attempt=0, task=None):
         return self.ca.AgentInvocationRequest(
             invocation_id="inv-1",
             mission_id="mission-1",
@@ -177,26 +176,75 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         )
 
     def _adapter(self, **kwargs):
-        return self.ca.ClaudeAdapter(claude_settings_path=self.settings, **kwargs)
+        raise AssertionError("authenticated execution belongs to the OS-isolated worker tests")
+
+    def _options(self, role="emma", task=None):
+        with self.ca._isolated_claude_config_dir() as config_dir:
+            return self.ca._build_worker_options(
+                self._request(agent_role=role, task=task), config_dir,
+                api_key=self._api_key, model=self.ca.DEFAULT_MODEL,
+                timeout_seconds=self.ca.DEFAULT_TIMEOUT_SECONDS,
+            )
 
 
 class PruebaCredencialFaltante(ClaudeAdapterTestCase):
-    def test_credencial_ambiental_lanza_antes_de_construir_cliente(self):
-        os.environ["ANTHROPIC_API_KEY"] = "never-read-test-value"
-        adapter = self._adapter()
+    def test_construccion_productiva_directa_esta_bloqueada(self):
         with self.assertRaises(self.ca.ClaudeAdapterError):
-            adapter.invoke(self._request())
+            self.ca.ClaudeAdapter(api_key=self._api_key)
 
-    def test_nunca_lee_el_valor_de_la_api_key_en_una_variable(self):
-        """El adapter solo verifica presencia -- nunca asigna
-        os.environ['ANTHROPIC_API_KEY'] a ninguna variable local ni la
-        pasa a ningún constructor explícitamente (el subprocess CLI
-        hereda el entorno por sí mismo)."""
-        import inspect
+    def test_emilio_direct_key_permanece_rechazado_antes_del_cliente(self):
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient") as client:
+            with self.assertRaises(self.ca.ClaudeAdapterError):
+                self._adapter().invoke(self._request(agent_role="emilio"))
+            client.assert_not_called()
 
-        source = inspect.getsource(self.ca)
-        self.assertNotIn('os.environ["ANTHROPIC_API_KEY"]', source)
-        self.assertIn('"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"', source)
+    def test_construccion_directa_no_puede_heredar_ninguna_variable_no_aprobada(self):
+        obj = object.__new__(self.ca.ClaudeAdapter)
+        obj._api_key = self._api_key
+        self.assertFalse(hasattr(obj, "invoke"))
+
+    def test_sdk_construction_boundary_observa_solo_worker_canonico(self):
+        observed = {}
+        evidence = {"attempt": 0, "verdict": "PASS"}
+
+        def factory(**kwargs):
+            observed.update(os.environ)
+            return _FakeClient(
+                messages=[self._fake_sdk.ResultMessage(structured_output=evidence)],
+                **kwargs,
+            )
+
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=factory):
+            self._adapter().invoke(self._request())
+        self.assertEqual(
+            observed, {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+        )
+
+    def test_credencial_no_puede_entrar_en_request_output_o_error(self):
+        contaminated = self._request()
+        contaminated.task["secret"] = self._api_key
+        with self.assertRaises(self.ca.ClaudeAdapterError):
+            self._adapter().invoke(contaminated)
+
+        messages = [self._fake_sdk.ResultMessage(
+            structured_output={"attempt": 0, "text": self._api_key}
+        )]
+        with mock.patch.object(
+            self._fake_sdk, "ClaudeSDKClient", side_effect=lambda **kw: _FakeClient(messages=messages, **kw)
+        ):
+            result = self._adapter().invoke(self._request())
+        self.assertEqual(result.outcome, "invalid_output")
+        self.assertIsNone(result.evidence)
+
+        with mock.patch.object(
+            self._fake_sdk,
+            "ClaudeSDKClient",
+            side_effect=lambda **kw: _FakeClient(
+                raise_exc=RuntimeError(f"provider echoed {self._api_key}"), **kw
+            ),
+        ):
+            result = self._adapter().invoke(self._request())
+        self.assertNotIn(self._api_key, result.error_detail or "")
 
 
 class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
@@ -204,7 +252,7 @@ class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
         evidence = {"attempt": 0, "conclusion": {"text": "x", "label": "FACT"}}
         result_msg = self._fake_sdk.ResultMessage(structured_output=evidence, session_id="claude-session-abc")
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
             adapter = self._adapter()
             result = adapter.invoke(self._request())
 
@@ -219,7 +267,7 @@ class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
     def test_structured_output_ausente_es_invalid_output(self):
         result_msg = self._fake_sdk.ResultMessage(structured_output=None, session_id="s-1")
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
             adapter = self._adapter()
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "invalid_output")
@@ -238,7 +286,7 @@ class PruebaIsErrorEnResultMessage(ClaudeAdapterTestCase):
             structured_output=evidence, session_id="s-1", is_error=True, errors=["boom"], api_error_status=529
         )
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
             adapter = self._adapter()
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "failed")
@@ -251,7 +299,7 @@ class PruebaIsErrorEnResultMessage(ClaudeAdapterTestCase):
             structured_output=evidence, session_id="s-1", is_error=False
         )
         fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
             adapter = self._adapter()
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "completed")
@@ -260,7 +308,7 @@ class PruebaIsErrorEnResultMessage(ClaudeAdapterTestCase):
 class PruebaMapeoDeExcepciones(ClaudeAdapterTestCase):
     def _invoke_with_exc(self, exc):
         fake_client_factory = lambda **kw: _FakeClient(raise_exc=exc, **kw)
-        with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=fake_client_factory):
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
             adapter = self._adapter()
             return adapter.invoke(self._request())
 
@@ -333,32 +381,33 @@ class PruebaTimeoutAdapter(ClaudeAdapterTestCase):
         async def _hang(*a, **k):
             await asyncio.sleep(10)
 
+        def _timeout(awaitable, *args, **kwargs):
+            awaitable.close()
+            raise asyncio.TimeoutError
+
         adapter = self._adapter(timeout_seconds=0.01)
-        with mock.patch.object(adapter, "_run", side_effect=_hang):
+        with mock.patch("asyncio.wait_for", side_effect=_timeout):
             result = adapter.invoke(self._request())
         self.assertEqual(result.outcome, "timeout")
 
 
 class PruebaPermisosPorRol(ClaudeAdapterTestCase):
     def test_emilio_recibe_bash_edit_write(self):
-        adapter = self._adapter()
-        options = adapter._build_options(self._request(agent_role="emilio"))
+        options = self._options("emilio")
         self.assertIn("Bash", options.allowed_tools)
         self.assertIn("Edit", options.allowed_tools)
         self.assertIn("Write", options.allowed_tools)
 
     def test_emma_nunca_recibe_bash_edit_write(self):
-        adapter = self._adapter()
-        options = adapter._build_options(self._request(agent_role="emma"))
+        options = self._options("emma")
         self.assertNotIn("Bash", options.allowed_tools)
         self.assertNotIn("Edit", options.allowed_tools)
         self.assertNotIn("Write", options.allowed_tools)
         self.assertIn("Read", options.allowed_tools)
 
     def test_output_format_usa_el_schema_del_rol_correcto(self):
-        adapter = self._adapter()
-        options_emilio = adapter._build_options(self._request(agent_role="emilio"))
-        options_emma = adapter._build_options(self._request(agent_role="emma"))
+        options_emilio = self._options("emilio")
+        options_emma = self._options("emma")
         emilio = options_emilio.output_format["schema"]
         emma = options_emma.output_format["schema"]
         self.assertIn("handoff_document_ref", emilio["properties"])
@@ -408,7 +457,7 @@ class PruebaPermisosPorRol(ClaudeAdapterTestCase):
 
 class PruebaConfinamientoClaude(ClaudeAdapterTestCase):
     def _options(self, role="emilio", task=None):
-        return self._adapter()._build_options(self._request(agent_role=role, task=task))
+        return super()._options(role, task)
 
     def test_cwd_es_el_path_canonico_resuelto(self):
         options = self._options()
@@ -434,7 +483,7 @@ class PruebaConfinamientoClaude(ClaudeAdapterTestCase):
 
     def test_worktree_invalido_se_rechaza_antes_de_construir_cliente(self):
         task = {"repository": {"worktree_path": "relative/worktree"}}
-        with mock.patch.object(self.ca, "ClaudeSDKClient") as client:
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient") as client:
             with self.assertRaises(self.ca.ClaudeAdapterError):
                 self._adapter().invoke(self._request(task=task))
         client.assert_not_called()
@@ -477,31 +526,28 @@ class PruebaConfinamientoClaude(ClaudeAdapterTestCase):
         self.assertFalse(sandbox["network"]["allowAllUnixSockets"])
         self.assertFalse(sandbox["network"]["allowLocalBinding"])
 
-    def test_settings_entregados_solo_contienen_auth_y_politica_infra(self):
+    def test_settings_entregados_solo_contienen_politica_infra(self):
         payload = json.loads(self._options().settings)
-        self.assertEqual(set(payload), {"apiKeyHelper", "permissions"})
-        self.assertEqual(payload["apiKeyHelper"], str(self.helper))
+        self.assertEqual(set(payload), {"permissions"})
+        self.assertNotIn(self._api_key, json.dumps(payload))
         self.assertNotIn("sandbox", payload)  # SDK merges the infrastructure-owned options.sandbox.
 
-    def test_settings_con_cualquier_clave_extra_fallan_cerrado(self):
-        for key, value in (("permissions", {}), ("mcpServers", {}), ("hooks", {}), ("sandbox", {})):
-            with self.subTest(key=key):
-                self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper), key: value}))
-                with self.assertRaises(self.ca.ClaudeAdapterError):
-                    self._options()
-                self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper)}))
-
-    def test_helper_debe_ser_absoluto_existente_y_ejecutable(self):
-        cases = ["relative-helper", str(self.worktree.parent / "missing-helper")]
-        nonexec = self.worktree.parent / "nonexec-helper"
-        nonexec.write_text("#!/bin/sh\n")
-        cases.append(str(nonexec))
-        for helper in cases:
-            with self.subTest(helper=helper):
-                self.settings.write_text(json.dumps({"apiKeyHelper": helper}))
-                with self.assertRaises(self.ca.ClaudeAdapterError):
-                    self._options()
-        self.settings.write_text(json.dumps({"apiKeyHelper": str(self.helper)}))
+    def test_credencial_solo_en_env_del_cli_y_home_personal_no_se_usa(self):
+        options = self._options("emma")
+        self.assertEqual(options.env["ANTHROPIC_API_KEY"], self._api_key)
+        self.assertEqual(options.env["HOME"], options.env["CLAUDE_CONFIG_DIR"])
+        self.assertNotEqual(options.env["HOME"], os.path.expanduser("~"))
+        self.assertEqual(
+            set(options.env),
+            {
+                "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", "HOME",
+                "TMPDIR", "TMP", "TEMP",
+                "CLAUDE_CODE_MAX_RETRIES", "API_TIMEOUT_MS",
+            },
+        )
+        self.assertEqual(options.env["TMPDIR"], options.env["CLAUDE_CONFIG_DIR"])
+        self.assertEqual(options.env["TMP"], options.env["CLAUDE_CONFIG_DIR"])
+        self.assertEqual(options.env["TEMP"], options.env["CLAUDE_CONFIG_DIR"])
 
     def test_guard_nativo_niega_absoluto_traversal_y_symlink_escape(self):
         outside = self.worktree.parent / "outside.txt"
@@ -597,28 +643,11 @@ class PruebaConfinamientoClaude(ClaudeAdapterTestCase):
                 self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
-class PruebaAislamientoDeAutenticacion(ClaudeAdapterTestCase):
-    def test_ambient_api_key_y_auth_token_se_rechazan_sin_filtrar_valor(self):
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-            with self.subTest(name=name), mock.patch.dict(os.environ, {name: "secret-shaped-never-read"}):
-                with self.assertRaises(self.ca.ClaudeAdapterError) as ctx:
-                    self._adapter().invoke(self._request())
-                self.assertIn(name, str(ctx.exception))
-                self.assertNotIn("secret-shaped-never-read", str(ctx.exception))
-
-    def test_ambient_se_rechaza_antes_de_leer_settings_invalidos(self):
-        self.settings.write_text("not json")
-        with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "never-read"}):
-            with self.assertRaises(self.ca.ClaudeAdapterError) as ctx:
-                self._adapter().invoke(self._request())
-        self.assertIn("ANTHROPIC_AUTH_TOKEN", str(ctx.exception))
-        self.assertNotIn("invalid JSON", str(ctx.exception))
-
-
 class PruebaSinReintentoAutonomoNiSesionCompartida(ClaudeAdapterTestCase):
     def test_max_retries_cero_y_timeout_explicito_en_env(self):
         adapter = self._adapter(timeout_seconds=42.0)
-        options = adapter._build_options(self._request())
+        with self.ca._isolated_claude_config_dir() as config_dir:
+            options = adapter._build_options(self._request(), config_dir)
         self.assertEqual(options.env["CLAUDE_CODE_MAX_RETRIES"], "0")
         self.assertEqual(options.env["API_TIMEOUT_MS"], "42000")
 
@@ -631,7 +660,7 @@ class PruebaSinReintentoAutonomoNiSesionCompartida(ClaudeAdapterTestCase):
             constructed.append(client)
             return client
 
-        with mock.patch.object(self.ca, "ClaudeSDKClient", side_effect=factory):
+        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=factory):
             adapter = self._adapter()
             adapter.invoke(self._request())
             adapter.invoke(self._request())

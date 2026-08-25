@@ -171,7 +171,6 @@ import tomllib
 from contextlib import contextmanager
 from pathlib import Path
 
-from openai_codex import ApprovalMode, Codex, CodexConfig
 from openai_codex.errors import (
     CodexError,
     InternalRpcError,
@@ -184,8 +183,30 @@ from openai_codex.errors import (
 )
 
 from orchestrator.agent_invocation import AgentInvocationRequest, AgentInvocationResult
+from orchestrator.provider_credentials import (
+    ProviderCredentialError,
+    require_minimized_worker_environment,
+    trusted_system_temp_root,
+    validate_invocation_temp_directory,
+    validate_dedicated_key,
+)
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
+
+_AMBIENT_CODEX_CREDENTIAL_VARS = (
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "OPENAI_ACCESS_TOKEN",
+)
+
+
+def _verify_no_ambient_codex_credentials() -> None:
+    found = [name for name in _AMBIENT_CODEX_CREDENTIAL_VARS if name in os.environ]
+    if found:
+        raise CodexAdapterError(
+            "refusing ambient Codex credential variable name(s): "
+            + ", ".join(found)
+        )
 
 _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "mission_record.schema.json"
 
@@ -226,6 +247,20 @@ class CodexAdapterError(Exception):
     credential, unresolved credential-backend trust) -- never for a
     provider-side outcome, which is always reported via a returned
     AgentInvocationResult, never an exception."""
+
+
+def _contains_secret(node: object, secret: str) -> bool:
+    if isinstance(node, str):
+        return secret in node
+    if isinstance(node, dict):
+        return any(_contains_secret(key, secret) or _contains_secret(value, secret) for key, value in node.items())
+    if isinstance(node, (list, tuple)):
+        return any(_contains_secret(value, secret) for value in node)
+    return False
+
+
+def _redact_secret(text: str, secret: str) -> str:
+    return text.replace(secret, "<redacted>")
 
 
 def _codex_refs_in(node: object) -> set[str]:
@@ -328,7 +363,7 @@ def _load_evidence_schema(agent_role: str) -> dict:
     return _strip_ref_sibling_keywords(projected)
 
 
-def _verify_api_key_identity_active(codex: Codex) -> None:
+def _verify_api_key_identity_active(codex: object) -> None:
     """The decisive trust boundary (module docstring point 3). Must be
     called only after login_api_key() has already been called on `codex`.
     Fails closed if the SDK's own account() call cannot be made, if no
@@ -467,8 +502,11 @@ enabled = false
 def _isolated_codex_home(agent_role: str, worktree: Path):
     """Create, validate, yield, and reliably remove a private CODEX_HOME."""
     try:
-        home = Path(tempfile.mkdtemp(prefix="zentra-codex-home-"))
+        home = Path(tempfile.mkdtemp(
+            prefix="zentra-codex-home-", dir=trusted_system_temp_root()
+        ))
         home.chmod(0o700)
+        home = validate_invocation_temp_directory(home)
         config_path = home / "config.toml"
         config_text = _render_isolated_config(agent_role, worktree)
         config_path.write_text(config_text, encoding="utf-8")
@@ -545,75 +583,23 @@ def _map_exception_to_outcome(exc: Exception) -> tuple[str, str]:
 
 
 class CodexAdapter:
-    """Implements AgentInvoker for Codex. Constructs a brand-new thread
-    for every invoke() call via thread_start() -- never
-    resumeThread()/thread reuse (PROVIDER_ROUTER_V1.md section 6)."""
+    """Parent-facing tombstone.
 
-    def __init__(self, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
-        self._timeout_seconds = timeout_seconds
+    Authenticated execution moved to the exec-only child runtime.  Keeping the
+    name provides a fail-closed compatibility surface while deliberately
+    exposing no ``invoke`` method for ``object.__new__`` to recover.
+    """
 
-    def invoke(self, request: AgentInvocationRequest) -> AgentInvocationResult:
-        if "OPENAI_API_KEY" not in os.environ:
-            raise CodexAdapterError(
-                "OPENAI_API_KEY is not set in the process environment -- refusing to "
-                "construct a Codex client."
-            )
-        try:
-            outcome, evidence, error_detail, thread_id = asyncio.run(
-                asyncio.wait_for(self._run(request), timeout=self._timeout_seconds)
-            )
-        except CodexAdapterError:
-            raise
-        except Exception as exc:  # noqa: BLE001 -- see _map_exception_to_outcome docstring
-            outcome, error_detail = _map_exception_to_outcome(exc)
-            evidence, thread_id = None, None
-
-        return AgentInvocationResult(
-            invocation_id=request.invocation_id,
-            outcome=outcome,
-            provider="codex",
-            model=None,
-            responded_at=_now(),
-            fresh_context_attested=True,
-            provider_session_id=None,
-            provider_conversation_id=thread_id,
-            evidence=evidence,
-            error_detail=error_detail,
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        raise CodexAdapterError(
+            "authenticated CodexAdapter construction is available only inside "
+            "the isolated provider worker"
         )
-
-    async def _run(self, request: AgentInvocationRequest) -> tuple[str, dict | None, str | None, str | None]:
-        """Returns (outcome, evidence, error_detail, thread_id). Never
-        raises for a legitimate non-"completed" turn outcome -- only for a
-        genuine transport/protocol exception, which invoke() maps via
-        _map_exception_to_outcome()."""
-        repository = request.task.get("repository") or {}
-        worktree = _validate_worktree_path(repository.get("worktree_path"))
-
-        with _isolated_codex_home(request.agent_role, worktree) as codex_home:
-            # The child cannot authenticate from the parent's ambient key;
-            # authentication is introduced only through login_api_key() below.
-            child_env = {"CODEX_HOME": str(codex_home), "OPENAI_API_KEY": ""}
-            with Codex(config=CodexConfig(env=child_env)) as codex:
-                codex.login_api_key(os.environ["OPENAI_API_KEY"])
-                _verify_api_key_identity_active(codex)
-
-                thread = codex.thread_start(
-                    approval_mode=ApprovalMode.deny_all,
-                    cwd=str(worktree),
-                )
-                thread_id = getattr(thread, "id", None)
-                schema = _load_evidence_schema(request.agent_role)
-                result = thread.run(json.dumps(request.task), output_schema=schema)
-
-                non_completed = _map_turn_status_to_outcome(
-                    getattr(result, "status", None), getattr(result, "error", None)
-                )
-                if non_completed is not None:
-                    outcome, error_detail = non_completed
-                    return outcome, None, error_detail, thread_id
-
-                evidence = json.loads(result.final_response)
-                return "completed", evidence, None, thread_id
 
 
 def _now() -> str:

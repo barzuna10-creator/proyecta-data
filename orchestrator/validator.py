@@ -321,6 +321,7 @@ def validate_mission_record(record: Any) -> ValidationResult:
     errors += _check_attempt_sequencing(record)
     errors += _check_artifact_identity_consistency(record)
     errors += _check_reviewer_provider_identity_independence(record)
+    errors += _check_dispatch_ledger_consistency(record)
     errors += _check_human_gates_consistency(record)
     errors += _check_corrective_cycle_consistency(record)
     errors += _check_mission_definition_history_consistency(record)
@@ -600,6 +601,92 @@ def _check_reviewer_provider_identity_independence(record: dict) -> list[Validat
                     f"{label} identity",
                     f"$.reviewer_evidence[{idx}].{field_name}",
                 ))
+
+    return errors
+
+
+DISPATCH_LEDGER_STATUSES = frozenset({"RESERVED", "IN_FLIGHT", "RESULT_RECORDED", "FINALIZED"})
+DISPATCH_RETRYABLE_CLASSIFICATIONS = frozenset({"failed", "timeout", "unavailable"})
+
+
+def _check_dispatch_ledger_consistency(record: dict) -> list[ValidationError]:
+    """dispatch_ledger[] durably reserves (role, attempt, invocation_id)
+    before any provider dispatch. Absence of the key entirely is valid --
+    a historical record predating this field behaves as an empty ledger,
+    never rewritten. Two invariants make exclusive reservation meaningful:
+
+    1. invocation_id is globally unique across the whole ledger -- a
+       second entry ever reusing one would mean two dispatch attempts
+       believe they own the same in-flight identity.
+    2. at most one entry per (role, attempt) may be non-FINALIZED at a
+       time -- this is the structural half of exclusive reservation
+       (chugel.reserve_dispatch()'s file lock is the other, process-level
+       half); a second live reservation for the same slot can never be
+       written even if the lock were somehow bypassed.
+
+    attempt is checked with `type(...) is int`, not `isinstance`, exactly
+    like corrective_cycle_count and mission_definition_version elsewhere
+    in this module -- Python bool is an int subclass, and JSON true/false
+    must never silently satisfy an integer attempt slot."""
+    errors: list[ValidationError] = []
+    ledger = record.get("dispatch_ledger")
+    if ledger is None:
+        return errors
+    if not isinstance(ledger, list):
+        return [ValidationError("MALFORMED_RECORD", "dispatch_ledger is not a list", "$.dispatch_ledger")]
+
+    seen_invocation_ids: dict[str, int] = {}
+    live_by_slot: dict[tuple, list[int]] = {}
+    for idx, entry in enumerate(ledger):
+        path = f"$.dispatch_ledger[{idx}]"
+        if not isinstance(entry, dict):
+            errors.append(ValidationError("MALFORMED_RECORD", "dispatch_ledger entry is not an object", path))
+            continue
+
+        role = entry.get("role")
+        attempt = entry.get("attempt")
+        invocation_id = entry.get("invocation_id")
+        status = entry.get("status")
+
+        if type(attempt) is not int or attempt not in (0, 1):
+            errors.append(ValidationError(
+                "MALFORMED_DISPATCH_ATTEMPT",
+                f"dispatch_ledger[{idx}].attempt must be exactly the integer 0 or 1, got {attempt!r}",
+                path + ".attempt",
+            ))
+            continue
+        if status not in DISPATCH_LEDGER_STATUSES:
+            errors.append(ValidationError(
+                "MALFORMED_RECORD",
+                f"dispatch_ledger[{idx}].status {status!r} is not recognized",
+                path + ".status",
+            ))
+            continue
+
+        if isinstance(invocation_id, str) and invocation_id:
+            if invocation_id in seen_invocation_ids:
+                errors.append(ValidationError(
+                    "DUPLICATE_INVOCATION_ID",
+                    f"dispatch_ledger[{idx}] reuses invocation_id already used by "
+                    f"dispatch_ledger[{seen_invocation_ids[invocation_id]}]",
+                    path + ".invocation_id",
+                ))
+            else:
+                seen_invocation_ids[invocation_id] = idx
+
+        if status != "FINALIZED":
+            slot = (role, attempt)
+            live_by_slot.setdefault(slot, []).append(idx)
+
+    for (role, attempt), indices in live_by_slot.items():
+        if len(indices) > 1:
+            errors.append(ValidationError(
+                "CONFLICTING_DISPATCH_RESERVATION",
+                f"dispatch_ledger has {len(indices)} non-FINALIZED entries for "
+                f"role={role!r} attempt={attempt!r} (indices {indices}); at most one "
+                "live reservation per (role, attempt) is permitted",
+                "$.dispatch_ledger",
+            ))
 
     return errors
 

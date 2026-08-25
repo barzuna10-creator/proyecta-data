@@ -1,11 +1,15 @@
 """Controlled one-step wiring from Mission Record to provider adapter.
 
-Eligibility is checked before adapter selection. Completed evidence receives
-infrastructure-owned invocation identity in the consumer. Emma's independence
-decision comes only from the corresponding builder evidence persisted for the
-same mission and attempt, and is rechecked immediately before reviewer
-evidence is written. No retry, transition, gate mutation, or fallback is
-performed autonomously.
+Eligibility is checked before adapter selection -- and, in the same call,
+the dispatch is durably reserved (chugel.reserve_dispatch(), via
+require_eligible_invocation()) strictly before any adapter is ever invoked.
+No supported path in this module can reach adapter.invoke() for a
+(mission_id, role, attempt) that does not already have a durable RESERVED
+ledger entry. Completed evidence receives infrastructure-owned invocation
+identity in the consumer. Emma's independence decision comes only from the
+corresponding builder evidence persisted for the same mission and attempt,
+and is rechecked immediately before reviewer evidence is written. No retry,
+transition, gate mutation, or fallback is performed autonomously.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ from orchestrator.agent_invocation import (
     build_emma_invocation_request,
     consume_emilio_result,
     consume_emma_result,
+    mark_invocation_dispatched,
+    record_invocation_result,
     require_eligible_invocation,
 )
 from orchestrator.provider_router import (
@@ -98,11 +104,22 @@ def _select_and_dispatch(
     config: ProviderConfig,
     prior_attempts: tuple[AttemptRecord, ...],
 ) -> tuple[RoutingDecision, AgentInvocationResult]:
-    """Shared by both public functions below -- select_adapter() then
-    exactly one adapter.invoke() call, nothing else. Not itself public:
-    callers use run_emilio_attempt()/run_emma_attempt(), which additionally
-    apply the role-specific request/consume steps this helper knows
-    nothing about."""
+    """Shared by both public functions below -- select_adapter(), durably
+    mark the reservation IN_FLIGHT with the resolved provider, then exactly
+    one adapter.invoke() call, then durably record the raw result before
+    this function returns. Not itself public: callers use
+    run_emilio_attempt()/run_emma_attempt(), which additionally apply the
+    role-specific request/consume steps this helper knows nothing about.
+
+    request.invocation_id was already durably reserved (status RESERVED)
+    by require_eligible_invocation() before this function is ever called
+    -- mark_dispatch_in_flight() below is the only place that reservation
+    is allowed to advance, and it always runs strictly before
+    adapter.invoke(). A crash before it leaves the reservation at RESERVED
+    (unknown launch provenance); a crash after leaves it at IN_FLIGHT
+    (launch confirmed, result unknown) -- both fail closed identically on
+    restart (chugel.reserve_dispatch()'s own eligibility check), so this
+    function does not need to distinguish them further."""
     decision = select_adapter(agent_role, attempt, config, prior_attempts)
     adapter = adapters.get(decision.adapter_name)
     if adapter is None:
@@ -112,7 +129,13 @@ def _select_and_dispatch(
             f"mapping has no entry for it (has: {sorted(adapters.keys())}) -- "
             "refusing to guess or fall back to any other adapter"
         )
+    mark_invocation_dispatched(
+        request.mission_id, request.invocation_id, provider=decision.adapter_name
+    )
     result = adapter.invoke(request)  # exactly once (requirement 5)
+    record_invocation_result(
+        request.mission_id, request.invocation_id, outcome=result.outcome
+    )
     if result.provider != decision.adapter_name:
         raise ProviderMismatch(
             f"select_adapter() chose adapter_name={decision.adapter_name!r}, but the "
@@ -144,9 +167,15 @@ def run_emilio_attempt(
     Never calls itself, run_emma_attempt(), chugel.transition(), or
     chugel.decide_gate(). Never invoked again automatically for a second
     attempt -- the caller supplies `attempt` and `prior_attempts`
-    explicitly for whichever single step it is now authorizing."""
-    require_eligible_invocation(mission_id, role="emilio", attempt=attempt)
-    request = build_emilio_invocation_request(mission_id, attempt)
+    explicitly for whichever single step it is now authorizing.
+
+    require_eligible_invocation() durably reserves this dispatch and
+    returns the invocation_id it reserved -- build_emilio_invocation_request()
+    is given that exact id, never generating its own, so the request that
+    reaches the adapter always carries the identity that was reserved
+    before dispatch, never a different one."""
+    invocation_id = require_eligible_invocation(mission_id, role="emilio", attempt=attempt)
+    request = build_emilio_invocation_request(mission_id, attempt, invocation_id)
     decision, result = _select_and_dispatch(
         agent_role="emilio",
         attempt=attempt,
@@ -176,9 +205,13 @@ def run_emma_attempt(
     """Exactly one Emma role/attempt step.  Eligibility reloads the matching
     persisted builder identity before routing, and consume_emma_result()
     reloads it again before any reviewer evidence write.  No in-memory
-    preceding AttemptOutcome participates in the security decision."""
-    require_eligible_invocation(mission_id, role="emma", attempt=attempt)
-    request = build_emma_invocation_request(mission_id, attempt)
+    preceding AttemptOutcome participates in the security decision.
+
+    require_eligible_invocation() durably reserves this dispatch and
+    returns the invocation_id it reserved -- see run_emilio_attempt()'s
+    docstring for the identical guarantee on Emilio's side."""
+    invocation_id = require_eligible_invocation(mission_id, role="emma", attempt=attempt)
+    request = build_emma_invocation_request(mission_id, attempt, invocation_id)
     decision, result = _select_and_dispatch(
         agent_role="emma",
         attempt=attempt,

@@ -1274,5 +1274,167 @@ class PruebaRegistrosMalformados(unittest.TestCase):
         self.assertGreater(len(result.errors), 0)
 
 
+# --- dispatch_ledger: consistencia cruzada -------------------------------
+
+def _ledger_entry(role="emilio", attempt=0, status="RESERVED", *,
+                   invocation_id="11111111-1111-4111-8111-111111111111",
+                   provider=None, model=None, result_classification=None,
+                   reserved_at="2026-08-19T12:00:00Z", updated_at="2026-08-19T12:00:00Z"):
+    return {
+        "role": role, "attempt": attempt, "invocation_id": invocation_id,
+        "provider": provider, "model": model, "status": status,
+        "result_classification": result_classification,
+        "reserved_at": reserved_at, "updated_at": updated_at,
+    }
+
+
+class PruebaDispatchLedgerConsistencia(unittest.TestCase):
+    def test_ausencia_de_dispatch_ledger_sigue_siendo_valida(self):
+        # Backward compatibility: dispatch_ledger is deliberately absent
+        # from "required" -- a record predating the ledger must still
+        # validate cleanly.
+        record = _minimal_intake_record()
+        self.assertNotIn("dispatch_ledger", record)
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_lista_vacia_es_valida(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = []
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_entrada_reserved_bien_formada_es_valida(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [_ledger_entry(status="RESERVED")]
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_entrada_finalizada_con_resultado_completed_es_valida(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [_ledger_entry(
+            status="FINALIZED", provider="codex", model="codex-1",
+            result_classification="completed",
+        )]
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_ledger_no_es_una_lista(self):
+        # The structural (JSON Schema) layer already types dispatch_ledger
+        # as an array -- this is rejected there (SCHEMA_TYPE_VIOLATION),
+        # before the cross-field checker ever runs. Mirrors this file's
+        # own established pattern (see PruebaRegistrosMalformados).
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = "not-a-list"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_TYPE_VIOLATION", error_codes(result))
+
+    def test_entrada_no_es_un_objeto(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = ["not-a-dict"]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_TYPE_VIOLATION", error_codes(result))
+
+    def test_attempt_bool_es_rechazado(self):
+        # type(x) is int, not isinstance -- bool is a subclass of int and
+        # must be rejected identically to any other malformed attempt.
+        # The schema's own enum:[0,1] already rejects every one of these
+        # structurally (SCHEMA_ENUM_VIOLATION for True/False/-1/2, or
+        # SCHEMA_TYPE_VIOLATION for None/"0") -- the cross-field
+        # MALFORMED_DISPATCH_ATTEMPT check is defense-in-depth for a
+        # caller that bypasses schema validation (e.g. chugel.py's own
+        # reserve_dispatch() precheck), never reachable through
+        # validate_mission_record() alone once the schema is wired.
+        for bad_attempt in (True, False, None, -1, 2, "0"):
+            record = _minimal_intake_record()
+            record["dispatch_ledger"] = [_ledger_entry(attempt=bad_attempt)]
+            result = validate_mission_record(record)
+            self.assertFalse(result.valid, repr(bad_attempt))
+            self.assertTrue(
+                any(code.startswith("SCHEMA_") for code in error_codes(result)),
+                (bad_attempt, error_codes(result)),
+            )
+
+    def test_status_desconocido_es_rechazado(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [_ledger_entry(status="MADE_UP_STATUS")]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("SCHEMA_ENUM_VIOLATION", error_codes(result))
+
+    def test_invocation_id_duplicado_entre_entradas_es_rechazado(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [
+            _ledger_entry(role="emilio", attempt=0, status="FINALIZED",
+                          provider="codex", model="codex-1", result_classification="failed"),
+            _ledger_entry(role="emilio", attempt=1, status="RESERVED"),
+        ]
+        # Force a duplicate invocation_id across two otherwise-distinct entries.
+        record["dispatch_ledger"][1]["invocation_id"] = record["dispatch_ledger"][0]["invocation_id"]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("DUPLICATE_INVOCATION_ID", error_codes(result))
+
+    def test_dos_entradas_vivas_para_el_mismo_role_attempt_es_rechazado(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [
+            _ledger_entry(role="emilio", attempt=0, status="RESERVED",
+                          invocation_id="11111111-1111-4111-8111-111111111111"),
+            _ledger_entry(role="emilio", attempt=0, status="IN_FLIGHT", provider="codex",
+                          invocation_id="22222222-2222-4222-8222-222222222222"),
+        ]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("CONFLICTING_DISPATCH_RESERVATION", error_codes(result))
+
+    def test_una_finalizada_y_una_viva_para_el_mismo_slot_es_valido(self):
+        # A FINALIZED entry never counts toward the "at most one live
+        # entry" rule -- exactly what reserve_dispatch()'s own
+        # supersession leaves behind after a retryable redispatch.
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [
+            _ledger_entry(role="emilio", attempt=0, status="FINALIZED", provider="codex",
+                          result_classification="timeout",
+                          invocation_id="11111111-1111-4111-8111-111111111111"),
+            _ledger_entry(role="emilio", attempt=0, status="RESERVED",
+                          invocation_id="22222222-2222-4222-8222-222222222222"),
+        ]
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_entradas_vivas_para_slots_distintos_son_validas(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [
+            _ledger_entry(role="emilio", attempt=0, status="RESERVED",
+                          invocation_id="11111111-1111-4111-8111-111111111111"),
+            _ledger_entry(role="emma", attempt=0, status="RESERVED",
+                          invocation_id="22222222-2222-4222-8222-222222222222"),
+        ]
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_reserved_con_provider_no_nulo_es_rechazado_por_el_schema(self):
+        # Structural layer (Part A / JSON Schema allOf), not the
+        # cross-field checker -- RESERVED requires provider/model/
+        # result_classification all null.
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [_ledger_entry(status="RESERVED", provider="codex")]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+    def test_result_recorded_sin_result_classification_es_rechazado_por_el_schema(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [_ledger_entry(
+            status="RESULT_RECORDED", provider="codex", model="codex-1",
+            result_classification=None,
+        )]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+
 if __name__ == "__main__":
     unittest.main()

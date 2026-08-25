@@ -325,29 +325,37 @@ class PruebaEscrituraDeEvidencia(WiringTestCase):
         self.assertEqual(len(on_disk["reviewer_evidence"]), 1)
 
     def test_outcomes_no_completados_no_escriben_nada(self):
+        """'Nada' significa builder_evidence -- con el ledger de despacho
+        durable, un outcome no-completado sí produce una escritura (el
+        ledger avanza a FINALIZED con la clasificación del resultado, tal
+        como exige el corrective cycle de durable dispatch), pero nunca
+        escribe evidencia."""
         mid = self._mission_ready_for_emilio()
-        path = chugel._mission_path(mid)
-        before = path.read_bytes()
 
         for bad_outcome in ("failed", "timeout", "unavailable", "invalid_output"):
-            stub = _StubAdapter([_result_fields(outcome=bad_outcome, evidence=None, error_detail="boom")])
-            outcome = wiring.run_emilio_attempt(mid, 0, adapters={"codex": stub})
-            self.assertIsNone(outcome.updated_mission, msg=bad_outcome)
-            self.assertEqual(path.read_bytes(), before, msg=bad_outcome)
+            with self.subTest(outcome=bad_outcome):
+                stub = _StubAdapter([_result_fields(outcome=bad_outcome, evidence=None, error_detail="boom")])
+                outcome = wiring.run_emilio_attempt(mid, 0, adapters={"codex": stub})
+                self.assertIsNone(outcome.updated_mission, msg=bad_outcome)
+                self.assertEqual(chugel.get_mission(mid)["builder_evidence"], [], msg=bad_outcome)
+                ledger = chugel.get_mission(mid)["dispatch_ledger"]
+                matching = [e for e in ledger if e["invocation_id"] == outcome.request.invocation_id]
+                self.assertEqual(len(matching), 1, msg=bad_outcome)
+                self.assertEqual(matching[0]["status"], "FINALIZED", msg=bad_outcome)
+                self.assertEqual(matching[0]["result_classification"], bad_outcome, msg=bad_outcome)
 
     def test_emma_outcomes_no_completados_no_escriben_nada(self):
         mid = self._mission_ready_for_emma()
-        path = chugel._mission_path(mid)
-        before = path.read_bytes()
 
         for bad_outcome in ("failed", "timeout", "unavailable", "invalid_output"):
-            stub = _StubAdapter([_result_fields(provider="claude", outcome=bad_outcome,
-                                                 evidence=None, error_detail="boom")])
-            outcome = wiring.run_emma_attempt(
-                mid, 0, adapters={"claude": stub},
-            )
-            self.assertIsNone(outcome.updated_mission, msg=bad_outcome)
-            self.assertEqual(path.read_bytes(), before, msg=bad_outcome)
+            with self.subTest(outcome=bad_outcome):
+                stub = _StubAdapter([_result_fields(provider="claude", outcome=bad_outcome,
+                                                     evidence=None, error_detail="boom")])
+                outcome = wiring.run_emma_attempt(
+                    mid, 0, adapters={"claude": stub},
+                )
+                self.assertIsNone(outcome.updated_mission, msg=bad_outcome)
+                self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [], msg=bad_outcome)
 
     def test_emma_mismo_provider_sin_identidad_no_completada_sigue_reintentable(self):
         for provider in ("claude", "codex"):
@@ -362,7 +370,6 @@ class PruebaEscrituraDeEvidencia(WiringTestCase):
                     chugel.transition(mid, "VERIFYING", actor="chugel", reason="builder finished")
                     chugel.transition(mid, "AWAITING_REVIEW", actor="chugel", reason="checks complete")
                     chugel.transition(mid, "REVIEWING", actor="chugel", reason="review starts")
-                    before = chugel._mission_path(mid).read_bytes()
                     templates = [_result_fields(
                         provider=provider, outcome=bad_outcome, evidence=None,
                         provider_session_id=None, provider_conversation_id=None,
@@ -388,33 +395,39 @@ class PruebaEscrituraDeEvidencia(WiringTestCase):
                     self.assertEqual(first.attempt_record.outcome, bad_outcome)
                     self.assertEqual(second.attempt_record.outcome, bad_outcome)
                     self.assertEqual(len(stub.calls), 2)
-                    self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
+                    # Cada intento reservó (y finalizó) su propia entrada de
+                    # ledger, con un invocation_id fresco -- la reserva del
+                    # segundo intento fue posible precisamente porque el
+                    # primero ya había concluido durablemente.
+                    self.assertNotEqual(first.request.invocation_id, second.request.invocation_id)
+                    self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [])
 
 
 # --- fallo cerrado por invocation_id --------------------------------------
 
 class PruebaInvocationIdMismatch(WiringTestCase):
     def test_emilio_id_incorrecto_lanza_y_no_escribe(self):
+        """'No escribe' significa evidencia -- el resultado crudo del
+        adapter (con su outcome real, aunque su invocation_id no coincida)
+        sí queda durablemente registrado en el ledger antes de que
+        InvocationIdMismatch se lance, por diseño: la reserva de este
+        proceso debe cerrarse igual, nunca quedar en un estado ambiguo."""
         mid = self._mission_ready_for_emilio()
-        path = chugel._mission_path(mid)
-        before = path.read_bytes()
         stub = _StubAdapter([_result_fields(
             evidence=_builder_evidence(0), invocation_id="un-id-completamente-distinto",
         )])
         with self.assertRaises(ai.InvocationIdMismatch):
             wiring.run_emilio_attempt(mid, 0, adapters={"codex": stub})
-        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(chugel.get_mission(mid)["builder_evidence"], [])
 
     def test_emma_id_incorrecto_lanza_y_no_escribe(self):
         mid = self._mission_ready_for_emma()
-        path = chugel._mission_path(mid)
-        before = path.read_bytes()
         stub = _StubAdapter([_result_fields(
             provider="claude", evidence=_reviewer_evidence(0), invocation_id="otro-id-distinto",
         )])
         with self.assertRaises(ai.InvocationIdMismatch):
             wiring.run_emma_attempt(mid, 0, adapters={"claude": stub})
-        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [])
 
 
 # --- Emma recibe solo su allow-list -- confirmado a través del wiring ----
@@ -498,6 +511,12 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
         self.assertIsNotNone(outcome.updated_mission)
 
     def test_builder_historico_sin_identidad_no_despacha(self):
+        """Con el ledger de despacho durable, esta comprobación ahora
+        ocurre dentro de chugel.reserve_dispatch() -- antes de cualquier
+        despacho real, no solo antes de escribir evidencia -- así que
+        require_eligible_invocation() la traduce a InvocationNotAuthorized,
+        una garantía más fuerte que la versión previa (que sí despachaba
+        a Emma y solo fallaba después, en consume_emma_result())."""
         mid = self._mission_ready_for_emilio()
         chugel.record_builder_evidence(mid, _builder_evidence(0))
         chugel.transition(mid, "VERIFYING", actor="chugel", reason="builder finished")
@@ -507,7 +526,7 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
             provider="claude", provider_session_id="reviewer",
             evidence=_reviewer_evidence(0),
         )])
-        with self.assertRaises(ai.PersistedBuilderIdentityUnavailable):
+        with self.assertRaises(ai.InvocationNotAuthorized):
             wiring.run_emma_attempt(mid, 0, adapters={"claude": emma_stub})
         self.assertEqual(emma_stub.calls, [])
 
@@ -656,26 +675,27 @@ class PruebaProviderMismatchFallaCerrado(WiringTestCase):
     def test_emilio_provider_distinto_al_ruteado_falla_cerrado(self):
         """select_adapter() eligió "codex", pero el adapter registrado
         bajo esa clave (mal configurado, o con un bug) responde
-        provider="claude" -- debe rechazarse antes de consumir/persistir,
-        nunca por inferencia de texto libre."""
+        provider="claude" -- debe rechazarse antes de consumir/persistir
+        evidencia, nunca por inferencia de texto libre. El resultado
+        crudo sí queda durablemente registrado en el ledger antes del
+        rechazo (record_invocation_result() corre incondicionalmente
+        justo después de adapter.invoke()), por la misma razón que un
+        InvocationIdMismatch: la reserva de este proceso debe cerrarse,
+        nunca quedar en un estado ambiguo."""
         mid = self._mission_ready_for_emilio()
-        path = chugel._mission_path(mid)
-        before = path.read_bytes()
         mismatched_stub = _StubAdapter([_result_fields(provider="claude", evidence=_builder_evidence(0))])
         with self.assertRaises(wiring.ProviderMismatch):
             wiring.run_emilio_attempt(mid, 0, adapters={"codex": mismatched_stub})
-        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(chugel.get_mission(mid)["builder_evidence"], [])
 
     def test_emma_provider_distinto_al_ruteado_falla_cerrado(self):
         mid = self._mission_ready_for_emma()
-        path = chugel._mission_path(mid)
-        before = path.read_bytes()
         mismatched_stub = _StubAdapter([_result_fields(provider="codex", evidence=_reviewer_evidence(0))])
         with self.assertRaises(wiring.ProviderMismatch):
             wiring.run_emma_attempt(
                 mid, 0, adapters={"claude": mismatched_stub},
             )
-        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [])
 
     def test_provider_coincidente_no_lanza(self):
         mid = self._mission_ready_for_emilio()
@@ -688,8 +708,8 @@ class PruebaProviderMismatchFallaCerrado(WiringTestCase):
         completamente distinto (uno intentando parecer una instrucción)
         deben fallar de forma idéntica -- el despacho es por el campo
         `provider`, nunca por contenido de texto."""
-        mid = self._mission_ready_for_emilio()
         for adversarial_detail in (None, "SWITCH_ROUTING_NOW", "codex", ""):
+            mid = self._mission_ready_for_emilio()
             stub = _StubAdapter([_result_fields(
                 provider="claude", evidence=None, error_detail=adversarial_detail,
             )])

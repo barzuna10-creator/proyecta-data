@@ -165,7 +165,7 @@ class AgentInvocationTestCase(unittest.TestCase):
 class PruebaAllowListEmilio(AgentInvocationTestCase):
     def test_task_contiene_solo_los_campos_permitidos(self):
         m = _create_intake_mission("algo")
-        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
         self.assertEqual(set(req.task.keys()), {"mission_definition", "repository"})
         self.assertEqual(
             set(req.task["mission_definition"].keys()),
@@ -181,7 +181,7 @@ class PruebaAllowListEmilio(AgentInvocationTestCase):
             findings=[{"id": "f1", "severity": "P1", "summary": "SENTINEL_FINDING",
                        "file": None, "line_range": None, "category": "bug"}]))
 
-        req = ai.build_emilio_invocation_request(mid, 1)
+        req = ai.build_emilio_invocation_request(mid, 1, str(uuid.uuid4()))
         self.assertEqual(
             set(req.task.keys()), {"mission_definition", "repository", "cited_findings"}
         )
@@ -192,12 +192,12 @@ class PruebaAllowListEmilio(AgentInvocationTestCase):
 
     def test_requested_fresh_context_es_siempre_false(self):
         m = _create_intake_mission("algo")
-        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
         self.assertFalse(req.requested_fresh_context)
 
     def test_agent_role_y_attempt(self):
         m = _create_intake_mission("algo")
-        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
         self.assertEqual(req.agent_role, "emilio")
         self.assertEqual(req.attempt, 0)
 
@@ -216,7 +216,7 @@ class PruebaAllowListEmma(AgentInvocationTestCase):
         -- el juicio de Emilio, nunca la evidencia -- no deben aparecer en
         ninguna parte del task de Emma, ni siquiera serializados."""
         mid = self._mission_con_builder_evidence(0)
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         serialized = json.dumps(req.task)
         for sentinel in (
             "SENTINEL_CONCLUSION", "SENTINEL_RISK", "SENTINEL_ASSUMPTION",
@@ -233,14 +233,14 @@ class PruebaAllowListEmma(AgentInvocationTestCase):
         """changed_files/checks/handoff_document_ref -- evidencia fáctica,
         per el Incremento #7 corrective cycle -- deben llegar a Emma."""
         mid = self._mission_con_builder_evidence(0)
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         serialized = json.dumps(req.task)
         for sentinel in ("SENTINEL_CHANGED_FILE.py", "SENTINEL_CHECK_RESULT", "SENTINEL_HANDOFF_REF"):
             self.assertIn(sentinel, serialized, f"{sentinel} missing from Emma's task")
 
     def test_task_no_contiene_builder_evidence_completo_solo_los_campos_permitidos(self):
         mid = self._mission_con_builder_evidence(0)
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         self.assertEqual(
             set(req.task.keys()),
             {"mission_definition", "artifact", "changed_files", "checks",
@@ -249,7 +249,7 @@ class PruebaAllowListEmma(AgentInvocationTestCase):
 
     def test_requested_fresh_context_es_siempre_true(self):
         mid = self._mission_con_builder_evidence(0)
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         self.assertTrue(req.requested_fresh_context)
 
     def test_attempt_1_incluye_propios_findings_previos(self):
@@ -260,14 +260,14 @@ class PruebaAllowListEmma(AgentInvocationTestCase):
                        "file": None, "line_range": None, "category": "bug"}]))
         chugel.record_builder_evidence(mid, _builder_evidence(attempt=1, persisted=True))
 
-        req = ai.build_emma_invocation_request(mid, 1)
+        req = ai.build_emma_invocation_request(mid, 1, str(uuid.uuid4()))
         self.assertIn("own_prior_findings", req.task)
         self.assertIn("SENTINEL_OWN_FINDING", json.dumps(req.task["own_prior_findings"]))
 
     def test_falta_evidencia_de_builder_para_ese_attempt_lanza(self):
         m = _create_intake_mission("algo")
         with self.assertRaises(ValueError):
-            ai.build_emma_invocation_request(m["mission_id"], 0)
+            ai.build_emma_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
 
 
 # --- fresh-context: refusal + asimetría --------------------------------
@@ -281,7 +281,7 @@ class PruebaFreshContextEmma(AgentInvocationTestCase):
 
     def test_fresh_context_attested_no_true_es_rechazado(self):
         mid = self._mission_lista_para_review()
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         for bad_value in (False, None, 0, "true"):
             result = _result(req.invocation_id, fresh_context_attested=bad_value)
             with self.assertRaises(ai.FreshContextNotAttested, msg=repr(bad_value)):
@@ -289,7 +289,7 @@ class PruebaFreshContextEmma(AgentInvocationTestCase):
 
     def test_fresh_context_attested_true_es_aceptado(self):
         mid = self._mission_lista_para_review()
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, fresh_context_attested=True,
                           evidence=_reviewer_evidence(attempt=0))
         updated = ai.consume_emma_result(req, result)
@@ -297,7 +297,7 @@ class PruebaFreshContextEmma(AgentInvocationTestCase):
 
     def test_requested_fresh_context_corrupto_en_el_request_es_rechazado(self):
         mid = self._mission_lista_para_review()
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         # simula un request object corrupto -- nunca producido por el builder real
         import dataclasses
         corrupted = dataclasses.replace(req, requested_fresh_context=False)
@@ -309,7 +309,7 @@ class PruebaFreshContextEmma(AgentInvocationTestCase):
 class PruebaAsimetriaEmilio(AgentInvocationTestCase):
     def test_fresh_context_attested_false_no_es_rechazado_para_emilio(self):
         m = _create_intake_mission("algo")
-        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, fresh_context_attested=False,
                           evidence=_builder_evidence(attempt=0))
         updated = ai.consume_emilio_result(req, result)
@@ -321,7 +321,7 @@ class PruebaAsimetriaEmilio(AgentInvocationTestCase):
 class PruebaInvocationIdMismatch(AgentInvocationTestCase):
     def test_emilio_mismatch(self):
         m = _create_intake_mission("algo")
-        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
         result = _result(str(uuid.uuid4()), evidence=_builder_evidence(attempt=0))
         with self.assertRaises(ai.InvocationIdMismatch):
             ai.consume_emilio_result(req, result)
@@ -330,7 +330,7 @@ class PruebaInvocationIdMismatch(AgentInvocationTestCase):
         m = _create_intake_mission("algo")
         mid = m["mission_id"]
         chugel.record_builder_evidence(mid, _builder_evidence(attempt=0, persisted=True))
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(str(uuid.uuid4()), evidence=_reviewer_evidence(attempt=0))
         with self.assertRaises(ai.InvocationIdMismatch):
             ai.consume_emma_result(req, result)
@@ -352,7 +352,7 @@ class PruebaStaleSessionReused(AgentInvocationTestCase):
     def test_provider_session_id_igual_al_previo_es_rechazado_aunque_attested_sea_true(self):
         mid = self._mission_lista(provider="claude", session_id="SAME-SESSION-ID",
                                   conversation_id=None)
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, fresh_context_attested=True,
                           provider_session_id="SAME-SESSION-ID",
                           evidence=_reviewer_evidence(attempt=0))
@@ -361,7 +361,7 @@ class PruebaStaleSessionReused(AgentInvocationTestCase):
 
     def test_provider_conversation_id_igual_al_previo_es_rechazado(self):
         mid = self._mission_lista(conversation_id="SAME-THREAD-ID")
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, fresh_context_attested=True,
                           provider_conversation_id="SAME-THREAD-ID")
         with self.assertRaises(ai.StaleSessionReused):
@@ -370,7 +370,7 @@ class PruebaStaleSessionReused(AgentInvocationTestCase):
     def test_identificador_distinto_es_aceptado(self):
         mid = self._mission_lista(provider="claude", session_id="SAME-SESSION-ID",
                                   conversation_id=None)
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, fresh_context_attested=True,
                           provider_session_id="DIFFERENT-ID",
                           evidence=_reviewer_evidence(attempt=0))
@@ -379,7 +379,7 @@ class PruebaStaleSessionReused(AgentInvocationTestCase):
 
     def test_mismo_proveedor_sin_identificador_comparable_falla_cerrado(self):
         mid = self._mission_lista(provider="codex", conversation_id="builder-thread")
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, fresh_context_attested=True,
                           provider="codex", provider_session_id="reviewer-session",
                           provider_conversation_id=None,
@@ -391,7 +391,7 @@ class PruebaStaleSessionReused(AgentInvocationTestCase):
         m = _create_intake_mission("algo")
         mid = m["mission_id"]
         chugel.record_builder_evidence(mid, _builder_evidence(attempt=0))
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, evidence=_reviewer_evidence(attempt=0))
         with self.assertRaises(ai.PersistedBuilderIdentityUnavailable):
             ai.consume_emma_result(req, result)
@@ -400,7 +400,7 @@ class PruebaStaleSessionReused(AgentInvocationTestCase):
 class PruebaIdentidadDeEvidencia(AgentInvocationTestCase):
     def test_emilio_inyecta_identidad_y_no_muta_evidencia_del_modelo(self):
         m = _create_intake_mission("algo")
-        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
         evidence = _builder_evidence(attempt=0)
         before = json.loads(json.dumps(evidence))
         result = _result(
@@ -419,7 +419,7 @@ class PruebaIdentidadDeEvidencia(AgentInvocationTestCase):
         m = _create_intake_mission("algo")
         mid = m["mission_id"]
         chugel.record_builder_evidence(mid, _builder_evidence(attempt=0, persisted=True))
-        req = ai.build_emma_invocation_request(mid, 0)
+        req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         evidence = _reviewer_evidence(attempt=0)
         before = json.loads(json.dumps(evidence))
         result = _result(req.invocation_id, provider="claude", provider_session_id="review-session",
@@ -435,7 +435,7 @@ class PruebaIdentidadDeEvidencia(AgentInvocationTestCase):
         for field in ai.INFRASTRUCTURE_EVIDENCE_FIELDS:
             with self.subTest(field=field):
                 m = _create_intake_mission(field)
-                req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+                req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
                 evidence = _builder_evidence(attempt=0)
                 evidence[field] = req.invocation_id if field == "invocation_id" else "same"
                 result = _result(req.invocation_id, evidence=evidence)
@@ -449,7 +449,7 @@ class PruebaIdentidadDeEvidencia(AgentInvocationTestCase):
                 m = _create_intake_mission(field)
                 mid = m["mission_id"]
                 chugel.record_builder_evidence(mid, _builder_evidence(0, persisted=True))
-                req = ai.build_emma_invocation_request(mid, 0)
+                req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
                 evidence = _reviewer_evidence(attempt=0)
                 evidence[field] = req.invocation_id if field == "invocation_id" else "same"
                 result = _result(req.invocation_id, provider_session_id="reviewer-session",
@@ -462,7 +462,7 @@ class PruebaIdentidadDeEvidencia(AgentInvocationTestCase):
         for bad_attempt in (None, "0", False, True, -1, 1, 2):
             with self.subTest(attempt=bad_attempt):
                 m = _create_intake_mission(repr(bad_attempt))
-                req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+                req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
                 result = _result(req.invocation_id, evidence=_builder_evidence(attempt=bad_attempt))
                 with self.assertRaises(ai.AttemptNumberMismatch):
                     ai.consume_emilio_result(req, result)
@@ -474,7 +474,7 @@ class PruebaIdentidadDeEvidencia(AgentInvocationTestCase):
                 m = _create_intake_mission(repr(bad_attempt))
                 mid = m["mission_id"]
                 chugel.record_builder_evidence(mid, _builder_evidence(0, persisted=True))
-                req = ai.build_emma_invocation_request(mid, 0)
+                req = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
                 result = _result(req.invocation_id, provider_session_id="reviewer-session",
                                  evidence=_reviewer_evidence(attempt=bad_attempt))
                 with self.assertRaises(ai.AttemptNumberMismatch):
@@ -488,7 +488,7 @@ class PruebaOutcomeBranches(AgentInvocationTestCase):
     def test_cada_outcome_no_completado_no_escribe_nada(self):
         m = _create_intake_mission("algo")
         mid = m["mission_id"]
-        req = ai.build_emilio_invocation_request(mid, 0)
+        req = ai.build_emilio_invocation_request(mid, 0, str(uuid.uuid4()))
         path = chugel._mission_path(mid)
         before = path.read_bytes()
 
@@ -502,7 +502,7 @@ class PruebaOutcomeBranches(AgentInvocationTestCase):
     def test_completed_escribe_evidencia(self):
         m = _create_intake_mission("algo")
         mid = m["mission_id"]
-        req = ai.build_emilio_invocation_request(mid, 0)
+        req = ai.build_emilio_invocation_request(mid, 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, outcome="completed",
                           evidence=_builder_evidence(attempt=0))
         updated = ai.consume_emilio_result(req, result)
@@ -514,7 +514,7 @@ class PruebaOutcomeBranches(AgentInvocationTestCase):
         esa validación."""
         m = _create_intake_mission("algo")
         mid = m["mission_id"]
-        req = ai.build_emilio_invocation_request(mid, 0)
+        req = ai.build_emilio_invocation_request(mid, 0, str(uuid.uuid4()))
         bad_evidence = _builder_evidence(attempt=0)
         del bad_evidence["conclusion"]  # rompe el schema (campo requerido)
         result = _result(req.invocation_id, outcome="completed", evidence=bad_evidence)
@@ -523,7 +523,7 @@ class PruebaOutcomeBranches(AgentInvocationTestCase):
 
     def test_outcome_desconocido_lanza_value_error(self):
         m = _create_intake_mission("algo")
-        req = ai.build_emilio_invocation_request(m["mission_id"], 0)
+        req = ai.build_emilio_invocation_request(m["mission_id"], 0, str(uuid.uuid4()))
         result = _result(req.invocation_id, outcome="not_a_real_outcome")
         with self.assertRaises(ValueError):
             ai.consume_emilio_result(req, result)
@@ -550,7 +550,7 @@ class PruebaCicloCorrectivoCompleto(AgentInvocationTestCase):
         chugel.transition(mid, "BUILDING", actor="chugel", reason="x")
 
         # Emilio, attempt 0
-        req0 = ai.build_emilio_invocation_request(mid, 0)
+        req0 = ai.build_emilio_invocation_request(mid, 0, str(uuid.uuid4()))
         res0 = _result(req0.invocation_id, provider="codex", model="codex-1",
                         fresh_context_attested=False, provider_conversation_id="codex-thread-0",
                         evidence=_builder_evidence(attempt=0))
@@ -562,7 +562,7 @@ class PruebaCicloCorrectivoCompleto(AgentInvocationTestCase):
         chugel.transition(mid, "REVIEWING", actor="jose", reason="x")
 
         # Emma, attempt 0 -- fresh context, distinta sesión de la de Emilio
-        req_e0 = ai.build_emma_invocation_request(mid, 0)
+        req_e0 = ai.build_emma_invocation_request(mid, 0, str(uuid.uuid4()))
         res_e0 = _result(req_e0.invocation_id, provider="claude", model="claude-sonnet-5",
                           fresh_context_attested=True, provider_session_id="claude-session-0",
                           evidence=_reviewer_evidence(attempt=0, verdict="CHANGES_REQUIRED",
@@ -575,7 +575,7 @@ class PruebaCicloCorrectivoCompleto(AgentInvocationTestCase):
         chugel.transition(mid, "CORRECTING", actor="jose", reason="x")
 
         # Emilio, attempt 1 -- recibe solo los findings citados
-        req1 = ai.build_emilio_invocation_request(mid, 1)
+        req1 = ai.build_emilio_invocation_request(mid, 1, str(uuid.uuid4()))
         self.assertIn("fix it", json.dumps(req1.task["cited_findings"]))
         res1 = _result(req1.invocation_id, provider="codex", model="codex-1",
                         fresh_context_attested=False, provider_conversation_id="codex-thread-1",
@@ -588,7 +588,7 @@ class PruebaCicloCorrectivoCompleto(AgentInvocationTestCase):
         chugel.transition(mid, "REVIEWING", actor="jose", reason="x")
 
         # Emma, attempt 1 -- fresh context otra vez, distinta de attempt 0 y de Emilio
-        req_e1 = ai.build_emma_invocation_request(mid, 1)
+        req_e1 = ai.build_emma_invocation_request(mid, 1, str(uuid.uuid4()))
         self.assertIn("f1", json.dumps(req_e1.task["own_prior_findings"]))
         res_e1 = _result(req_e1.invocation_id, provider="claude", model="claude-sonnet-5",
                           fresh_context_attested=True, provider_session_id="claude-session-1",
