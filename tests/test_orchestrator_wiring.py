@@ -16,6 +16,7 @@ import orchestrator.agent_invocation as ai
 import orchestrator.chugel as chugel
 import orchestrator.provider_router as router
 import orchestrator.wiring as wiring
+from orchestrator.adapters.codex_cli_adapter import CodexCliAdapter
 
 
 # --- fixtures: misión real vía chugel.py, sin atajos ------------------
@@ -127,14 +128,27 @@ def _result_fields(
     )
 
 
-class _StubAdapter:
+class _StubAdapter(CodexCliAdapter):
     """Deterministic, hand-built AgentInvoker -- never touches a real
     provider. Echoes the real request.invocation_id it actually received
     into its response by default (exactly what any correct real adapter
     must do), unless a template explicitly overrides invocation_id (used
     only by the invocation-ID-mismatch tests). Records every call it
     receives so tests can assert exactly one invocation happened, and
-    exactly what request it saw."""
+    exactly what request it saw.
+
+    Corrective #7: subclasses `CodexCliAdapter` (arbitrarily -- it would
+    work identically subclassing `ClaudeCliAdapter` instead) purely so
+    `isinstance(adapter, _SUBSCRIPTION_ONLY_ADAPTER_TYPES)` in
+    `wiring._select_and_dispatch()` accepts it. `wiring.py`'s own
+    dispatch logic never inspects the adapter's Python type beyond that
+    membership check -- it only ever compares `result.provider` (a
+    string) against `decision.adapter_name`, so this stub is used
+    identically here for both the "codex" and "claude" dict entries
+    across this whole file, exactly as before this corrective cycle.
+    `__init__` is fully overridden below and never calls
+    `CodexCliAdapter.__init__` (which would require discovering a real
+    CLI on PATH) -- this stub has no CLI dependency of any kind."""
 
     def __init__(self, templates):
         self._templates = list(templates) if isinstance(templates, list) else [templates]

@@ -10,12 +10,49 @@ identity in the consumer. Emma's independence decision comes only from the
 corresponding builder evidence persisted for the same mission and attempt,
 and is rechecked immediately before reviewer evidence is written. No retry,
 transition, gate mutation, or fallback is performed autonomously.
+
+Corrective #7 (closing the "API_USAGE_STILL_REACHABLE" finding from the
+subscription-only-guarantee investigation): `run_mission()`/
+`run_emilio_attempt()`/`run_emma_attempt()` accept an arbitrary caller-
+supplied `adapters` mapping, and nothing previously stopped a caller from
+populating it with `ProviderWorkerInvoker` (the API-key-backed worker
+proxy from `orchestrator/provider_credentials.py::build_provider_adapters()`)
+or the legacy `CodexAdapter`/`ClaudeAdapter` tombstones instead of the
+zero-cost subscription-CLI adapters. Nothing else in the orchestrator
+(Chugel, agent_invocation, autonomous_runner, durable dispatch, attempt
+budgets, human gates) constrained this either -- the guarantee that
+autonomous Emilio/Emma execution only ever spends a subscription, never an
+API-billed credential, existed only as operator discipline about which
+adapter-construction function happened to be called, not as anything the
+code itself enforced.
+
+This module is the single, narrowest chokepoint both roles' every dispatch
+already passes through (`_select_and_dispatch()`, below) -- the adapter
+object is resolved here, immediately after `select_adapter()` names a
+provider and immediately before it is ever invoked. The new check there
+fails closed: `adapter` must be an instance of exactly `CodexCliAdapter`
+or `ClaudeCliAdapter` (imported directly from their own modules, not
+duck-typed), or `UnapprovedAdapterType` is raised before
+`mark_invocation_dispatched()`/`adapter.invoke()` ever run -- an API-key
+adapter, a hand-rolled fake, or any other object merely satisfying the
+`AgentInvoker` Protocol structurally is refused exactly like an unknown
+adapter name already was. This is strictly additive: every existing
+subscription-CLI dispatch (real pilots, all tests using
+`build_cli_subscription_adapters()`) is unaffected, and the existing
+codex<->claude provider-name failover in `DEFAULT_PROVIDER_CONFIG` is
+completely untouched -- it still resolves whichever name `select_adapter()`
+picks, and that resolved adapter is checked by the exact same rule
+regardless of which of the two names it came from. The legacy API-key
+adapters are not removed (a separate, larger, out-of-scope decision) --
+they are made structurally unreachable from this dispatch path.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from orchestrator.adapters.claude_cli_adapter import ClaudeCliAdapter
+from orchestrator.adapters.codex_cli_adapter import CodexCliAdapter
 from orchestrator.agent_invocation import (
     AgentInvocationRequest,
     AgentInvocationResult,
@@ -35,6 +72,16 @@ from orchestrator.provider_router import (
     RoutingDecision,
     select_adapter,
 )
+
+# The complete, closed set of adapter types the autonomous Emilio/Emma
+# mission-dispatch path is ever permitted to invoke. A tuple of exact
+# classes, checked via isinstance() -- a genuine subclass of either is
+# still permitted, but ProviderWorkerInvoker, CodexAdapter, ClaudeAdapter,
+# and any ad-hoc object are not, since none of them derive from either
+# class. Adding a provider to this set is a deliberate, reviewable code
+# change here, never an implicit consequence of whatever `adapters`
+# mapping happens to be passed in.
+_SUBSCRIPTION_ONLY_ADAPTER_TYPES: tuple[type, ...] = (CodexCliAdapter, ClaudeCliAdapter)
 
 
 class WiringError(Exception):
@@ -58,6 +105,18 @@ class ProviderMismatch(WiringError):
     docstring, P2). Fails closed before the result is ever passed to
     consume_emilio_result()/consume_emma_result() -- no evidence is
     written for a mismatched result."""
+
+
+class UnapprovedAdapterType(WiringError):
+    """Corrective #7: the adapter `select_adapter()`'s chosen name resolved
+    to, in the caller-supplied `adapters` mapping, is not an instance of
+    `CodexCliAdapter`/`ClaudeCliAdapter` -- e.g. a `ProviderWorkerInvoker`
+    (API-key-backed), a legacy `CodexAdapter`/`ClaudeAdapter` tombstone, or
+    any other object that merely satisfies the `AgentInvoker` Protocol
+    structurally. Fails closed before `mark_invocation_dispatched()` or
+    `adapter.invoke()` ever run -- no durable IN_FLIGHT marking, no
+    provider spend, no evidence. Like `UnknownAdapterSelected`, this is a
+    caller-configuration error, never a provider-side outcome."""
 
 
 def to_attempt_record(result: AgentInvocationResult) -> AttemptRecord:
@@ -128,6 +187,13 @@ def _select_and_dispatch(
             f"(reason={decision.reason!r}), but the caller-supplied `adapters` "
             f"mapping has no entry for it (has: {sorted(adapters.keys())}) -- "
             "refusing to guess or fall back to any other adapter"
+        )
+    if not isinstance(adapter, _SUBSCRIPTION_ONLY_ADAPTER_TYPES):
+        raise UnapprovedAdapterType(
+            f"adapter for adapter_name={decision.adapter_name!r} is "
+            f"{type(adapter).__name__!r}, not one of "
+            f"{tuple(cls.__name__ for cls in _SUBSCRIPTION_ONLY_ADAPTER_TYPES)} -- "
+            "refusing to dispatch through a non-subscription-CLI adapter"
         )
     mark_invocation_dispatched(
         request.mission_id, request.invocation_id, provider=decision.adapter_name

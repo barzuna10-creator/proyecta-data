@@ -30,6 +30,7 @@ from pathlib import Path
 
 import orchestrator.agent_invocation as ai
 import orchestrator.chugel as chugel
+from orchestrator.adapters.codex_cli_adapter import CodexCliAdapter
 from orchestrator.autonomous_runner import (
     _durable_attempt_counts,
     _emilio_schema_attempt,
@@ -137,13 +138,20 @@ def _failed_template(provider):
     )
 
 
-class _FakeAdapter:
+class _FakeAdapter(CodexCliAdapter):
     """Deterministic AgentInvoker -- never touches a real provider. Always
     echoes request.invocation_id back (exactly what a correct real adapter
     must do), and raises AssertionError if invoked more times than the
     test supplied templates for -- so a test that expects exactly N real
     dispatches fails loudly on an unexpected N+1th call, rather than
-    silently reusing a stale template."""
+    silently reusing a stale template.
+
+    Corrective #7: subclasses `CodexCliAdapter` (arbitrarily -- see the
+    identical note on `_StubAdapter` in tests/test_orchestrator_wiring.py)
+    purely so `wiring._select_and_dispatch()`'s new
+    `isinstance(adapter, _SUBSCRIPTION_ONLY_ADAPTER_TYPES)` check accepts
+    it. `__init__` is fully overridden and never calls
+    `CodexCliAdapter.__init__` -- no real CLI dependency of any kind."""
 
     def __init__(self, templates):
         self._templates = list(templates)
