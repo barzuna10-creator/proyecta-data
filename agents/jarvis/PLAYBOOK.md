@@ -23,3 +23,11 @@ request outside the current authorized mission.
 3. Expose only immutable, allow-listed projections; never raw Mission Records.
 4. Treat stable unreadable-listing codes as conditions to report, not repair.
 5. Never write, cache, execute, invoke a provider, or infer authorization.
+
+## Mission 003A trusted-knowledge mode
+
+1. Preserve evidence as immutable candidate content.
+2. Require a fresh exact-tuple Emma PASS for every promotion.
+3. Require José's exact-tuple authorization for the same content.
+4. Promote only FACT or INTENT through the atomic committed bundle.
+5. Observe only by exact ID; do not search, rank, recommend, or reason with it.

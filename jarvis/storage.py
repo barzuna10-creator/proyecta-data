@@ -5,12 +5,13 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import stat
-import tempfile
 from typing import Protocol
+
+from jarvis._safe_io import (
+    ArtifactCorrupt, UnsafePath, atomic_create, ensure_private_directory, read_json,
+)
 
 from jarvis.drafts import build_draft_envelope
 from jarvis.models import (
@@ -24,8 +25,6 @@ _DRAFT_ID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
 class JarvisStorageError(Exception):
@@ -80,20 +79,10 @@ def _validate_and_chmod_directory(path: Path) -> None:
     and mutate permissions only through that descriptor. Platforms unable to
     provide this identity-preserving primitive fail closed.
     """
-    if not _O_NOFOLLOW or not _O_DIRECTORY or not hasattr(os, "fchmod"):
-        raise StoragePathUnsafe(
-            "safe directory validation requires O_NOFOLLOW, O_DIRECTORY, and fchmod"
-        )
     try:
-        descriptor = os.open(str(path), os.O_RDONLY | _O_NOFOLLOW | _O_DIRECTORY)
-    except OSError as exc:
-        raise StoragePathUnsafe(f"could not safely open directory {path}: {exc}") from exc
-    try:
-        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            raise StoragePathUnsafe(f"expected directory inode: {path}")
-        os.fchmod(descriptor, 0o700)
-    finally:
-        os.close(descriptor)
+        ensure_private_directory(path)
+    except UnsafePath as exc:
+        raise StoragePathUnsafe(str(exc)) from exc
 
 
 class FileJarvisStore:
@@ -132,46 +121,19 @@ class FileJarvisStore:
 
     @staticmethod
     def _atomic_create(path: Path, payload: bytes, *, duplicate_error: type[Exception]) -> None:
-        if path.is_symlink():
-            raise StoragePathUnsafe(f"refusing symlink target: {path}")
-        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=str(path.parent))
-        temporary = Path(temporary_name)
         try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            try:
-                os.link(temporary, path, follow_symlinks=False)
-            except FileExistsError as exc:
-                raise duplicate_error(str(path)) from exc
-            directory_fd = os.open(str(path.parent), os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            temporary.unlink(missing_ok=True)
+            atomic_create(path, payload, duplicate_error=duplicate_error)
+        except UnsafePath as exc:
+            raise StoragePathUnsafe(str(exc)) from exc
 
     @staticmethod
     def _read_json(path: Path) -> dict:
-        if path.is_symlink():
-            raise StoragePathUnsafe(f"refusing symlink file: {path}")
         try:
-            fd = os.open(str(path), os.O_RDONLY | _O_NOFOLLOW)
-        except FileNotFoundError as exc:
-            raise DraftNotFound(str(path)) from exc
-        except OSError as exc:
-            raise StoragePathUnsafe(f"could not safely open {path}: {exc}") from exc
-        try:
-            with os.fdopen(fd, "r", encoding="utf-8") as handle:
-                value = json.load(handle)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise StoredArtifactCorrupt(f"invalid stored JSON at {path}") from exc
-        if not isinstance(value, dict):
-            raise StoredArtifactCorrupt(f"stored artifact at {path} is not an object")
-        return value
+            return read_json(path, not_found_error=DraftNotFound, corrupt_error=StoredArtifactCorrupt)
+        except UnsafePath as exc:
+            raise StoragePathUnsafe(str(exc)) from exc
+        except ArtifactCorrupt as exc:
+            raise StoredArtifactCorrupt(str(exc)) from exc
 
     def save_draft(self, envelope: DraftEnvelope) -> None:
         verified = build_draft_envelope(envelope.draft)

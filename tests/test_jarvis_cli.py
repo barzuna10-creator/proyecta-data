@@ -2,6 +2,13 @@ import io
 import json
 import unittest
 from unittest import mock
+import tempfile
+from pathlib import Path
+
+from jarvis.knowledge import EmmaKnowledgeReview, build_candidate_envelope
+from jarvis.knowledge_authorization import parse_knowledge_authorization, render_knowledge_authorization
+from jarvis.knowledge_storage import FileKnowledgeStore
+from tests.test_jarvis_knowledge import CID, candidate
 
 from jarvis.cli import main
 from jarvis.mission_query import MissionListing, MissionQueryError
@@ -44,6 +51,25 @@ class JarvisCliTests(unittest.TestCase):
             main(["what is Emilio doing"], output=io.StringIO())
         with self.assertRaises(SystemExit):
             main(["status"], output=io.StringIO())
+
+    def test_knowledge_show_is_exact_id_read_only_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "knowledge"; store = FileKnowledgeStore(root)
+            envelope = build_candidate_envelope(candidate()); store.save_candidate(envelope)
+            store.transition_candidate(CID, "awaiting_emma_review"); store.transition_candidate(CID, "awaiting_human_authorization")
+            review = EmmaKnowledgeReview(CID, 1, envelope.content_digest, "PASS", "2026-08-26T00:00:01Z")
+            auth = parse_knowledge_authorization(render_knowledge_authorization(envelope)); store.save_review(review); store.save_authorization(auth); store.promote(CID, review, auth)
+            before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            output = io.StringIO(); self.assertEqual(main(["knowledge", "show", CID, "--store-root", str(root)], output=output), 0)
+            self.assertEqual(json.loads(output.getvalue())["knowledge_id"], CID)
+            after = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            self.assertEqual(before, after)
+
+    def test_knowledge_show_failure_is_concise(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error = io.StringIO()
+            self.assertEqual(main(["knowledge", "show", CID, "--store-root", temporary], output=io.StringIO(), error=error), 2)
+            self.assertEqual(error.getvalue(), "ERROR KNOWLEDGE_NOT_FOUND\n")
 
 
 class JarvisCliFailureIntegrationTests(ChugelTestCase):

@@ -144,3 +144,12 @@ No task, draft, prior mission, or agent output independently grants authority.
 current explicit human instruction governs only its stated scope and does not
 silently amend permanent policy. If these rules do not resolve the conflict,
 Jarvis stops and escalates.
+
+## 20. Mission 003A Trusted Knowledge
+
+Jarvis may maintain non-authoritative immutable knowledge candidates and
+trusted FACT/INTENT entries. Every promotion requires an exact independent
+Emma PASS and exact José authorization. Knowledge modules never import Chugel;
+Mission 003A only extends Mission 002's existing read seam with a frozen
+learning projection. Knowledge cannot enter prompts, providers, reasoning, or
+execution in this mission.

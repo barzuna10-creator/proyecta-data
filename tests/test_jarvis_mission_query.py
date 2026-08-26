@@ -33,7 +33,6 @@ class MissionQueryTests(unittest.TestCase):
         self.assertEqual(result.bucket, "running")
         self.assertNotIn("secret", repr(result))
 
-
 class MissionQueryReadOnlyTests(ChugelTestCase):
     def test_list_and_status_leave_canonical_bytes_identical(self):
         record = _create_intake_mission("must remain byte-identical")
@@ -46,6 +45,15 @@ class MissionQueryReadOnlyTests(ChugelTestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(tuple(m.mission_id for m in listing), (record["mission_id"],))
         self.assertEqual(status.mission_id, record["mission_id"])
+
+    def test_learning_query_succeeds_against_real_canonical_record_read_only(self):
+        record = _create_intake_mission("real learning query")
+        path = mission_query.chugel._MISSIONS_DIR / f"{record['mission_id']}.json"
+        before = path.read_bytes()
+        projection = mission_query.get_mission_learning(record["mission_id"])
+        self.assertEqual(projection.mission_id, record["mission_id"])
+        self.assertEqual(projection.outcome, "ship the thing")
+        self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

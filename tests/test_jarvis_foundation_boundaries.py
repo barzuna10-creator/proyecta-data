@@ -15,6 +15,7 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "orchestrator.adapters",
 )
 ALLOWED_CHUGEL_CALLS = {"list_missions", "get_mission"}
+KNOWLEDGE_MODULES = {"jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization", "jarvis.learning_projection"}
 
 
 def _chugel_boundary_violations(filename: str, source: str) -> tuple[str, ...]:
@@ -121,6 +122,27 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
         self.assertTrue(fields.isdisjoint({
             "decided_by", "decided_at", "mission_id", "gate_name", "execute", "start_runner"
         }))
+
+    def test_orchestrator_never_imports_jarvis_knowledge(self):
+        for path in (ROOT / "orchestrator").glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            names = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import): names.extend(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom): names.append(node.module or "")
+            self.assertTrue(KNOWLEDGE_MODULES.isdisjoint(names), (path, names))
+
+    def test_knowledge_modules_have_no_chugel_reasoning_or_provider_path(self):
+        forbidden = ("orchestrator", "subprocess", "socket", "requests", "httpx", "openai", "anthropic")
+        for name in ("knowledge.py", "knowledge_storage.py", "knowledge_authorization.py", "learning_projection.py"):
+            source = (ROOT / "jarvis" / name).read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=name)
+            imports = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import): imports.extend(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom): imports.append(node.module or "")
+            self.assertFalse(any(value.startswith(forbidden) for value in imports), (name, imports))
+            self.assertNotRegex(source.lower(), r"\b(prompt|llm|provider|execute_mission|submit_mission)\b")
 
     def test_no_phase_zero_file_mentions_runtime_mission_directory_as_storage(self):
         for path in (ROOT / "jarvis").glob("*.py"):
