@@ -15,7 +15,11 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "orchestrator.adapters",
 )
 ALLOWED_CHUGEL_CALLS = {"list_missions", "get_mission"}
-KNOWLEDGE_MODULES = {"jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization", "jarvis.learning_projection"}
+KNOWLEDGE_MODULES = {
+    "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",
+    "jarvis.learning_projection", "jarvis.knowledge_retrieval", "jarvis.repository_freshness",
+}
+SOLE_SUBPROCESS_MODULE = "repository_freshness.py"
 
 
 def _chugel_boundary_violations(filename: str, source: str) -> tuple[str, ...]:
@@ -106,6 +110,8 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
     def test_no_subprocess_network_or_git_automation_symbols(self):
         forbidden_imports = {"subprocess", "socket", "urllib", "requests", "httpx"}
         for path in (ROOT / "jarvis").glob("*.py"):
+            if path.name == SOLE_SUBPROCESS_MODULE:
+                continue  # the one deliberate, narrowly scoped exception -- see the dedicated tests below
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             imports = set()
             for node in ast.walk(tree):
@@ -114,6 +120,49 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imports.add(node.module.split(".")[0])
             self.assertTrue(forbidden_imports.isdisjoint(imports), (path, imports))
+
+    def _subprocess_ast_signals(self, source: str, filename: str) -> tuple[str, ...]:
+        """Every reasonably-detectable way a module could gain subprocess
+        capability: direct import, aliased import, from-import, dynamic
+        importlib.import_module, and literal __import__."""
+        tree = ast.parse(source, filename=filename)
+        signals: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "subprocess" or alias.name.startswith("subprocess."):
+                        signals.append("import")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "subprocess":
+                    signals.append("from-import")
+            elif isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "__import__":
+                    if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "subprocess":
+                        signals.append("dunder-import")
+                elif isinstance(func, ast.Attribute) and func.attr == "import_module":
+                    if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "subprocess":
+                        signals.append("importlib")
+        return tuple(signals)
+
+    def test_subprocess_capability_exists_in_exactly_one_jarvis_module(self):
+        for path in (ROOT / "jarvis").glob("*.py"):
+            signals = self._subprocess_ast_signals(path.read_text(encoding="utf-8"), path.name)
+            if path.name == SOLE_SUBPROCESS_MODULE:
+                self.assertTrue(signals, "the sole authorized module must actually use subprocess")
+            else:
+                self.assertEqual(signals, (), (path, signals))
+
+    def test_subprocess_boundary_rejects_adversarial_forms_outside_the_sole_module(self):
+        cases = {
+            "aliased import": "import subprocess as sp\nsp.run(['x'])",
+            "from-import": "from subprocess import run\nrun(['x'])",
+            "dynamic importlib": "import importlib\nimportlib.import_module('subprocess').run(['x'])",
+            "dunder import": "m = __import__('subprocess')\nm.run(['x'])",
+        }
+        for label, source in cases.items():
+            with self.subTest(label=label):
+                self.assertTrue(self._subprocess_ast_signals(source, "knowledge_retrieval.py"))
 
     def test_authorization_intent_has_no_human_attribution_or_execution(self):
         envelope = build_draft_envelope(valid_draft())
@@ -134,14 +183,18 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
 
     def test_knowledge_modules_have_no_chugel_reasoning_or_provider_path(self):
         forbidden = ("orchestrator", "subprocess", "socket", "requests", "httpx", "openai", "anthropic")
-        for name in ("knowledge.py", "knowledge_storage.py", "knowledge_authorization.py", "learning_projection.py"):
+        for name in (
+            "knowledge.py", "knowledge_storage.py", "knowledge_authorization.py",
+            "learning_projection.py", "knowledge_retrieval.py", "repository_freshness.py",
+        ):
             source = (ROOT / "jarvis" / name).read_text(encoding="utf-8")
             tree = ast.parse(source, filename=name)
             imports = []
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import): imports.extend(alias.name for alias in node.names)
                 elif isinstance(node, ast.ImportFrom): imports.append(node.module or "")
-            self.assertFalse(any(value.startswith(forbidden) for value in imports), (name, imports))
+            module_forbidden = tuple(value for value in forbidden if not (name == SOLE_SUBPROCESS_MODULE and value == "subprocess"))
+            self.assertFalse(any(value.startswith(module_forbidden) for value in imports), (name, imports))
             self.assertNotRegex(source.lower(), r"\b(prompt|llm|provider|execute_mission|submit_mission)\b")
 
     def test_no_phase_zero_file_mentions_runtime_mission_directory_as_storage(self):

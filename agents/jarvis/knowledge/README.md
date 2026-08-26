@@ -8,4 +8,9 @@ updates may be proposed, and material changes require explicit human review.
 Mission 003A stores immutable evidence-backed candidates and trusted FACT or
 INTENT entries. Promotion requires independent Emma PASS plus exact José
 authorization. Conversations are not blindly stored and model weights are not
-modified. Search, ranking, and reasoning are deferred.
+modified.
+
+Mission 003B adds deterministic search and ranking over that trusted
+knowledge, plus live repository freshness for entries with a repository
+binding. Reasoning, LLM use, recommendation, and autonomous promotion remain
+deferred.
