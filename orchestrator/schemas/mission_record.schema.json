@@ -1,0 +1,795 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://zentra.internal/schemas/mission_record.schema.json",
+  "title": "Zentra Mission Record V1",
+  "description": "Durable, machine-readable operational state for one Zentra Autonomous Engineering V1 (Level 2) mission. Design and field meaning are documented in orchestrator/MISSION_RECORD.md, which is authoritative for anything this schema cannot itself express. No LLM prose in this record is ever authoritative over its structured fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mission_id",
+    "created_at",
+    "updated_at",
+    "state",
+    "state_reason",
+    "state_history",
+    "intent",
+    "mission_definition_history",
+    "proposed_scope_changes",
+    "human_gates",
+    "repository",
+    "builder_evidence",
+    "reviewer_evidence",
+    "corrective_cycle_count",
+    "publish",
+    "merge",
+    "deploy",
+    "budget"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Exact supported schema version for this V1 record. A record with any other value must be rejected outright, never leniently reinterpreted -- a future schema version gets its own schema file (e.g. mission_record.v2.schema.json), never a silent extension of this one.",
+      "const": "1.0.0"
+    },
+    "mission_id": {
+      "description": "Stable unique identifier for this mission. Never reused, even after the mission reaches a terminal state.",
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "created_at": { "$ref": "#/definitions/timestamp" },
+    "updated_at": { "$ref": "#/definitions/timestamp" },
+
+    "state": {
+      "description": "Current canonical state. See orchestrator/MISSION_RECORD.md for the full state vocabulary: meaning, owning actor, and minimum entry evidence for each value.",
+      "type": "string",
+      "enum": [
+        "INTAKE",
+        "SCOPE_AWAITING_AUTHORIZATION",
+        "AUTHORIZED",
+        "BUILDING",
+        "VERIFYING",
+        "AWAITING_REVIEW",
+        "REVIEWING",
+        "CHANGES_REQUIRED",
+        "CORRECTING",
+        "PUBLISH_AWAITING_AUTHORIZATION",
+        "PUBLISHING",
+        "CI_PENDING",
+        "MERGE_AWAITING_AUTHORIZATION",
+        "MERGING",
+        "MERGED",
+        "DEPLOY_PENDING",
+        "VERIFYING_PRODUCTION",
+        "COMPLETED",
+        "BLOCKED",
+        "FAILED",
+        "CANCELLED",
+        "ROLLED_BACK"
+      ]
+    },
+    "state_reason": {
+      "description": "Why the mission is currently in `state` -- a short, evidence-pointing justification for the CURRENT state only. Full history lives in state_history.",
+      "type": "string",
+      "minLength": 1
+    },
+    "state_history": {
+      "description": "Append-only, chronological log of every state transition. Never edited or reordered after being written.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from_state", "to_state", "at", "actor", "reason"],
+        "properties": {
+          "from_state": {
+            "description": "Null only for the single initial transition into INTAKE.",
+            "anyOf": [{ "type": "null" }, { "$ref": "#/properties/state" }]
+          },
+          "to_state": { "$ref": "#/properties/state" },
+          "at": { "$ref": "#/definitions/timestamp" },
+          "actor": { "$ref": "#/definitions/actor" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "intent": {
+      "description": "José's original, unedited request. Captured once at mission creation and never rewritten -- it is the anchor every later scope decision is measured against.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_text", "captured_at"],
+      "properties": {
+        "raw_text": { "type": "string", "minLength": 1 },
+        "captured_at": { "$ref": "#/definitions/timestamp" }
+      }
+    },
+
+    "mission_definition_history": {
+      "description": "Versioned, append-only record of human-accepted mission definitions. Entry [length-1] (highest `version`) is the current scope definition; execution authorization is tracked separately by human_gates.scope_authorization and must match that current version before gated execution. This array is never mutated by an agent on its own, and a new version never replaces an old one. See 'Re-planning model' in MISSION_RECORD.md.",
+      "type": "array",
+      "minItems": 0,
+      "items": { "$ref": "#/definitions/mission_definition_version" }
+    },
+
+    "proposed_scope_changes": {
+      "description": "Candidate re-planning proposals (e.g. from a future David re-invocation). Never authoritative on their own -- a proposal only affects mission_definition_history once its status becomes 'accepted' AND a corresponding human_gates.scope_authorization approval exists for it.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposal_id", "proposed_at", "proposed_by", "label", "rationale", "diff_against_current_scope", "status"],
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "pending_human_decision" } }, "required": ["status"] },
+            "then": {
+              "properties": {
+                "decided_by": { "type": "null" },
+                "decided_at": { "type": "null" },
+                "resulting_mission_definition_version": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "status": { "const": "rejected" } }, "required": ["status"] },
+            "then": {
+              "required": ["decided_by", "decided_at", "resulting_mission_definition_version"],
+              "properties": {
+                "decided_by": { "const": "jose" },
+                "decided_at": { "$ref": "#/definitions/timestamp" },
+                "resulting_mission_definition_version": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "status": { "const": "accepted" } }, "required": ["status"] },
+            "then": {
+              "required": ["decided_by", "decided_at", "resulting_mission_definition_version"],
+              "properties": {
+                "decided_by": { "const": "jose" },
+                "decided_at": { "$ref": "#/definitions/timestamp" },
+                "resulting_mission_definition_version": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "proposal_id": { "type": "string", "minLength": 1 },
+          "proposed_at": { "$ref": "#/definitions/timestamp" },
+          "proposed_by": {
+            "description": "Must be an agent authorized to propose re-planning. Level 2 expects only 'david'.",
+            "type": "string",
+            "enum": ["david"]
+          },
+          "label": { "$ref": "#/definitions/evidence_label" },
+          "rationale": { "type": "string", "minLength": 1 },
+          "diff_against_current_scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["added", "removed"],
+            "properties": {
+              "added": { "type": "array", "items": { "type": "string" } },
+              "removed": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending_human_decision", "accepted", "rejected"]
+          },
+          "decided_by": { "anyOf": [{ "type": "null" }, { "const": "jose" }] },
+          "decided_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+          "resulting_mission_definition_version": {
+            "description": "Set only when status is 'accepted' -- points to the new entry this proposal produced in mission_definition_history.",
+            "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }]
+          }
+        }
+      }
+    },
+
+    "human_gates": {
+      "description": "The three Level 2 human gates. Every gate is REQUIRED and defaults to 'not_requested' -- a record missing a gate, or an unrecognized gate status, must be rejected, never treated as approved. Absence of authorization means NOT AUTHORIZED.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_authorization", "publish_authorization", "merge_authorization"],
+      "properties": {
+        "scope_authorization": { "$ref": "#/definitions/scope_authorization_gate" },
+        "publish_authorization": { "$ref": "#/definitions/human_gate" },
+        "merge_authorization": { "$ref": "#/definitions/merge_authorization_gate" }
+      }
+    },
+
+    "repository": {
+      "description": "Dedicated identity section for the isolated worktree this mission operates in.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worktree_path", "branch", "base_sha", "isolation_confirmed"],
+      "properties": {
+        "worktree_path": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "base_sha": { "$ref": "#/definitions/sha" },
+        "isolation_confirmed": {
+          "description": "True only once a deterministic check (not an agent's claim) has confirmed the worktree is isolated and non-main, per AGENTS.md's Required preflight.",
+          "type": "boolean"
+        }
+      }
+    },
+
+    "builder_evidence": {
+      "description": "One entry per Emilio invocation. attempt=0 is the initial build; attempt=1 is the single bounded corrective cycle. Never more than two entries -- AGENTS.md permits exactly one corrective cycle.",
+      "type": "array",
+      "maxItems": 2,
+      "items": { "$ref": "#/definitions/builder_evidence_entry" }
+    },
+
+    "reviewer_evidence": {
+      "description": "One entry per Emma invocation. attempt=0 is the initial review; attempt=1 is the single re-review after the one bounded corrective cycle. Never more than two entries.",
+      "type": "array",
+      "maxItems": 2,
+      "items": { "$ref": "#/definitions/reviewer_evidence_entry" }
+    },
+
+    "corrective_cycle_count": {
+      "description": "Hard-capped at 1, matching AGENTS.md's 'Bounded correction and escalation'. A second CHANGES REQUIRED must route to BLOCKED, never increment this further.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    },
+
+    "publish": {
+      "description": "Push/PR identity and CI results. All fields null until the corresponding real action is confirmed -- presence of a value IS the idempotency signal (see MISSION_RECORD.md, Idempotency).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit_sha", "pushed_at", "pr_url", "pr_number", "ci_runs"],
+      "properties": {
+        "commit_sha": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/sha" }] },
+        "pushed_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "pr_url": { "anyOf": [{ "type": "null" }, { "type": "string", "format": "uri" }] },
+        "pr_number": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }] },
+        "ci_runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id", "conclusion", "checked_at"],
+            "properties": {
+              "run_id": { "type": "string", "minLength": 1 },
+              "conclusion": {
+                "type": "string",
+                "enum": ["pending", "success", "failure", "cancelled", "timed_out"]
+              },
+              "checked_at": { "$ref": "#/definitions/timestamp" }
+            }
+          }
+        }
+      }
+    },
+
+    "merge": {
+      "description": "Merge identity. Null fields until the merge is confirmed to have actually happened (never set in anticipation of a merge).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["merge_commit_sha", "merged_at"],
+      "properties": {
+        "merge_commit_sha": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/sha" }] },
+        "merged_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] }
+      }
+    },
+
+    "deploy": {
+      "description": "Production deploy verification -- read-only checks only (GET /health, GET /version, and reading the platform's own deploy event log), matching how every Level 1 mission this session confirmed a deploy. Never a trigger: nothing in this record causes a deploy, it only records observation of one that already happened via the platform's own auto-deploy.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_sha", "deploy_confirmed_at", "health_check", "version_check"],
+      "properties": {
+        "expected_sha": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/sha" }] },
+        "deploy_confirmed_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "health_check": { "$ref": "#/definitions/http_check" },
+        "version_check": { "$ref": "#/definitions/http_check" }
+      }
+    },
+
+    "budget": {
+      "description": "Minimum structure for a future Budget Governor. No numeric ceiling is invented here -- 'configured: null' is the explicit, visible representation of 'no ceiling configured', distinct from an absent/omitted field. 'consumed' is always tracked regardless of whether a ceiling exists.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "consumed", "per_agent_consumed", "exhausted"],
+      "properties": {
+        "configured": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["unit", "limit", "scope"],
+              "properties": {
+                "unit": { "type": "string", "enum": ["tokens", "usd"] },
+                "limit": { "type": "number", "exclusiveMinimum": 0 },
+                "scope": { "type": "string", "enum": ["mission", "per_agent"] }
+              }
+            }
+          ]
+        },
+        "consumed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["unit", "amount"],
+          "properties": {
+            "unit": { "type": "string", "enum": ["tokens", "usd"] },
+            "amount": { "type": "number", "minimum": 0 }
+          }
+        },
+        "per_agent_consumed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["david", "emilio", "emma"],
+          "properties": {
+            "david": { "anyOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }] },
+            "emilio": { "anyOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }] },
+            "emma": { "anyOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }] }
+          }
+        },
+        "exhausted": {
+          "description": "Must be false whenever configured is null -- there is no ceiling to exhaust. See conditional below.",
+          "type": "boolean"
+        }
+      },
+      "if": { "properties": { "configured": { "type": "null" } } },
+      "then": { "properties": { "exhausted": { "const": false } } }
+    },
+
+    "dispatch_ledger": {
+      "description": "Durable reservation ledger for provider dispatch, binding (role, attempt, invocation_id) before any provider process is launched. Deliberately absent from 'required' -- an existing Mission Record with no dispatch_ledger key predates this field and is treated identically to one with an empty ledger; no historical record is rewritten to add it. Entries are appended once (at RESERVED) and thereafter updated in place as the same invocation_id progresses through its lifecycle -- this is metadata about dispatch attempts, not a new Mission state.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/dispatch_ledger_entry" }
+    }
+  },
+
+  "definitions": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC timestamp, e.g. 2026-08-19T12:00:00Z."
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full 40-character Git commit SHA. Short SHAs are never sufficient identity."
+    },
+    "nullable_invocation_id": {
+      "description": "Infrastructure-owned invocation UUID. Optional and nullable for backward compatibility; never supplied by provider/model output.",
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      ]
+    },
+    "nullable_provider_identity": {
+      "description": "Infrastructure-owned opaque provider identity metadata. Optional and nullable when the infrastructure has no usable identifier.",
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
+    "dispatch_ledger_entry": {
+      "description": "One durable reservation for exactly one provider dispatch attempt, identified by invocation_id. Written (status RESERVED) strictly before any provider process may be launched for this (role, attempt), then updated in place -- never appended again -- as the same invocation_id progresses RESERVED -> IN_FLIGHT -> RESULT_RECORDED -> FINALIZED. provider/model are null until IN_FLIGHT (the routing decision is not yet known at reservation time); result_classification is null until RESULT_RECORDED.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role", "attempt", "invocation_id", "provider", "model",
+        "status", "result_classification", "reserved_at", "updated_at"
+      ],
+      "properties": {
+        "role": { "type": "string", "enum": ["emilio", "emma"] },
+        "attempt": { "type": "integer", "enum": [0, 1] },
+        "invocation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "provider": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "enum": ["codex", "claude"] }]
+        },
+        "model": { "$ref": "#/definitions/nullable_provider_identity" },
+        "status": {
+          "type": "string",
+          "enum": ["RESERVED", "IN_FLIGHT", "RESULT_RECORDED", "FINALIZED"]
+        },
+        "result_classification": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "enum": ["completed", "failed", "timeout", "invalid_output", "unavailable"]
+            }
+          ]
+        },
+        "reserved_at": { "$ref": "#/definitions/timestamp" },
+        "updated_at": { "$ref": "#/definitions/timestamp" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "RESERVED" } } },
+          "then": {
+            "properties": {
+              "provider": { "type": "null" },
+              "model": { "type": "null" },
+              "result_classification": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "IN_FLIGHT" } } },
+          "then": {
+            "properties": {
+              "provider": { "type": "string", "enum": ["codex", "claude"] },
+              "result_classification": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": { "enum": ["RESULT_RECORDED", "FINALIZED"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "provider": { "type": "string", "enum": ["codex", "claude"] },
+              "result_classification": {
+                "type": "string",
+                "enum": ["completed", "failed", "timeout", "invalid_output", "unavailable"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "scope_authorization_gate": {
+      "allOf": [
+        { "$ref": "#/definitions/human_gate" },
+        {
+          "if": { "properties": { "status": { "const": "approved" } } },
+          "then": {
+            "properties": {
+              "approved_for": {
+                "type": "object",
+                "required": ["mission_definition_version"],
+                "properties": {
+                  "mission_definition_version": { "type": "integer", "minimum": 1 }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "merge_authorization_gate": {
+      "allOf": [
+        { "$ref": "#/definitions/human_gate" },
+        {
+          "if": { "properties": { "status": { "const": "approved" } } },
+          "then": {
+            "properties": {
+              "approved_for": {
+                "type": "object",
+                "required": ["head_sha"],
+                "properties": { "head_sha": { "$ref": "#/definitions/sha" } }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "actor": {
+      "type": "string",
+      "enum": ["jose", "david", "emilio", "emma", "chugel"]
+    },
+    "evidence_label": {
+      "description": "FACT / INFERENCE / ASSUMPTION / INTENT discipline, per agents/AGENT_STANDARD.md section 9. Required wherever mission knowledge (not raw command output) is persisted.",
+      "type": "string",
+      "enum": ["FACT", "INFERENCE", "ASSUMPTION", "INTENT"]
+    },
+    "labeled_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "label"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "label": { "$ref": "#/definitions/evidence_label" }
+      }
+    },
+
+    "mission_definition_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "outcome", "scope", "non_goals", "acceptance_criteria",
+        "source", "based_on_proposal_id", "authorized_by", "authorized_at",
+        "authorization_decision_ref"
+      ],
+      "properties": {
+        "version": { "type": "integer", "minimum": 1 },
+        "outcome": { "type": "string", "minLength": 1 },
+        "scope": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "non_goals": { "type": "array", "items": { "type": "string" } },
+        "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "source": {
+          "description": "Where this version came from: David's initial intake, or an accepted re-planning proposal.",
+          "type": "string",
+          "enum": ["david_intake", "david_replan"]
+        },
+        "based_on_proposal_id": {
+          "description": "Required (non-null) when source is 'david_replan'; must be null for 'david_intake'.",
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "authorized_by": {
+          "description": "Must always be the literal human decision-maker. An agent can never appear here.",
+          "const": "jose"
+        },
+        "authorized_at": { "$ref": "#/definitions/timestamp" },
+        "authorization_decision_ref": {
+          "description": "Pointer into the external audit trail for the verbatim decision -- never the full message body, and never a secret. A short reference id or hash, not personal data.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "if": { "properties": { "source": { "const": "david_replan" } } },
+      "then": { "properties": { "based_on_proposal_id": { "type": "string", "minLength": 1 } } },
+      "else": { "properties": { "based_on_proposal_id": { "type": "null" } } }
+    },
+
+    "human_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "requested_at", "decided_at", "decided_by", "decision_ref", "approved_for"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["not_requested", "pending", "approved", "rejected"]
+        },
+        "requested_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "decided_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "decided_by": { "anyOf": [{ "type": "null" }, { "const": "jose" }] },
+        "decision_ref": {
+          "description": "Pointer into the external audit trail for the verbatim decision. Never the message body itself.",
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "approved_for": {
+          "description": "What exactly was approved -- the specific SHA/artifact/PR this approval is scoped to. An approval whose approved_for no longer matches the current artifact is stale and must be treated as not approved by any future Chugel logic, never silently reused.",
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "minProperties": 1
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "approved" } } },
+          "then": {
+            "required": ["decided_at", "decided_by", "decision_ref", "approved_for"],
+            "properties": {
+              "decided_by": { "const": "jose" },
+              "decided_at": { "$ref": "#/definitions/timestamp" },
+              "decision_ref": { "type": "string", "minLength": 1 },
+              "approved_for": { "type": "object", "minProperties": 1 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "not_requested" } } },
+          "then": {
+            "properties": {
+              "requested_at": { "type": "null" },
+              "decided_at": { "type": "null" },
+              "decided_by": { "type": "null" },
+              "decision_ref": { "type": "null" },
+              "approved_for": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+
+    "http_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checked_at", "status_code", "body_summary"],
+      "properties": {
+        "checked_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "status_code": { "anyOf": [{ "type": "null" }, { "type": "integer" }] },
+        "body_summary": { "anyOf": [{ "type": "null" }, { "type": "string" }] }
+      }
+    },
+
+    "artifact_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "commit_sha", "patch_path", "patch_sha256", "patch_byte_size"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["commit", "patch"] },
+        "commit_sha": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/sha" }] },
+        "patch_path": { "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }] },
+        "patch_sha256": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          ]
+        },
+        "patch_byte_size": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "commit" } } },
+          "then": {
+            "required": ["commit_sha"],
+            "properties": {
+              "commit_sha": { "$ref": "#/definitions/sha" },
+              "patch_path": { "type": "null" },
+              "patch_sha256": { "type": "null" },
+              "patch_byte_size": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "patch" } } },
+          "then": {
+            "required": ["patch_path", "patch_sha256", "patch_byte_size"],
+            "properties": {
+              "commit_sha": { "type": "null" },
+              "patch_path": { "type": "string", "minLength": 1 },
+              "patch_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "patch_byte_size": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      ]
+    },
+
+    "check_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "working_directory", "exit_status", "result"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "working_directory": { "type": "string", "minLength": 1 },
+        "exit_status": { "type": "integer" },
+        "result": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "builder_evidence_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt", "invoked_at", "artifact", "changed_files", "checks",
+        "skipped_checks", "risks", "assumptions", "rollback_notes",
+        "safety_confirmation", "handoff_document_ref", "conclusion"
+      ],
+      "properties": {
+        "attempt": { "type": "integer", "enum": [0, 1] },
+        "invoked_at": { "$ref": "#/definitions/timestamp" },
+        "invocation_id": { "$ref": "#/definitions/nullable_invocation_id" },
+        "provider": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_session_id": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_conversation_id": { "$ref": "#/definitions/nullable_provider_identity" },
+        "artifact": { "$ref": "#/definitions/artifact_identity" },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "reason"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "checks": { "type": "array", "items": { "$ref": "#/definitions/check_result" } },
+        "skipped_checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["check", "reason", "residual_risk"],
+            "properties": {
+              "check": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 },
+              "residual_risk": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "risks": { "type": "array", "items": { "type": "string" } },
+        "assumptions": { "type": "array", "items": { "$ref": "#/definitions/labeled_claim" } },
+        "rollback_notes": { "type": "string" },
+        "safety_confirmation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "no_existing_work_altered", "no_main_change", "no_remote_action",
+            "no_production_access", "no_protected_path_change", "complete_diff_inspected"
+          ],
+          "properties": {
+            "no_existing_work_altered": { "type": "boolean" },
+            "no_main_change": { "type": "boolean" },
+            "no_remote_action": { "type": "boolean" },
+            "no_production_access": { "type": "boolean" },
+            "no_protected_path_change": { "type": "boolean" },
+            "complete_diff_inspected": { "type": "boolean" }
+          }
+        },
+        "handoff_document_ref": {
+          "description": "Pointer to the full human-readable handoff (per docs/zentra/HANDOFF_TEMPLATE.md), stored outside this record. The Mission Record never embeds the complete prose document.",
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "conclusion": {
+          "description": "Emilio's own summary. Always evidence, never treated as approval -- see agents/emilio/CONTRACT.md section 12.",
+          "$ref": "#/definitions/labeled_claim"
+        }
+      }
+    },
+
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "summary", "file", "line_range", "category"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+        "summary": { "type": "string", "minLength": 1 },
+        "file": { "anyOf": [{ "type": "null" }, { "type": "string" }] },
+        "line_range": { "anyOf": [{ "type": "null" }, { "type": "string" }] },
+        "category": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "reviewer_evidence_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt", "invoked_at", "artifact_identity_confirmed_at_start",
+        "artifact_identity_confirmed_before_conclusion", "rechecked_commands",
+        "findings", "verdict", "blocked_reason"
+      ],
+      "properties": {
+        "attempt": { "type": "integer", "enum": [0, 1] },
+        "invoked_at": { "$ref": "#/definitions/timestamp" },
+        "invocation_id": { "$ref": "#/definitions/nullable_invocation_id" },
+        "provider": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_session_id": { "$ref": "#/definitions/nullable_provider_identity" },
+        "provider_conversation_id": { "$ref": "#/definitions/nullable_provider_identity" },
+        "artifact_identity_confirmed_at_start": { "$ref": "#/definitions/artifact_identity" },
+        "artifact_identity_confirmed_before_conclusion": { "$ref": "#/definitions/artifact_identity" },
+        "rechecked_commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "exit_status", "result", "is_new_failure"],
+            "properties": {
+              "command": { "type": "string", "minLength": 1 },
+              "exit_status": { "type": "integer" },
+              "result": { "type": "string", "minLength": 1 },
+              "is_new_failure": { "type": "boolean" }
+            }
+          }
+        },
+        "findings": { "type": "array", "items": { "$ref": "#/definitions/finding" } },
+        "verdict": {
+          "description": "Stored as a literal enum -- never free text, never inferred from a prose summary. This is the single field Chugel reads to decide the next state.",
+          "type": "string",
+          "enum": ["PASS", "PASS_WITH_NON_BLOCKING_FINDINGS", "CHANGES_REQUIRED", "BLOCKED"]
+        },
+        "blocked_reason": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        }
+      },
+      "if": { "properties": { "verdict": { "const": "BLOCKED" } } },
+      "then": { "required": ["blocked_reason"], "properties": { "blocked_reason": { "type": "string", "minLength": 1 } } },
+      "else": { "properties": { "blocked_reason": { "type": "null" } } }
+    }
+  }
+}
