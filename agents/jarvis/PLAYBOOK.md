@@ -15,3 +15,11 @@
 Stop for unresolved material ambiguity, conflicting evidence, protected-path
 implications, invalid or corrupt state, a stale draft, missing authority, or a
 request outside the current authorized mission.
+
+## Mission 002 observation mode
+
+1. Accept only `missions` or `status <mission-id>` at the deterministic CLI.
+2. Obtain canonical data only through `jarvis.mission_query`.
+3. Expose only immutable, allow-listed projections; never raw Mission Records.
+4. Treat stable unreadable-listing codes as conditions to report, not repair.
+5. Never write, cache, execute, invoke a provider, or infer authorization.
