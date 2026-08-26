@@ -109,33 +109,6 @@ def _install_fake_claude_agent_sdk():
     return fake
 
 
-class _FakeClient:
-    """Async context-manager stand-in for ClaudeSDKClient, configurable
-    per test with a sequence of messages to yield or an exception to
-    raise."""
-
-    def __init__(self, *, messages=None, raise_exc=None, options=None):
-        self._messages = messages or []
-        self._raise_exc = raise_exc
-        self.options = options
-        self.queried_with = None
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    async def query(self, prompt):
-        self.queried_with = prompt
-
-    async def receive_response(self):
-        if self._raise_exc is not None:
-            raise self._raise_exc
-        for m in self._messages:
-            yield m
-
-
 class ClaudeAdapterTestCase(unittest.TestCase):
     def setUp(self):
         self._fake_sdk = _install_fake_claude_agent_sdk()
@@ -188,148 +161,57 @@ class ClaudeAdapterTestCase(unittest.TestCase):
 
 
 class PruebaCredencialFaltante(ClaudeAdapterTestCase):
+    """Corrective migration (stale-test disposition):
+    `test_emilio_direct_key_permanece_rechazado_antes_del_cliente` was
+    removed as `SAFE_TO_REMOVE` -- `ClaudeParentTombstoneTests.
+    test_parent_object_new_has_no_authenticated_execution_method` (in
+    tests/test_orchestrator_claude_worker_runtime.py) already proves
+    something stronger: there is no `invoke` method at all to reach an
+    SDK client through, for any role.
+    `test_sdk_construction_boundary_observa_solo_worker_canonico` and
+    `test_credencial_no_puede_entrar_en_request_output_o_error` were
+    migrated to `ClaudeWorkerRuntimeTests` (same file above), mirroring
+    the exact patterns already proven for Codex in
+    tests/test_orchestrator_codex_worker_runtime.py."""
+
     def test_construccion_productiva_directa_esta_bloqueada(self):
         with self.assertRaises(self.ca.ClaudeAdapterError):
             self.ca.ClaudeAdapter(api_key=self._api_key)
-
-    def test_emilio_direct_key_permanece_rechazado_antes_del_cliente(self):
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient") as client:
-            with self.assertRaises(self.ca.ClaudeAdapterError):
-                self._adapter().invoke(self._request(agent_role="emilio"))
-            client.assert_not_called()
 
     def test_construccion_directa_no_puede_heredar_ninguna_variable_no_aprobada(self):
         obj = object.__new__(self.ca.ClaudeAdapter)
         obj._api_key = self._api_key
         self.assertFalse(hasattr(obj, "invoke"))
 
-    def test_sdk_construction_boundary_observa_solo_worker_canonico(self):
-        observed = {}
-        evidence = {"attempt": 0, "verdict": "PASS"}
-
-        def factory(**kwargs):
-            observed.update(os.environ)
-            return _FakeClient(
-                messages=[self._fake_sdk.ResultMessage(structured_output=evidence)],
-                **kwargs,
-            )
-
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=factory):
-            self._adapter().invoke(self._request())
-        self.assertEqual(
-            observed, {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
-        )
-
-    def test_credencial_no_puede_entrar_en_request_output_o_error(self):
-        contaminated = self._request()
-        contaminated.task["secret"] = self._api_key
-        with self.assertRaises(self.ca.ClaudeAdapterError):
-            self._adapter().invoke(contaminated)
-
-        messages = [self._fake_sdk.ResultMessage(
-            structured_output={"attempt": 0, "text": self._api_key}
-        )]
-        with mock.patch.object(
-            self._fake_sdk, "ClaudeSDKClient", side_effect=lambda **kw: _FakeClient(messages=messages, **kw)
-        ):
-            result = self._adapter().invoke(self._request())
-        self.assertEqual(result.outcome, "invalid_output")
-        self.assertIsNone(result.evidence)
-
-        with mock.patch.object(
-            self._fake_sdk,
-            "ClaudeSDKClient",
-            side_effect=lambda **kw: _FakeClient(
-                raise_exc=RuntimeError(f"provider echoed {self._api_key}"), **kw
-            ),
-        ):
-            result = self._adapter().invoke(self._request())
-        self.assertNotIn(self._api_key, result.error_detail or "")
-
-
-class PruebaInvocacionExitosa(ClaudeAdapterTestCase):
-    def test_completed_con_evidencia_y_session_id(self):
-        evidence = {"attempt": 0, "conclusion": {"text": "x", "label": "FACT"}}
-        result_msg = self._fake_sdk.ResultMessage(structured_output=evidence, session_id="claude-session-abc")
-        fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self._adapter()
-            result = adapter.invoke(self._request())
-
-        self.assertEqual(result.outcome, "completed")
-        self.assertEqual(result.provider, "claude")
-        self.assertEqual(result.evidence, evidence)
-        self.assertEqual(result.provider_session_id, "claude-session-abc")
-        self.assertIsNone(result.provider_conversation_id)
-        self.assertEqual(result.invocation_id, "inv-1")
-        self.assertTrue(result.fresh_context_attested)
-
-    def test_structured_output_ausente_es_invalid_output(self):
-        result_msg = self._fake_sdk.ResultMessage(structured_output=None, session_id="s-1")
-        fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self._adapter()
-            result = adapter.invoke(self._request())
-        self.assertEqual(result.outcome, "invalid_output")
-        self.assertIsNone(result.evidence)
-
-
-class PruebaIsErrorEnResultMessage(ClaudeAdapterTestCase):
-    """Incremento #14, ciclo correctivo -- cierra el hallazgo P2 de Emma:
-    ResultMessage.is_error/.errors/.api_error_status ahora se verifican
-    explícitamente, defensa en profundidad independiente de si
-    structured_output resulta estar poblado."""
-
-    def test_is_error_true_es_failed_incluso_con_structured_output_poblado(self):
-        evidence = {"attempt": 0, "conclusion": {"text": "x", "label": "FACT"}}
-        result_msg = self._fake_sdk.ResultMessage(
-            structured_output=evidence, session_id="s-1", is_error=True, errors=["boom"], api_error_status=529
-        )
-        fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self._adapter()
-            result = adapter.invoke(self._request())
-        self.assertEqual(result.outcome, "failed")
-        self.assertIsNone(result.evidence)
-        self.assertIn("529", result.error_detail)
-
-    def test_is_error_false_procede_normalmente(self):
-        evidence = {"attempt": 0, "conclusion": {"text": "x", "label": "FACT"}}
-        result_msg = self._fake_sdk.ResultMessage(
-            structured_output=evidence, session_id="s-1", is_error=False
-        )
-        fake_client_factory = lambda **kw: _FakeClient(messages=[result_msg], **kw)
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self._adapter()
-            result = adapter.invoke(self._request())
-        self.assertEqual(result.outcome, "completed")
-
 
 class PruebaMapeoDeExcepciones(ClaudeAdapterTestCase):
-    def _invoke_with_exc(self, exc):
-        fake_client_factory = lambda **kw: _FakeClient(raise_exc=exc, **kw)
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=fake_client_factory):
-            adapter = self._adapter()
-            return adapter.invoke(self._request())
+    """Corrective migration (stale-test disposition): rewritten against
+    `_map_exception_to_outcome()` directly -- a pure, standalone function
+    imported once in setUp (`self.ca`), with no SDK/worker dependency.
+    `claude_worker_runtime.py`'s own `except Exception as exc:` clause
+    dispatches every real exception through this exact function, so
+    testing it in isolation (plus the real worker's `mode="exception"`
+    and `mode="is_error"` cases in `ClaudeWorkerRuntimeTests`, which prove
+    the dispatch is actually wired up end to end) is strictly equivalent
+    coverage to invoking a real (mocked) adapter per exception type."""
 
     def test_cli_not_found_es_unavailable(self):
-        result = self._invoke_with_exc(self._fake_sdk.CLINotFoundError("no cli"))
-        self.assertEqual(result.outcome, "unavailable")
-        self.assertIsNone(result.evidence)
+        outcome = self.ca._map_exception_to_outcome(self._fake_sdk.CLINotFoundError("no cli"))
+        self.assertEqual(outcome[0], "unavailable")
 
     def test_cli_connection_error_es_unavailable(self):
-        result = self._invoke_with_exc(self._fake_sdk.CLIConnectionError("conn refused"))
-        self.assertEqual(result.outcome, "unavailable")
+        outcome = self.ca._map_exception_to_outcome(self._fake_sdk.CLIConnectionError("conn refused"))
+        self.assertEqual(outcome[0], "unavailable")
 
     def test_cli_json_decode_error_es_invalid_output(self):
-        result = self._invoke_with_exc(self._fake_sdk.CLIJSONDecodeError("bad json"))
-        self.assertEqual(result.outcome, "invalid_output")
+        outcome = self.ca._map_exception_to_outcome(self._fake_sdk.CLIJSONDecodeError("bad json"))
+        self.assertEqual(outcome[0], "invalid_output")
 
     def test_result_error_generico_es_failed(self):
-        result = self._invoke_with_exc(
+        outcome = self.ca._map_exception_to_outcome(
             self._fake_sdk.ResultError("boom", data={"terminal_reason": "max_turns"})
         )
-        self.assertEqual(result.outcome, "failed")
+        self.assertEqual(outcome[0], "failed")
 
     def test_result_error_con_cualquier_terminal_reason_real_es_failed_nunca_timeout(self):
         """Los valores reales confirmados de terminal_reason ("completed",
@@ -338,30 +220,35 @@ class PruebaMapeoDeExcepciones(ClaudeAdapterTestCase):
         un timeout real se captura de forma independiente vía
         asyncio.wait_for()."""
         for reason in ("max_turns", "aborted_streaming", "aborted_tools", None):
-            result = self._invoke_with_exc(
+            outcome = self.ca._map_exception_to_outcome(
                 self._fake_sdk.ResultError("boom", data={"terminal_reason": reason})
             )
-            self.assertEqual(result.outcome, "failed", msg=repr(reason))
+            self.assertEqual(outcome[0], "failed", msg=repr(reason))
 
     def test_result_error_incluye_terminal_reason_y_api_error_status_en_error_detail(self):
-        result = self._invoke_with_exc(
+        outcome = self.ca._map_exception_to_outcome(
             self._fake_sdk.ResultError(
                 "boom", data={"terminal_reason": "aborted_tools", "api_error_status": 529, "subtype": "error_during_execution"}
             )
         )
-        self.assertIn("aborted_tools", result.error_detail)
-        self.assertIn("529", result.error_detail)
+        self.assertIn("aborted_tools", outcome[1])
+        self.assertIn("529", outcome[1])
 
     def test_process_error_generico_es_failed(self):
-        result = self._invoke_with_exc(self._fake_sdk.ProcessError("crashed", exit_code=1))
-        self.assertEqual(result.outcome, "failed")
+        outcome = self.ca._map_exception_to_outcome(self._fake_sdk.ProcessError("crashed", exit_code=1))
+        self.assertEqual(outcome[0], "failed")
 
     def test_excepcion_no_reconocida_nunca_propaga_es_failed(self):
-        result = self._invoke_with_exc(ValueError("totally unrelated bug"))
-        self.assertEqual(result.outcome, "failed")
-        self.assertIn("unexpected error", result.error_detail)
+        outcome = self.ca._map_exception_to_outcome(ValueError("totally unrelated bug"))
+        self.assertEqual(outcome[0], "failed")
+        self.assertIn("unexpected error", outcome[1])
 
     def test_ningun_outcome_de_provider_lanza_excepcion_fuera_de_invoke(self):
+        """The pure function itself never raises for any of this exact
+        exception set -- it always returns a (outcome, detail) tuple.
+        Structural proof (matching the original intent) that invoke()'s
+        `except Exception as exc: ... = helpers._map_exception_to_outcome(exc)`
+        clause can never itself raise while mapping any of these."""
         for exc in (
             self._fake_sdk.CLINotFoundError("x"),
             self._fake_sdk.CLIConnectionError("x"),
@@ -371,24 +258,18 @@ class PruebaMapeoDeExcepciones(ClaudeAdapterTestCase):
             RuntimeError("x"),
         ):
             try:
-                self._invoke_with_exc(exc)
+                outcome = self.ca._map_exception_to_outcome(exc)
             except Exception as e:  # pragma: no cover - fail loudly if this ever happens
-                self.fail(f"invoke() let {type(exc).__name__} propagate as {type(e).__name__}")
+                self.fail(f"_map_exception_to_outcome() let {type(exc).__name__} propagate as {type(e).__name__}")
+            self.assertIsInstance(outcome, tuple)
+            self.assertEqual(len(outcome), 2)
 
-
-class PruebaTimeoutAdapter(ClaudeAdapterTestCase):
     def test_wait_for_timeout_produce_outcome_timeout(self):
-        async def _hang(*a, **k):
-            await asyncio.sleep(10)
-
-        def _timeout(awaitable, *args, **kwargs):
-            awaitable.close()
-            raise asyncio.TimeoutError
-
-        adapter = self._adapter(timeout_seconds=0.01)
-        with mock.patch("asyncio.wait_for", side_effect=_timeout):
-            result = adapter.invoke(self._request())
-        self.assertEqual(result.outcome, "timeout")
+        """Formerly the standalone PruebaTimeoutAdapter class -- folded in
+        here because asyncio.TimeoutError is just one more branch of the
+        same pure dispatch function."""
+        outcome = self.ca._map_exception_to_outcome(asyncio.TimeoutError())
+        self.assertEqual(outcome[0], "timeout")
 
 
 class PruebaPermisosPorRol(ClaudeAdapterTestCase):
@@ -482,11 +363,18 @@ class PruebaConfinamientoClaude(ClaudeAdapterTestCase):
                     self._options(task=task)
 
     def test_worktree_invalido_se_rechaza_antes_de_construir_cliente(self):
-        task = {"repository": {"worktree_path": "relative/worktree"}}
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient") as client:
-            with self.assertRaises(self.ca.ClaudeAdapterError):
-                self._adapter().invoke(self._request(task=task))
-        client.assert_not_called()
+        """Corrective migration (stale-test disposition): rewritten
+        against `_resolve_authorized_worktree()` directly -- a pure
+        function with no SDK/worker dependency. `_build_worker_options()`
+        (the only place `claude_worker_runtime.py` ever constructs a real
+        `ClaudeAgentOptions`, strictly before any `ClaudeSDKClient` can
+        exist) calls this function first and propagates its exception
+        unchanged, so proving it raises here is structurally equivalent
+        to proving no client is ever reached -- there is no `options`
+        object for a client construction to depend on until this
+        succeeds."""
+        with self.assertRaises(self.ca.ClaudeAdapterError):
+            self.ca._resolve_authorized_worktree("relative/worktree")
 
     def test_tools_y_allowed_tools_son_exactos_por_rol(self):
         expected = {
@@ -644,34 +532,27 @@ class PruebaConfinamientoClaude(ClaudeAdapterTestCase):
 
 
 class PruebaSinReintentoAutonomoNiSesionCompartida(ClaudeAdapterTestCase):
+    """Corrective migration (stale-test disposition):
+    `test_adapter_no_retiene_estado_de_cliente_entre_llamadas` was removed
+    as `SAFE_TO_REMOVE` -- structurally guaranteed more strongly by the
+    one-shot-subprocess worker architecture itself
+    (`RealProviderWorkerBoundaryTests.test_claude_real_child_crosses_os_boundary`:
+    a fresh OS process every invocation cannot retain any attribute-level
+    state between calls at all). `test_cada_invoke_construye_un_cliente_nuevo`
+    was migrated to `ClaudeWorkerRuntimeTests.
+    test_cada_invoke_real_construye_un_worker_nuevo` (two sequential real
+    child invocations, distinct worker PIDs)."""
+
     def test_max_retries_cero_y_timeout_explicito_en_env(self):
-        adapter = self._adapter(timeout_seconds=42.0)
+        """Rewritten against `_build_worker_options()` directly -- a pure
+        function with no SDK/worker dependency."""
         with self.ca._isolated_claude_config_dir() as config_dir:
-            options = adapter._build_options(self._request(), config_dir)
+            options = self.ca._build_worker_options(
+                self._request(), config_dir, api_key=self._api_key,
+                model=self.ca.DEFAULT_MODEL, timeout_seconds=42.0,
+            )
         self.assertEqual(options.env["CLAUDE_CODE_MAX_RETRIES"], "0")
         self.assertEqual(options.env["API_TIMEOUT_MS"], "42000")
-
-    def test_cada_invoke_construye_un_cliente_nuevo(self):
-        evidence = {"attempt": 0, "conclusion": {"text": "x", "label": "FACT"}}
-        constructed = []
-
-        def factory(**kw):
-            client = _FakeClient(messages=[self._fake_sdk.ResultMessage(structured_output=evidence)], **kw)
-            constructed.append(client)
-            return client
-
-        with mock.patch.object(self._fake_sdk, "ClaudeSDKClient", side_effect=factory):
-            adapter = self._adapter()
-            adapter.invoke(self._request())
-            adapter.invoke(self._request())
-
-        self.assertEqual(len(constructed), 2)
-        self.assertIsNot(constructed[0], constructed[1])
-
-    def test_adapter_no_retiene_estado_de_cliente_entre_llamadas(self):
-        adapter = self._adapter()
-        self.assertFalse(hasattr(adapter, "_client"))
-        self.assertFalse(hasattr(adapter, "client"))
 
 
 class PruebaDependenciaDeclarada(unittest.TestCase):

@@ -58,7 +58,8 @@ class Codex:
     def __init__(self, *, config):
         self.config=config
         self.trace={"sdk_pid":os.getpid(), "worker_env":dict(os.environ),
-                    "child_env_names":sorted(config.env), "login_count":0}
+                    "child_env_names":sorted(config.env), "child_env":dict(config.env),
+                    "login_count":0}
     def __enter__(self): return self
     def __exit__(self,*args): return False
     def login_api_key(self,key): self.trace["login_count"] += 1
@@ -117,9 +118,22 @@ class ClaudeSDKClient:
         mode=json.loads(self.prompt).get("_synthetic_test_mode")
         if mode == "exception": raise CLIConnectionError("synthetic disconnected")
         if mode == "is_error":
-            yield ResultMessage(structured_output=None, session_id="fake-claude-session",
+            # Defense-in-depth case: structured_output is genuinely
+            # populated (not None) alongside is_error=True -- proves
+            # claude_worker_runtime.py's `if is_error: outcome, evidence =
+            # "failed", None` branch wins unconditionally, never because
+            # structured_output merely happened to be empty.
+            yield ResultMessage(structured_output={"attempt":0,"conclusion":{"text":"x","label":"FACT"}},
+                                session_id="fake-claude-session",
                                 is_error=True, errors=["synthetic"], api_error_status=500); return
         if mode == "empty": return
+        if mode == "structured_output_none":
+            yield ResultMessage(structured_output=None, session_id="fake-claude-session", is_error=False); return
+        if mode == "echo_secret":
+            yield ResultMessage(structured_output={"attempt":0,"text":"synthetic-worker-key-never-log"},
+                                session_id="fake-claude-session", is_error=False); return
+        if mode == "raise_secret":
+            raise RuntimeError("provider echoed synthetic-worker-key-never-log")
         yield ResultMessage(structured_output={"attempt":0,"verdict":"PASS"},
                             session_id="fake-claude-session", is_error=False)
 '''

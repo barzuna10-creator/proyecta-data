@@ -62,6 +62,23 @@ class CodexWorkerRuntimeTests(RealChildHarnessMixin, unittest.TestCase):
         self.assertEqual(set(trace["child_env_names"]),
                          {"CODEX_HOME", "HOME", "OPENAI_API_KEY", "TEMP", "TMP", "TMPDIR"})
 
+    def test_child_env_exact_values_and_api_key_never_present(self):
+        """Corrective coverage restoration (Emma P2 finding on the stale-
+        test migration): `child_env` is constructed inline in
+        `codex_worker_runtime.py`'s `__main__` block (not by a separately
+        importable pure function), so its exact *values* -- not just the
+        set of names already checked above -- can only be verified
+        through the real worker boundary. Proven here via the real
+        cross-process child."""
+        _, trace, _, _ = self._invoke()
+        child_env = trace["child_env"]
+        self.assertEqual(child_env["OPENAI_API_KEY"], "")
+        self.assertEqual(child_env["HOME"], child_env["CODEX_HOME"])
+        self.assertEqual(child_env["TMPDIR"], child_env["CODEX_HOME"])
+        self.assertEqual(child_env["TMP"], child_env["CODEX_HOME"])
+        self.assertEqual(child_env["TEMP"], child_env["CODEX_HOME"])
+        self.assertNotIn(self.KEY, child_env.values())
+
     def test_parent_environment_mutation_cannot_reach_sdk(self):
         with mock.patch.dict(os.environ, {"HOSTILE_PARENT_SECRET": "x"}, clear=False):
             _, trace, _, _ = self._invoke()
