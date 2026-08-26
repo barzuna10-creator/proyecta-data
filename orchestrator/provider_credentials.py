@@ -28,6 +28,9 @@ _BOOTSTRAP_NAMES = frozenset({_BOOTSTRAP_CODEX, _BOOTSTRAP_CLAUDE})
 # own environment is therefore the only supported way to make their inherited
 # base environment an allow-list rather than the user's normal shell.
 _TRUSTED_PATH_COMPONENTS = ("/usr/bin", "/bin")
+_APPROVED_CANONICAL_SYSTEM_DIRECTORIES = frozenset(
+    {Path("/usr/bin"), Path("/bin")}
+)
 _TRUSTED_WORKER_ENV = {
     "PATH": ":".join(_TRUSTED_PATH_COMPONENTS),
     "LANG": "C",
@@ -131,28 +134,121 @@ def validate_invocation_temp_directory(raw_path: str | Path) -> Path:
     return resolved
 
 
-def _validate_trusted_runtime_paths() -> None:
-    for raw_directory in _TRUSTED_PATH_COMPONENTS:
+def _validate_trusted_runtime_paths(
+    *,
+    path_components: tuple[str, ...] = _TRUSTED_PATH_COMPONENTS,
+    required_binaries: tuple[str, ...] = _REQUIRED_RUNTIME_BINARIES,
+    approved_directories: frozenset[Path] = _APPROVED_CANONICAL_SYSTEM_DIRECTORIES,
+    trusted_uid: int = 0,
+) -> None:
+    """Validate fixed runtime paths, including narrow merged-/usr mappings.
+
+    The optional arguments exist only so tests can model system layouts in a
+    synthetic repository-independent filesystem. Production callers always use
+    the root-owned, explicitly approved constants above.
+
+    Directory aliases and executable aliases may each contain at most one
+    direct symlink. This intentionally supports ``/bin -> /usr/bin`` followed
+    by ``/usr/bin/sh -> dash`` without accepting a generic chain that can leave
+    trusted system space and later return to it.
+    """
+    normalized_approved = frozenset(
+        Path(os.path.abspath(directory)) for directory in approved_directories
+    )
+    canonical_directories: dict[Path, Path] = {}
+    for raw_directory in path_components:
         directory = Path(raw_directory)
         try:
-            resolved = directory.resolve(strict=True)
-            mode = resolved.stat().st_mode
+            lexical_metadata = directory.lstat()
+            parent_metadata = directory.parent.lstat()
         except OSError as exc:
             raise ProviderCredentialError("trusted runtime PATH is unavailable") from exc
         if (
-            resolved != directory
-            or not resolved.is_dir()
-            or mode & (stat.S_IWGRP | stat.S_IWOTH)
+            not directory.is_absolute()
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != trusted_uid
+            or parent_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
         ):
             raise ProviderCredentialError("trusted runtime PATH failed canonical safety validation")
-    for raw_binary in _REQUIRED_RUNTIME_BINARIES:
-        binary = Path(raw_binary)
+
+        if stat.S_ISLNK(lexical_metadata.st_mode):
+            if lexical_metadata.st_uid != trusted_uid:
+                raise ProviderCredentialError(
+                    "trusted runtime PATH failed canonical safety validation"
+                )
+            canonical = _direct_symlink_target(directory)
+            if canonical not in canonical_directories.values():
+                raise ProviderCredentialError(
+                    "trusted runtime PATH alias target was not independently validated"
+                )
+        else:
+            canonical = directory
+
         try:
-            resolved = binary.resolve(strict=True)
+            canonical_metadata = canonical.lstat()
+        except OSError as exc:
+            raise ProviderCredentialError("trusted runtime PATH is unavailable") from exc
+        if (
+            canonical not in normalized_approved
+            or not stat.S_ISDIR(canonical_metadata.st_mode)
+            or canonical_metadata.st_uid != trusted_uid
+            or canonical_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not os.access(canonical, os.X_OK)
+        ):
+            raise ProviderCredentialError("trusted runtime PATH failed canonical safety validation")
+        canonical_directories[directory] = canonical
+
+    resolved_directories = frozenset(canonical_directories.values())
+    for raw_binary in required_binaries:
+        binary = Path(raw_binary)
+        canonical_parent = canonical_directories.get(binary.parent)
+        if not binary.is_absolute() or canonical_parent is None:
+            raise ProviderCredentialError("required trusted runtime binary failed validation")
+        canonical_source = canonical_parent / binary.name
+        try:
+            lexical_metadata = canonical_source.lstat()
         except OSError as exc:
             raise ProviderCredentialError("required trusted runtime binary is unavailable") from exc
-        if resolved != binary or not resolved.is_file() or not os.access(resolved, os.X_OK):
+
+        if stat.S_ISLNK(lexical_metadata.st_mode):
+            if lexical_metadata.st_uid != trusted_uid:
+                raise ProviderCredentialError(
+                    "required trusted runtime binary failed validation"
+                )
+            resolved = _direct_symlink_target(canonical_source)
+        else:
+            resolved = canonical_source
+
+        try:
+            metadata = resolved.lstat()
+        except OSError as exc:
+            raise ProviderCredentialError("required trusted runtime binary is unavailable") from exc
+        if (
+            resolved.parent not in resolved_directories
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != trusted_uid
+            or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not os.access(resolved, os.X_OK)
+        ):
             raise ProviderCredentialError("required trusted runtime binary failed validation")
+
+
+def _direct_symlink_target(source: Path) -> Path:
+    """Return one lexical symlink target without following another symlink."""
+    try:
+        raw_value = os.readlink(source)
+    except OSError as exc:
+        raise ProviderCredentialError("trusted runtime symlink is unavailable") from exc
+    absolute = raw_value.startswith(os.sep)
+    components = raw_value.split(os.sep)
+    if absolute:
+        components = components[1:]
+    if not components or any(component in {"", ".", ".."} for component in components):
+        raise ProviderCredentialError("trusted runtime symlink target is not direct")
+    raw_target = Path(raw_value)
+    if not raw_target.is_absolute():
+        raw_target = source.parent / raw_target
+    return Path(os.path.abspath(raw_target))
 
 
 class ProviderCredentials:

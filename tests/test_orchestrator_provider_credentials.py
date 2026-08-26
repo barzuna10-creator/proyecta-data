@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from orchestrator.provider_credentials import (
+    _validate_trusted_runtime_paths,
     ProviderCredentialError,
     ProviderCredentials,
     build_provider_adapters,
@@ -178,6 +179,281 @@ class ProviderCredentialBootstrapTests(unittest.TestCase):
         finally:
             link.unlink(missing_ok=True)
             shutil.rmtree(owned, ignore_errors=True)
+
+
+class TrustedRuntimePathTests(unittest.TestCase):
+    def _validate(self, path_components, required_binaries):
+        approved = set()
+        for path in path_components:
+            if path.is_symlink():
+                target = Path(os.readlink(path))
+                if not target.is_absolute():
+                    target = path.parent / target
+                approved.add(Path(os.path.abspath(target)))
+            else:
+                approved.add(path)
+        _validate_trusted_runtime_paths(
+            path_components=tuple(str(path) for path in path_components),
+            required_binaries=tuple(str(path) for path in required_binaries),
+            approved_directories=frozenset(approved),
+            trusted_uid=os.geteuid(),
+        )
+
+    @staticmethod
+    def _executable(path: Path) -> None:
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    def test_acepta_layout_canonico_tipo_macos(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            usr_bin = root / "usr-bin"
+            bin_directory = root / "bin"
+            usr_bin.mkdir()
+            bin_directory.mkdir()
+            shell = bin_directory / "sh"
+            git = usr_bin / "git"
+            self._executable(shell)
+            self._executable(git)
+
+            self._validate((usr_bin, bin_directory), (shell, git))
+
+    def test_acepta_merged_usr_y_shell_symlink_a_dash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            usr_bin = root / "usr-bin"
+            usr_bin.mkdir()
+            merged_bin = root / "bin"
+            merged_bin.symlink_to(usr_bin, target_is_directory=True)
+            dash = usr_bin / "dash"
+            git = usr_bin / "git"
+            self._executable(dash)
+            self._executable(git)
+            (usr_bin / "sh").symlink_to(dash)
+
+            self._validate((usr_bin, merged_bin), (merged_bin / "sh", git))
+
+    def test_acepta_shell_symlink_directo_a_dash_en_directorio_canonico(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            trusted_bin = Path(temporary) / "trusted-bin"
+            trusted_bin.mkdir()
+            dash = trusted_bin / "dash"
+            self._executable(dash)
+            shell = trusted_bin / "sh"
+            shell.symlink_to("dash")
+
+            self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_symlink_a_destino_no_aprobado(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trusted_bin = root / "trusted-bin"
+            outside = root / "outside"
+            trusted_bin.mkdir()
+            outside.mkdir()
+            malicious = outside / "malicious-shell"
+            self._executable(malicious)
+            shell = trusted_bin / "sh"
+            shell.symlink_to(malicious)
+
+            with self.assertRaises(ProviderCredentialError):
+                self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_target_group_o_world_writable(self):
+        for mode in (0o775, 0o757):
+            with (
+                self.subTest(mode=oct(mode)),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                trusted_bin = root / "trusted-bin"
+                trusted_bin.mkdir()
+                shell = trusted_bin / "sh"
+                self._executable(shell)
+                shell.chmod(mode)
+
+                with self.assertRaises(ProviderCredentialError):
+                    self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_directorio_confiable_group_o_world_writable(self):
+        for mode in (0o775, 0o757):
+            with (
+                self.subTest(mode=oct(mode)),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                trusted_bin = Path(temporary) / "trusted-bin"
+                trusted_bin.mkdir()
+                shell = trusted_bin / "sh"
+                self._executable(shell)
+                trusted_bin.chmod(mode)
+
+                with self.assertRaises(ProviderCredentialError):
+                    self._validate((trusted_bin,), (shell,))
+
+    def test_reproduce_bypass_rechaza_directorio_intermedio_writable(self):
+        for mode in (0o775, 0o757):
+            with (
+                self.subTest(mode=oct(mode)),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                trusted_bin = root / "trusted-bin"
+                transit = root / "writable-transit"
+                trusted_bin.mkdir()
+                transit.mkdir()
+                transit.chmod(mode)
+                dash = trusted_bin / "dash"
+                self._executable(dash)
+                (transit / "hop").symlink_to(dash)
+                shell = trusted_bin / "sh"
+                shell.symlink_to(transit / "hop")
+
+                with self.assertRaises(ProviderCredentialError):
+                    self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_componente_intermedio_no_confiable_por_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical_bin = root / "canonical-bin"
+            canonical_bin.mkdir()
+            shell = canonical_bin / "sh"
+            self._executable(shell)
+            alias_bin = root / "bin"
+            alias_bin.symlink_to(canonical_bin, target_is_directory=True)
+            original_lstat = Path.lstat
+
+            def lstat_with_untrusted_alias(path):
+                metadata = original_lstat(path)
+                if path == alias_bin:
+                    return types.SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_uid=os.geteuid() + 1,
+                    )
+                return metadata
+
+            with mock.patch.object(Path, "lstat", lstat_with_untrusted_alias):
+                with self.assertRaises(ProviderCredentialError):
+                    self._validate((canonical_bin, alias_bin), (alias_bin / "sh",))
+
+    def test_rechaza_target_final_no_confiable_por_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            trusted_bin = Path(temporary) / "trusted-bin"
+            trusted_bin.mkdir()
+            dash = trusted_bin / "dash"
+            self._executable(dash)
+            shell = trusted_bin / "sh"
+            shell.symlink_to(dash)
+            original_lstat = Path.lstat
+
+            def lstat_with_untrusted_target(path):
+                metadata = original_lstat(path)
+                if path == dash:
+                    return types.SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_uid=os.geteuid() + 1,
+                    )
+                return metadata
+
+            with mock.patch.object(Path, "lstat", lstat_with_untrusted_target):
+                with self.assertRaises(ProviderCredentialError):
+                    self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_tipo_incorrecto_y_binario_no_ejecutable(self):
+        for kind in ("directory", "not-executable"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                trusted_bin = Path(temporary) / "trusted-bin"
+                trusted_bin.mkdir()
+                shell = trusted_bin / "sh"
+                if kind == "directory":
+                    shell.mkdir()
+                else:
+                    shell.write_text("not executable", encoding="utf-8")
+                    shell.chmod(0o644)
+
+                with self.assertRaises(ProviderCredentialError):
+                    self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_multihop_que_sale_y_regresa_al_espacio_confiable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trusted_bin = root / "trusted-bin"
+            outside = root / "outside"
+            trusted_bin.mkdir()
+            outside.mkdir()
+            dash = trusted_bin / "dash"
+            self._executable(dash)
+            (outside / "return-to-trusted").symlink_to(dash)
+            shell = trusted_bin / "sh"
+            shell.symlink_to(outside / "return-to-trusted")
+
+            with self.assertRaises(ProviderCredentialError):
+                self._validate((trusted_bin,), (shell,))
+
+    def test_reproduce_escape_alias_dotdot_rechazado_antes_de_normalizar(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trusted_bin = root / "trusted"
+            nested = root / "outside" / "nested"
+            trusted_bin.mkdir()
+            nested.mkdir(parents=True)
+            dash = trusted_bin / "dash"
+            self._executable(dash)
+            outside_dash = nested.parent / "dash"
+            self._executable(outside_dash)
+            (trusted_bin / "alias").symlink_to(nested, target_is_directory=True)
+            shell = trusted_bin / "sh"
+            os.symlink("alias/../dash", shell)
+            self.assertEqual(shell.resolve(strict=True), outside_dash.resolve(strict=True))
+
+            with self.assertRaises(ProviderCredentialError):
+                self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_componentes_dot_dotdot_antes_de_normalizar(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            trusted_bin = Path(temporary) / "trusted-bin"
+            trusted_bin.mkdir()
+            dash = trusted_bin / "dash"
+            self._executable(dash)
+            hostile_targets = (
+                "../dash",
+                "./dash",
+                "foo/../dash",
+                f"{trusted_bin}/foo/../dash",
+            )
+            for index, raw_target in enumerate(hostile_targets):
+                with self.subTest(raw_target=raw_target):
+                    shell = trusted_bin / f"sh-{index}"
+                    os.symlink(raw_target, shell)
+                    with self.assertRaises(ProviderCredentialError):
+                        self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_separadores_repetidos_o_finales(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            trusted_bin = Path(temporary) / "trusted-bin"
+            trusted_bin.mkdir()
+            dash = trusted_bin / "dash"
+            self._executable(dash)
+            for index, raw_target in enumerate(("dash/", "foo//dash", f"{trusted_bin}//dash")):
+                with self.subTest(raw_target=raw_target):
+                    shell = trusted_bin / f"sh-{index}"
+                    os.symlink(raw_target, shell)
+                    with self.assertRaises(ProviderCredentialError):
+                        self._validate((trusted_bin,), (shell,))
+
+    def test_rechaza_symlink_desde_directorio_no_confiable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trusted_bin = root / "trusted-bin"
+            untrusted_bin = root / "untrusted-bin"
+            trusted_bin.mkdir()
+            untrusted_bin.mkdir()
+            target = trusted_bin / "shell"
+            self._executable(target)
+            link = untrusted_bin / "sh"
+            link.symlink_to(target)
+
+            with self.assertRaises(ProviderCredentialError):
+                self._validate((trusted_bin,), (link,))
 
 
 if __name__ == "__main__":
