@@ -16,10 +16,17 @@ from jarvis.storage import (
     StoragePathUnsafe,
     StoredArtifactCorrupt,
 )
+from jarvis import _safe_io
 from tests.test_jarvis_drafts import DRAFT_ID, valid_draft
 
 
 class JarvisStorageTests(unittest.TestCase):
+    def test_storage_uses_shared_hardened_primitives(self):
+        import inspect
+        import jarvis.storage
+        self.assertIn("from jarvis._safe_io import", inspect.getsource(jarvis.storage))
+        self.assertIsNotNone(_safe_io.atomic_create)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name) / "jarvis"

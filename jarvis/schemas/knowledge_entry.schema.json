@@ -1,0 +1,10 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,
+  "required":["schema_version","knowledge_id","revision","created_at","status","label","claim","applicability","repository_binding","research_evidence","based_on","contradicts","supersedes","candidate_id","candidate_revision","candidate_content_digest"],
+  "properties":{
+    "schema_version":{"const":"1.0"},"knowledge_id":{"type":"string"},"revision":{"type":"integer","minimum":1},"created_at":{"type":"string"},
+    "status":{"enum":["active","stale","conflicted","superseded","retired"]},"label":{"enum":["FACT","INTENT"]},"claim":{"type":"string","minLength":1,"maxLength":4000},
+    "applicability":{"type":"object"},"repository_binding":{"type":["object","null"]},"research_evidence":{"type":"array"},"based_on":{"type":"array"},"contradicts":{"type":"array"},"supersedes":{"type":"array"},
+    "candidate_id":{"type":"string"},"candidate_revision":{"type":"integer","minimum":1},"candidate_content_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"}
+  }
+}

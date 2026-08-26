@@ -13,6 +13,7 @@ from jarvis.status import (
     classify_mission_state,
     project_mission_status,
 )
+from jarvis.learning_projection import MissionLearningProjection, project_mission_learning
 
 
 class MissionQueryError(Exception):
@@ -57,3 +58,17 @@ def get_mission_status(mission_id: str) -> MissionStatus:
         raise MissionQueryError("MISSION_STATE_UNKNOWN") from exc
     except ValueError as exc:
         raise MissionQueryError("INVALID_MISSION_ID") from exc
+
+
+def get_mission_learning(mission_id: str) -> MissionLearningProjection:
+    """Extend the existing read boundary with one detached learning projection."""
+    try:
+        return project_mission_learning(chugel.get_mission(mission_id))
+    except chugel.MissionNotFound as exc:
+        raise MissionQueryError("MISSION_NOT_FOUND") from exc
+    except (chugel.MissionRecordCorrupt, chugel.MissionRecordInvalid) as exc:
+        raise MissionQueryError("MISSION_RECORD_INVALID") from exc
+    except chugel.MissionRecordPathUnsafe as exc:
+        raise MissionQueryError("MISSION_PATH_UNSAFE") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MissionQueryError("MISSION_LEARNING_PROJECTION_INVALID") from exc
