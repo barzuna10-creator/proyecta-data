@@ -39,6 +39,7 @@ import datetime
 import json
 import os
 import re
+import stat
 import tempfile
 import uuid
 from pathlib import Path
@@ -536,6 +537,64 @@ def get_mission(mission_id: str) -> dict:
     """Read-only. Raises MissionNotFound / MissionRecordCorrupt /
     MissionRecordInvalid / MissionRecordPathUnsafe as appropriate."""
     return _read_mission_record(mission_id)
+
+
+def list_missions() -> list[dict]:
+    """Return a bounded, read-only index of canonical Mission Record files.
+
+    Candidate names are exactly ``<schema-valid mission_id>.json``. Directories
+    and non-regular entries are ignored; a canonical symlink or unreadable,
+    corrupt, invalid, or identity-mismatched record is represented only by a
+    stable non-sensitive error code. No record payload is returned.
+    """
+    if not _MISSIONS_DIR.exists() or _MISSIONS_DIR.is_symlink():
+        return []
+
+    listings: list[dict] = []
+    try:
+        entries = sorted(_MISSIONS_DIR.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return []
+
+    for path in entries:
+        if path.suffix != ".json" or not _MISSION_ID_PATTERN.fullmatch(path.stem):
+            continue
+        mission_id = path.stem
+        try:
+            mode = path.lstat().st_mode
+        except OSError:
+            continue
+        if stat.S_ISLNK(mode):
+            listings.append({
+                "mission_id": mission_id, "readable": False,
+                "state": None, "updated_at": None, "error_code": "MISSION_PATH_UNSAFE",
+            })
+            continue
+        if not stat.S_ISREG(mode):
+            continue
+
+        try:
+            record = _read_mission_record(mission_id)
+            if record["mission_id"] != mission_id:
+                raise MissionRecordInvalid("mission identity does not match filename", ())
+        except MissionRecordCorrupt:
+            code = "MISSION_RECORD_CORRUPT"
+        except MissionRecordInvalid:
+            code = "MISSION_RECORD_INVALID"
+        except (MissionRecordPathUnsafe, MissionNotFound, OSError):
+            code = "MISSION_PATH_UNSAFE"
+        else:
+            listings.append({
+                "mission_id": mission_id, "readable": True,
+                "state": record["state"], "updated_at": record["updated_at"],
+                "error_code": None,
+            })
+            continue
+        listings.append({
+            "mission_id": mission_id, "readable": False,
+            "state": None, "updated_at": None, "error_code": code,
+        })
+    return listings
 
 
 def record_repository_state(mission_id: str, repository: dict) -> dict:

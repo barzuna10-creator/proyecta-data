@@ -206,6 +206,68 @@ class ChugelTestCase(unittest.TestCase):
         self._tmpdir.cleanup()
 
 
+class PruebaListadoSoloLectura(ChugelTestCase):
+    def test_lista_solo_nombres_canonicos_y_no_escribe(self):
+        first = _create_intake_mission("uno")
+        second = _create_intake_mission("dos")
+        before = {p.name: p.read_bytes() for p in chugel._MISSIONS_DIR.iterdir()}
+        (chugel._MISSIONS_DIR / "notes.txt").write_text("ignore", encoding="utf-8")
+        (chugel._MISSIONS_DIR / "pending.tmp").write_text("ignore", encoding="utf-8")
+        (chugel._MISSIONS_DIR / "not-a-uuid.json").write_text("{}", encoding="utf-8")
+        (chugel._MISSIONS_DIR / f"{'a' * 8}-aaaa-aaaa-aaaa-{'a' * 12}.json").mkdir()
+
+        listed = chugel.list_missions()
+
+        self.assertEqual({row["mission_id"] for row in listed}, {
+            first["mission_id"], second["mission_id"]
+        })
+        self.assertTrue(all(set(row) == {
+            "mission_id", "readable", "state", "updated_at", "error_code"
+        } for row in listed))
+        after = {p.name: p.read_bytes() for p in chugel._MISSIONS_DIR.iterdir() if p.name in before}
+        self.assertEqual(before, after)
+
+    def test_candidato_corrupto_no_oculta_los_demas(self):
+        valid = _create_intake_mission("valid")
+        corrupt_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        (chugel._MISSIONS_DIR / f"{corrupt_id}.json").write_text("{", encoding="utf-8")
+        rows = {row["mission_id"]: row for row in chugel.list_missions()}
+        self.assertTrue(rows[valid["mission_id"]]["readable"])
+        self.assertEqual(rows[corrupt_id], {
+            "mission_id": corrupt_id, "readable": False, "state": None,
+            "updated_at": None, "error_code": "MISSION_RECORD_CORRUPT",
+        })
+
+    def test_candidato_json_invalido_usa_codigo_estable_sin_payload(self):
+        chugel._MISSIONS_DIR.mkdir()
+        invalid_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        (chugel._MISSIONS_DIR / f"{invalid_id}.json").write_text(
+            json.dumps({"mission_id": invalid_id, "intent": {"raw_text": "secret"}}),
+            encoding="utf-8",
+        )
+        self.assertEqual(chugel.list_missions(), [{
+            "mission_id": invalid_id, "readable": False, "state": None,
+            "updated_at": None, "error_code": "MISSION_RECORD_INVALID",
+        }])
+
+    def test_symlink_canonico_es_error_acotado_y_directorio_no_aparece(self):
+        chugel._MISSIONS_DIR.mkdir()
+        target = Path(self._tmpdir.name) / "secret"
+        target.write_text("secret-value", encoding="utf-8")
+        linked_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        directory_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        (chugel._MISSIONS_DIR / f"{linked_id}.json").symlink_to(target)
+        (chugel._MISSIONS_DIR / f"{directory_id}.json").mkdir()
+        self.assertEqual(chugel.list_missions(), [{
+            "mission_id": linked_id, "readable": False, "state": None,
+            "updated_at": None, "error_code": "MISSION_PATH_UNSAFE",
+        }])
+
+    def test_directorio_ausente_no_se_crea(self):
+        self.assertEqual(chugel.list_missions(), [])
+        self.assertFalse(chugel._MISSIONS_DIR.exists())
+
+
 # --- ciclo de vida básico -----------------------------------------------
 
 class PruebaCicloDeVidaBasico(ChugelTestCase):

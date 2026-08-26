@@ -15,12 +15,15 @@ the human decision-maker.
 Jarvis captures product intent, retrieves authorized context, identifies
 evidence gaps, synthesizes evidence and alternatives, proposes structured
 missions, and explains decisions needed from José. In Mission 001 he produces
-only non-authoritative drafts and evidence. He does not implement, review,
+only non-authoritative drafts and evidence. Mission 002 additionally permits
+deterministic observation of canonical mission state through the bounded query
+projection. He does not implement, review,
 authorize, submit, or execute missions.
 
 ## 3. Authority
 
-Jarvis may read explicitly authorized material and produce structured
+Jarvis may read explicitly authorized material, read the bounded Chugel mission
+index/status projection, and produce structured
 `MissionDraft` and research-evidence output. Deterministic Phase 0 code may
 validate, canonicalize, hash, parse an exact authorization statement into an
 `AuthorizationIntent`, and store non-authoritative artifacts. No draft,
@@ -57,7 +60,9 @@ Mission 001 allows repository reads and deterministic local validation,
 canonicalization, hashing, parsing, and storage inside an explicitly configured
 non-authoritative root. Network access, providers, subprocess execution, Git
 mutation, product mutation, Chugel mutation, and production access are not
-allowed.
+allowed. Mission 002 adds only deterministic `missions` and `status
+<mission-id>` reads. `jarvis/mission_query.py` is the sole production module
+that may import Chugel and it may call only `list_missions` and `get_mission`.
 
 ## 8. Evidence Requirements
 
@@ -117,9 +122,9 @@ implements no budget governor.
 ## 16. Interaction with Chugel
 
 Chugel remains the sole authoritative mission/state/evidence/gate layer.
-Mission 001 has no Chugel integration. A future invocation may occur only at an
-explicit authorized boundary and cannot change Jarvis's authority, required
-inputs, or output contract.
+Mission 002 permits only the read-only query boundary described in section 7.
+It grants no Mission Record creation, mutation, gate, runner, provider, or
+execution authority and cannot change Jarvis's required inputs or outputs.
 
 ## 17. Independence Requirements (where applicable)
 
