@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -44,6 +45,18 @@ def _canonical(value: Any) -> bytes:
 def promotion_id(candidate_id: str, revision: int, content_digest: str) -> str:
     identity = f"jarvis-knowledge-promotion-v1\0{candidate_id}\0{revision}\0{content_digest}"
     return hashlib.sha256(identity.encode("ascii")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeEntryListing:
+    """Result of a whole-store scan. ``omitted_count`` covers exactly the
+    knowledge IDs that could not be safely attributed or resolved --
+    malformed/symlinked/unsafe/corrupt bundles, or a revision gap/fork
+    within one ID's own chain. It never carries any path, exception
+    message, or other corruption detail."""
+
+    entries: tuple[KnowledgeEntry, ...]
+    omitted_count: int
 
 
 class FileKnowledgeStore:
@@ -208,6 +221,67 @@ class FileKnowledgeStore:
         values = self._all_committed_entries(knowledge_id)
         if not values: raise KnowledgeNotFound(knowledge_id)
         return values[-1]
+
+    def list_latest_entries(self) -> KnowledgeEntryListing:
+        """Enumerate the latest committed revision of every distinct
+        knowledge_id in the store.
+
+        Deliberately does not call ``_all_committed_entries()`` /
+        ``get_latest_entry()``: those re-scan the entire ``promotions/``
+        directory on every call and raise on the first symlinked bundle
+        directory found *anywhere* in the store, not only bundles
+        belonging to the requested ID -- reusing them in a per-ID loop
+        would let one ID's corrupted bundle abort resolution of every
+        other ID. Instead this performs its own two-pass, per-ID-isolated
+        scan: pass 1 discovers and groups bundles by target_knowledge_id
+        (any failure here is scoped to exactly the one bundle examined);
+        pass 2 resolves each ID's latest entry using only that ID's own
+        bundles from pass 1, never touching the shared directory again.
+        No mutable index or cache is created; both passes operate on a
+        fresh scan on every call."""
+        try:
+            candidates = sorted(self.promotions.iterdir(), key=lambda path: path.name)
+        except OSError:
+            return KnowledgeEntryListing((), 0)
+
+        grouped: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+        omitted = 0
+        for bundle in candidates:
+            if bundle.is_symlink():
+                omitted += 1
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}", bundle.name) or not bundle.is_dir():
+                continue
+            if not (bundle / "COMMITTED").exists():
+                continue
+            try:
+                manifest = read_json(bundle / "manifest.json", not_found_error=KnowledgeNotFound, corrupt_error=KnowledgeCorrupt)
+                target_id = manifest["target_knowledge_id"]
+                self._id(target_id)
+            except (KnowledgeNotFound, KnowledgeCorrupt, UnsafePath, ArtifactCorrupt, KeyError, ValueError):
+                omitted += 1
+                continue
+            grouped.setdefault(target_id, []).append((bundle, manifest))
+
+        entries: list[KnowledgeEntry] = []
+        for knowledge_id in sorted(grouped):
+            try:
+                resolved: list[KnowledgeEntry] = []
+                for bundle, manifest in grouped[knowledge_id]:
+                    entry_value = read_json(bundle / "knowledge-entry.json", not_found_error=KnowledgeNotFound, corrupt_error=KnowledgeCorrupt)
+                    entry = knowledge_entry_from_dict(entry_value)
+                    self._validate_bundle_files(bundle, manifest)
+                    resolved.append(entry)
+                resolved.sort(key=lambda item: item.revision)
+                for index, item in enumerate(resolved, 1):
+                    if item.revision != index:
+                        raise KnowledgeCorrupt("knowledge revision gap or fork")
+            except (KnowledgeNotFound, KnowledgeCorrupt, KnowledgePathUnsafe, UnsafePath, ArtifactCorrupt, KeyError, ValueError):
+                omitted += 1
+                continue
+            if resolved:
+                entries.append(resolved[-1])
+        return KnowledgeEntryListing(tuple(entries), omitted)
 
     def _validate_transition_evidence(self, envelope: KnowledgeCandidateEnvelope, target: KnowledgeEntry | None) -> None:
         content = envelope.content

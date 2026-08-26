@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import unittest
 from unittest import mock
 import tempfile
@@ -70,6 +71,52 @@ class JarvisCliTests(unittest.TestCase):
             error = io.StringIO()
             self.assertEqual(main(["knowledge", "show", CID, "--store-root", temporary], output=io.StringIO(), error=error), 2)
             self.assertEqual(error.getvalue(), "ERROR KNOWLEDGE_NOT_FOUND\n")
+
+    def test_knowledge_search_is_deterministic_read_only_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "knowledge"; store = FileKnowledgeStore(root)
+            repo = Path(temporary) / "scratch-repo"; repo.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(repo), check=True)
+            envelope = build_candidate_envelope(candidate()); store.save_candidate(envelope)
+            store.transition_candidate(CID, "awaiting_emma_review"); store.transition_candidate(CID, "awaiting_human_authorization")
+            review = EmmaKnowledgeReview(CID, 1, envelope.content_digest, "PASS", "2026-08-26T00:00:01Z")
+            auth = parse_knowledge_authorization(render_knowledge_authorization(envelope)); store.save_review(review); store.save_authorization(auth); store.promote(CID, review, auth)
+            before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            output = io.StringIO()
+            code = main(["knowledge", "search", "--store-root", str(root), "--repository-root", str(repo)], output=output)
+            self.assertEqual(code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["results"][0]["entry"]["knowledge_id"], CID)
+            self.assertEqual(payload["omitted_count"], 0)
+            self.assertEqual(payload["eligible_beyond_top_k"], 0)
+            after = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            self.assertEqual(before, after)
+
+    def test_knowledge_search_invalid_top_k_is_a_clean_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "knowledge"; FileKnowledgeStore(root)
+            repo = Path(temporary) / "scratch-repo"; repo.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(repo), check=True)
+            error = io.StringIO()
+            code = main(["knowledge", "search", "--store-root", str(root), "--repository-root", str(repo), "--top-k", "0"], output=io.StringIO(), error=error)
+            self.assertEqual(code, 2)
+            self.assertEqual(error.getvalue(), "ERROR KNOWLEDGE_SEARCH_TOP_K_INVALID\n")
+
+    def test_knowledge_search_missing_repository_root_is_a_clean_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "knowledge"; FileKnowledgeStore(root)
+            error = io.StringIO()
+            code = main(["knowledge", "search", "--store-root", str(root), "--repository-root", str(Path(temporary) / "not-a-repo")], output=io.StringIO(), error=error)
+            self.assertEqual(code, 2)
+            self.assertEqual(error.getvalue(), "ERROR FRESHNESS_REPOSITORY_UNSAFE\n")
+
+    def test_no_knowledge_list_command_exists(self):
+        with self.assertRaises(SystemExit):
+            main(["knowledge", "list"], output=io.StringIO())
+
+    def test_knowledge_search_requires_exact_flags_no_free_text(self):
+        with self.assertRaises(SystemExit):
+            main(["knowledge", "search", "find me stuff about auth"], output=io.StringIO())
 
 
 class JarvisCliFailureIntegrationTests(ChugelTestCase):

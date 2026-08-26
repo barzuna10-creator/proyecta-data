@@ -58,11 +58,14 @@ mission submission, or execution permission.
 
 Mission 001 allows repository reads and deterministic local validation,
 canonicalization, hashing, parsing, and storage inside an explicitly configured
-non-authoritative root. Network access, providers, subprocess execution, Git
-mutation, product mutation, Chugel mutation, and production access are not
-allowed. Mission 002 adds only deterministic `missions` and `status
-<mission-id>` reads. `jarvis/mission_query.py` is the sole production module
-that may import Chugel and it may call only `list_missions` and `get_mission`.
+non-authoritative root. Network access, providers, Git mutation, product
+mutation, Chugel mutation, and production access are not allowed. Mission 002
+adds only deterministic `missions` and `status <mission-id>` reads.
+`jarvis/mission_query.py` is the sole production module that may import
+Chugel and it may call only `list_missions` and `get_mission`. Mission 003B
+grants exactly one narrow, deliberate exception to the subprocess
+prohibition, described in section 21; no other module, and no future work
+without a separate review, may invoke a subprocess.
 
 ## 8. Evidence Requirements
 
@@ -153,3 +156,18 @@ Emma PASS and exact José authorization. Knowledge modules never import Chugel;
 Mission 003A only extends Mission 002's existing read seam with a frozen
 learning projection. Knowledge cannot enter prompts, providers, reasoning, or
 execution in this mission.
+
+## 21. Mission 003B Trusted Retrieval and Freshness
+
+Jarvis may deterministically search and rank the trusted FACT/INTENT
+knowledge Mission 003A stores, and may confirm live repository freshness for
+entries that carry a repository binding. `jarvis/repository_freshness.py` is
+the sole Jarvis production module permitted to invoke a subprocess, and it
+may run only one fixed, read-only `git rev-parse` command against an
+explicitly configured, non-request-controlled repository root — no fetch,
+checkout, or Git mutation of any kind, no network access, and no other
+executable. This exception does not extend to any other module. Search
+results are deterministic, bounded, and carry no free-text interpretation,
+recommendation, or path into a prompt, provider, or reasoning surface;
+knowledge remains excluded from prompts, providers, reasoning, and execution
+exactly as in Mission 003A.
