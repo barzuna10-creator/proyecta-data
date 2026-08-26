@@ -15,17 +15,41 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "orchestrator.adapters",
 )
 ALLOWED_CHUGEL_CALLS = {"list_missions", "get_mission"}
+# Mission 004: two more narrow, disclosed Chugel seams, distinct from
+# mission_query.py's read-only one. Each is checked as a SUBSET (a module
+# need not use every call it's allowed), never as the exact-equality rule
+# mission_query.py alone still gets (that module's whole contract is "read
+# exactly these two calls, nothing else").
+WRITE_CHUGEL_MODULE = "mission_write.py"
+ALLOWED_WRITE_CHUGEL_CALLS = {"get_mission", "create_mission", "decide_gate", "transition"}
+COORDINATOR_CHUGEL_MODULE = "mission_coordinator.py"
+ALLOWED_COORDINATOR_CHUGEL_CALLS = {"get_mission"}
 KNOWLEDGE_MODULES = {
     "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",
     "jarvis.learning_projection", "jarvis.knowledge_retrieval", "jarvis.repository_freshness",
 }
 SOLE_SUBPROCESS_MODULE = "repository_freshness.py"
+SOLE_KNOWLEDGE_SEARCH_MODULES = {"mission_context.py", "knowledge_retrieval.py", "cli.py"}
+SOLE_COORDINATOR_IMPORTER = "mission_coordinator.py"
+COORDINATOR_ONLY_IMPORTS = {"orchestrator.autonomous_runner", "orchestrator.publish_executor",
+                            "orchestrator.merge_executor", "orchestrator.publish_identity_repair"}
 
 
 def _chugel_boundary_violations(filename: str, source: str) -> tuple[str, ...]:
-    """Statically reject Chugel access outside the single read-only seam."""
+    """Statically reject Chugel access outside the three disclosed seams:
+    mission_query.py (read-only, exact two calls), mission_write.py
+    (create_mission/decide_gate/transition/get_mission), and
+    mission_coordinator.py (get_mission only)."""
     tree = ast.parse(source, filename=filename)
-    allowed_module = filename == "mission_query.py"
+    if filename == "mission_query.py":
+        allowed_module, allowed_calls, exact = True, ALLOWED_CHUGEL_CALLS, True
+    elif filename == WRITE_CHUGEL_MODULE:
+        allowed_module, allowed_calls, exact = True, ALLOWED_WRITE_CHUGEL_CALLS, False
+    elif filename == COORDINATOR_CHUGEL_MODULE:
+        allowed_module, allowed_calls, exact = True, ALLOWED_COORDINATOR_CHUGEL_CALLS, False
+    else:
+        allowed_module, allowed_calls, exact = False, ALLOWED_CHUGEL_CALLS, False
+
     module_aliases: set[str] = set()
     direct_aliases: dict[str, str] = {}
     violations: list[str] = []
@@ -51,7 +75,7 @@ def _chugel_boundary_violations(filename: str, source: str) -> tuple[str, ...]:
                     direct_aliases[alias.asname or alias.name] = alias.name
                     if not allowed_module:
                         violations.append("chugel-import-outside-boundary")
-                    if alias.name not in ALLOWED_CHUGEL_CALLS:
+                    if alias.name not in allowed_calls:
                         violations.append("unauthorized-chugel-symbol")
 
     calls: set[str] = set()
@@ -61,15 +85,15 @@ def _chugel_boundary_violations(filename: str, source: str) -> tuple[str, ...]:
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
             if node.func.value.id in module_aliases:
                 calls.add(node.func.attr)
-                if node.func.attr not in ALLOWED_CHUGEL_CALLS:
+                if node.func.attr not in allowed_calls:
                     violations.append("unauthorized-chugel-call")
         elif isinstance(node.func, ast.Name) and node.func.id in direct_aliases:
             symbol = direct_aliases[node.func.id]
             calls.add(symbol)
-            if symbol not in ALLOWED_CHUGEL_CALLS:
+            if symbol not in allowed_calls:
                 violations.append("unauthorized-chugel-call")
 
-    if allowed_module and calls != ALLOWED_CHUGEL_CALLS:
+    if allowed_module and exact and calls != allowed_calls:
         violations.append("required-read-calls-not-exact")
     return tuple(sorted(set(violations)))
 
@@ -200,6 +224,61 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
     def test_no_phase_zero_file_mentions_runtime_mission_directory_as_storage(self):
         for path in (ROOT / "jarvis").glob("*.py"):
             self.assertNotIn("orchestrator/missions", path.read_text(encoding="utf-8"))
+
+    # --- Mission 004 additions ---------------------------------------
+
+    def _imports(self, path: Path) -> list[str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                names.append(node.module or "")
+        return names
+
+    def test_only_mission_coordinator_imports_the_autonomous_pipeline(self):
+        for path in (ROOT / "jarvis").glob("*.py"):
+            names = self._imports(path)
+            hits = COORDINATOR_ONLY_IMPORTS.intersection(names)
+            if path.name == SOLE_COORDINATOR_IMPORTER:
+                continue
+            self.assertFalse(hits, (path, hits))
+
+    def test_only_narrow_seam_modules_search_trusted_knowledge(self):
+        for path in (ROOT / "jarvis").glob("*.py"):
+            if path.name in SOLE_KNOWLEDGE_SEARCH_MODULES:
+                continue
+            names = self._imports(path)
+            self.assertNotIn("jarvis.knowledge_retrieval", names, path)
+            self.assertFalse(
+                any(n == "jarvis" for n in names) and "knowledge_retrieval" in path.read_text(encoding="utf-8"),
+                path,
+            )
+
+    def test_mission_proposal_cannot_import_any_knowledge_module(self):
+        path = ROOT / "jarvis" / "mission_proposal.py"
+        names = set(self._imports(path))
+        forbidden = {"jarvis.knowledge_retrieval", "jarvis.knowledge_storage", "jarvis.repository_freshness"}
+        self.assertTrue(forbidden.isdisjoint(names), names)
+
+    def test_build_mission_definition_signature_has_no_free_text_slot(self):
+        import inspect
+
+        from jarvis.mission_proposal import JoseDecisions, build_mission_definition
+
+        sig = inspect.signature(build_mission_definition)
+        params = list(sig.parameters.values())
+        self.assertEqual([p.name for p in params], ["objective_text", "decisions"])
+        self.assertEqual(params[1].annotation, "JoseDecisions")
+
+        field_types = {f: t for f, t in JoseDecisions.__annotations__.items()}
+        self.assertEqual(field_types, {
+            "outcome": "str",
+            "scope": "tuple[str, ...]",
+            "non_goals": "tuple[str, ...]",
+            "acceptance_criteria": "tuple[str, ...]",
+        })
 
 
 if __name__ == "__main__":

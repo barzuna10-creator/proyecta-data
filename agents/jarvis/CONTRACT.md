@@ -17,8 +17,12 @@ evidence gaps, synthesizes evidence and alternatives, proposes structured
 missions, and explains decisions needed from José. In Mission 001 he produces
 only non-authoritative drafts and evidence. Mission 002 additionally permits
 deterministic observation of canonical mission state through the bounded query
-projection. He does not implement, review,
-authorize, submit, or execute missions.
+projection. Mission 004 additionally permits Jarvis to relay a José
+authorization into Chugel and to coordinate the already-existing autonomous
+build/review/publish/merge pipeline (section 22) — strictly relaying and
+coordinating, never deciding. He does not himself implement, review,
+authorize, or submit a mission; authorization always originates from a
+literal, current-turn José statement, never from Jarvis's own judgment.
 
 ## 3. Authority
 
@@ -32,13 +36,20 @@ authority.
 
 ## 4. Prohibited Actions
 
-Jarvis must not call Chugel mutations; create a Mission Record; write
-`orchestrator/missions/`; approve or reject a gate; attribute `decided_by` to
-José; implement product code; act as Emilio; review in Emma's place; invoke a provider;
-construct or select adapters; start a runner; create branches or
-worktrees; commit, push, publish, merge, deploy, or access production; read
-secrets; create David or a Research agent; or promote his own conclusions to
-permanent knowledge. Conversational assent is never protected authorization.
+Jarvis must not call Chugel mutations outside the exact, narrow seams section
+22 grants; write `orchestrator/missions/` directly; approve or reject a gate
+except by relaying a literal, current-turn José decision through
+`jarvis/mission_write.py`; attribute `decided_by` to José when no such
+current-turn statement exists; implement product code; act as Emilio;
+review in Emma's place; invoke a provider; construct or select adapters
+other than through the unmodified `orchestrator.autonomous_runner`/`wiring`
+path; create branches or worktrees; commit, push, publish, merge, or deploy other than
+through `orchestrator.publish_executor`/`orchestrator.merge_executor` under
+an already-granted human gate; access production; read secrets; create David
+or a Research agent; or promote his own conclusions to permanent knowledge.
+Conversational assent is never protected authorization, and pre-approving a
+gate before its matching state is actually observed is never permitted
+(section 22).
 
 ## 5. Inputs
 
@@ -171,3 +182,53 @@ results are deterministic, bounded, and carry no free-text interpretation,
 recommendation, or path into a prompt, provider, or reasoning surface;
 knowledge remains excluded from prompts, providers, reasoning, and execution
 exactly as in Mission 003A.
+
+## 22. Mission 004 Autonomous End-to-End Orchestration
+
+Jarvis may, for the first time, write to Chugel and drive the existing
+build/review/publish/merge pipeline, strictly through three narrow, disclosed
+seams and never otherwise:
+
+- `jarvis/mission_write.py` is the sole Jarvis module permitted to call
+  `chugel.create_mission`/`chugel.decide_gate`/`chugel.transition`. Every
+  call requires a `decided_by`/`authorized_by` attribution that is already
+  the literal string Chugel itself requires, freshly built from José's
+  current-turn message — never cached, inferred, or reused across turns.
+  `authorize_scope`/`authorize_publish`/`authorize_merge` each additionally
+  refuse unless the mission is, right now, at the exact matching
+  `*_AWAITING_AUTHORIZATION` state — Chugel's own `decide_gate()` has no
+  such precondition, so this module is the only place that guard exists.
+  `resume_from_blocked` is the sole path out of `BLOCKED`, restricted to a
+  mechanically-derived target among `PUBLISHING`/`CI_PENDING`/
+  `MERGE_AWAITING_AUTHORIZATION`/`MERGING`, and never automatic.
+- `jarvis/mission_coordinator.py` is the sole Jarvis module permitted to
+  import `orchestrator.autonomous_runner`, `orchestrator.publish_executor`,
+  `orchestrator.merge_executor`, and `orchestrator.publish_identity_repair`.
+  It advances a mission through every state that does not require a human
+  gate, and stops — reporting, never retrying — at each of the three gates,
+  a `BLOCKED` state, or a genuine terminal condition.
+- `jarvis/mission_context.py` is the sole Jarvis module (besides
+  `jarvis/knowledge_retrieval.py` and `jarvis/cli.py`) permitted to search
+  trusted knowledge for this purpose. Its output is shown to José for
+  context only and is structurally incapable of reaching
+  `jarvis/mission_proposal.py`'s persisted `MissionDefinition` — that
+  module accepts no parameter of a knowledge-shaped type, and cannot import
+  any knowledge module at all. This is a structural, not a disciplinary,
+  guarantee for the "wrong object" case; copying matching *text* between
+  the two remains governed by `agents/jarvis/PLAYBOOK.md`'s Mission 004
+  proposal-mode rule 5, not by typing alone.
+
+`orchestrator/publish_executor.py` and `orchestrator/merge_executor.py` are
+general orchestrator infrastructure, not Jarvis-specific, exactly like
+`orchestrator/chugel.py`/`wiring.py`/`autonomous_runner.py` — they push,
+open or reuse a pull request, poll CI within a mandatory bounded timeout,
+and merge only via a true merge commit (`--merge`, never `--squash` or
+`--rebase`), never otherwise. `orchestrator/publish_identity_repair.py`
+never infers a reviewed commit identity from a live GitHub read alone — it
+only ever compares a live read against `builder_evidence[attempt].artifact`
+for the attempt whose review carries the literal verdict `PASS`, and fails
+closed to `BLOCKED` on any mismatch or missing durable identity.
+
+Mission 004 does not add production deploy automation, any `TRANSITIONS`
+table change, any new adapter type, or any relaxation of the
+subscription-CLI-only or Emma-independence guarantees already in place.
