@@ -983,6 +983,122 @@ def record_publish_commit(mission_id: str, commit_sha: str) -> dict:
         return mutated
 
 
+def record_publish_pr(mission_id: str, pr_url: str, pr_number: int) -> dict:
+    """Persist the infrastructure-observed pull-request identity. Mission
+    004 addition, same first-write-wins/state-gated pattern as
+    record_publish_commit() above -- eligible only while PUBLISHING (the
+    PR is opened, or found already open, before CI is ever polled), and
+    the first recorded (pr_url, pr_number) pair is immutable: neither a
+    duplicate call nor a conflicting value can rewrite it later. This is
+    the durable idempotency signal orchestrator/publish_executor.py's
+    check-before-create step reads before ever calling `gh pr create`
+    again."""
+    if not isinstance(pr_url, str) or not pr_url:
+        raise ValueError("pr_url must be a non-empty string")
+    if type(pr_number) is not int or pr_number < 1:
+        raise ValueError("pr_number must be a positive integer")
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "PUBLISHING":
+            raise ValueError(
+                f"mission {mission_id}: PR identity may only be recorded in "
+                f"state 'PUBLISHING', got {record.get('state')!r}"
+            )
+        existing_number = (record.get("publish") or {}).get("pr_number")
+        if existing_number is not None:
+            raise ValueError(f"mission {mission_id}: PR identity is already recorded")
+
+        mutated = copy.deepcopy(record)
+        mutated["publish"] = dict(mutated["publish"])
+        mutated["publish"]["pr_url"] = pr_url
+        mutated["publish"]["pr_number"] = pr_number
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: PR identity update failed validation", result.errors
+            )
+
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_ci_run(mission_id: str, *, run_id: str, conclusion: str) -> dict:
+    """Append one observed CI run result. Mission 004 addition. Eligible
+    only while CI_PENDING -- unlike record_publish_pr()/
+    record_publish_commit(), this is append-only, not first-write-wins,
+    since orchestrator/publish_executor.py's bounded poll may durably
+    record more than one intermediate observation (e.g. "pending" before
+    a later "success"/"failure") before reaching a terminal conclusion."""
+    if conclusion not in ("pending", "success", "failure", "cancelled", "timed_out"):
+        raise ValueError(f"conclusion {conclusion!r} is not a recognized CI conclusion")
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("run_id must be a non-empty string")
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "CI_PENDING":
+            raise ValueError(
+                f"mission {mission_id}: a CI run may only be recorded in "
+                f"state 'CI_PENDING', got {record.get('state')!r}"
+            )
+
+        mutated = copy.deepcopy(record)
+        mutated["publish"] = dict(mutated["publish"])
+        mutated["publish"]["ci_runs"] = mutated["publish"]["ci_runs"] + [{
+            "run_id": run_id, "conclusion": conclusion, "checked_at": _now(),
+        }]
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: CI run append failed validation", result.errors
+            )
+
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_merge_commit(mission_id: str, merge_commit_sha: str) -> dict:
+    """Persist the infrastructure-observed merge commit identity. Mission
+    004 addition, same first-write-wins/state-gated/immutable pattern as
+    record_publish_commit() -- eligible only while MERGING, and the first
+    recorded SHA is immutable. Sets merge.merged_at in the same write, so
+    a reader never observes a non-null merge_commit_sha with a null
+    merged_at or vice versa."""
+    if not isinstance(merge_commit_sha, str) or CANONICAL_SHA_RE.fullmatch(merge_commit_sha) is None:
+        raise ValueError("merge_commit_sha must be a canonical 40-character lowercase SHA")
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "MERGING":
+            raise ValueError(
+                f"mission {mission_id}: merge commit identity may only be recorded in "
+                f"state 'MERGING', got {record.get('state')!r}"
+            )
+        existing_sha = (record.get("merge") or {}).get("merge_commit_sha")
+        if existing_sha is not None:
+            raise ValueError(f"mission {mission_id}: merge commit identity is already recorded")
+
+        mutated = copy.deepcopy(record)
+        mutated["merge"] = dict(mutated["merge"])
+        mutated["merge"]["merge_commit_sha"] = merge_commit_sha
+        mutated["merge"]["merged_at"] = _now()
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: merge commit update failed validation", result.errors
+            )
+
+        _write_mission_record(mutated)
+        return mutated
+
+
 def _apply_gate_decision(record: dict, gate_name: str, decision: dict) -> dict:
     """Return a fresh record with one gate replaced; never reads or writes."""
     mutated = copy.deepcopy(record)
