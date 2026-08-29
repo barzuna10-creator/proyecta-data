@@ -43,17 +43,18 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from orchestrator import jarvis_conversation
 from orchestrator.validator import HUMAN_DECIDER
 
 from jarvis import mission_query, mission_write
-from jarvis.drafts import build_draft_envelope
+from jarvis.drafts import build_draft_envelope, revise_mission_draft
 from jarvis.mission_authorization_bridge import (
     close_draft_authorization,
     DraftAuthorizationAttributionError,
     DraftAuthorizationDivergenceError,
     DraftAuthorizationRefused,
 )
-from jarvis.models import AuthorizationIntent, MissionDefinitionDraft, MissionDraft
+from jarvis.models import AuthorizationIntent, DraftChanges, MissionDefinitionDraft, MissionDraft
 from jarvis.storage import (
     DraftAlreadyExists, DraftNotFound, FileJarvisStore, ProposalContentMismatch,
 )
@@ -79,6 +80,19 @@ _GATE_ID_NAMESPACE = uuid.UUID("0f1e2d3c-4b5a-4968-8778-899a0b1c2d3e")
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _advanced_timestamp(previous: str) -> str:
+    """revise_mission_draft() requires updated_at to strictly advance past
+    the previous revision's -- timestamps here are second-granularity, so
+    two conversation turns within the same wall-clock second would
+    otherwise collide. Never returns a timestamp <= previous."""
+    now = _now()
+    if now > previous:
+        return now
+    from datetime import timedelta
+    bumped = datetime.strptime(previous, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) + timedelta(seconds=1)
+    return bumped.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _canonical_text_digest(text: str) -> str:
@@ -148,6 +162,162 @@ def _stub_mission_draft(draft_id: str, objective: str) -> MissionDraft:
         open_questions=("Scope and acceptance criteria are placeholders pending refinement.",),
         repository_context=None,
     )
+
+
+def _merged_definition_and_open_questions(
+    existing: MissionDraft | None, suggestion: jarvis_conversation.DraftFieldSuggestion,
+) -> tuple[MissionDefinitionDraft, tuple[str, ...]]:
+    """Merges Jarvis's *proposed* field suggestion onto the current draft
+    (or sensible placeholders for a brand-new one, same placeholders
+    _stub_mission_draft() already uses) -- never trusts a suggested field
+    that is None (meaning "the conversation hasn't addressed this yet")
+    or an empty scope/acceptance_criteria (schema requires at least one
+    entry; an empty list from the model is treated the same as absent,
+    fail-soft rather than producing an invalid draft). open_questions is
+    the one field where an explicit empty list IS meaningful (it is what
+    marks a draft authorization-ready), so it alone is checked with
+    `is not None`, never truthiness."""
+    existing_definition = existing.mission_definition if existing else None
+    existing_open_questions = existing.open_questions if existing else (
+        "Objective not yet fully understood.",
+    )
+    outcome = suggestion.outcome if suggestion.outcome is not None else (
+        existing_definition.outcome if existing_definition else "To be defined during scoping"
+    )
+    scope = tuple(suggestion.scope) if suggestion.scope else (
+        existing_definition.scope if existing_definition else ("To be scoped before authorization",)
+    )
+    non_goals = tuple(suggestion.non_goals) if suggestion.non_goals is not None else (
+        existing_definition.non_goals if existing_definition else ()
+    )
+    acceptance_criteria = tuple(suggestion.acceptance_criteria) if suggestion.acceptance_criteria else (
+        existing_definition.acceptance_criteria if existing_definition else ("To be defined before authorization",)
+    )
+    open_questions = tuple(suggestion.open_questions) if suggestion.open_questions is not None else existing_open_questions
+    definition = MissionDefinitionDraft(
+        outcome=outcome, scope=scope, non_goals=non_goals, acceptance_criteria=acceptance_criteria,
+    )
+    return definition, open_questions
+
+
+def _handle_conversation(store: FileJarvisStore, body: dict) -> dict:
+    """Jarvis's own natural-language understanding of one conversation
+    turn, producing a reply and -- never automatically, only when Jarvis's
+    own dispatch proposes one -- an updated MissionDraft revision. This
+    never authorizes anything: the draft this saves is exactly as
+    unauthorized as the one /v1/proposals produces, subject to the exact
+    same digest/revision-exact authorization flow in _handle_authorize()."""
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip() or len(message) > 4000:
+        raise _ApiError(400, "message rejected")
+    history_raw = body.get("history") or []
+    if not isinstance(history_raw, list) or len(history_raw) > 200:
+        raise _ApiError(400, "history rejected")
+    history: list[dict] = []
+    for item in history_raw:
+        if not isinstance(item, dict) or item.get("role") not in ("user", "jarvis") or not isinstance(item.get("text"), str):
+            raise _ApiError(400, "history entry rejected")
+        history.append({"role": item["role"], "text": item["text"][:4000]})
+    history.append({"role": "user", "text": message})
+
+    draft_id = body.get("draftId")
+    current_envelope = None
+    if draft_id is not None:
+        if not isinstance(draft_id, str) or _UUID.fullmatch(draft_id) is None:
+            raise _ApiError(400, "draftId must be a canonical UUID or null")
+        try:
+            current_envelope = store.get_latest_draft(draft_id)
+        except DraftNotFound as exc:
+            raise _ApiError(404, "draft not found") from exc
+
+    current_fields = None
+    if current_envelope is not None:
+        md = current_envelope.draft.mission_definition
+        current_fields = {
+            "outcome": md.outcome, "scope": list(md.scope), "non_goals": list(md.non_goals),
+            "acceptance_criteria": list(md.acceptance_criteria),
+            "open_questions": list(current_envelope.draft.open_questions),
+        }
+
+    try:
+        turn = jarvis_conversation.converse(history, current_fields)
+    except jarvis_conversation.SubscriptionAuthRequired as exc:
+        raise _ApiError(503, f"conversational dispatch unavailable: {exc}") from exc
+    except jarvis_conversation.JarvisConversationError as exc:
+        raise _ApiError(502, f"conversational turn failed: {exc}") from exc
+
+    gate = None
+    suggestion = turn.suggestion
+    # A suggestion object where every field is empty in the same sense
+    # _merged_definition_and_open_questions() itself treats as "this
+    # field contributes nothing" means the same thing as suggestion:
+    # null -- nothing was actually proposed. This check MUST mirror that
+    # function's own per-field semantics exactly (truthiness for
+    # outcome/scope/acceptance_criteria -- an empty list is schema-invalid
+    # and treated as absent; `is not None` for non_goals/open_questions,
+    # where an explicit empty list/tuple is meaningful, e.g. it is what
+    # marks a draft authorization-ready). A naive `is not None` check on
+    # every field would let a suggestion like
+    # {outcome: None, scope: None, non_goals: None,
+    #  acceptance_criteria: None, open_questions: []} -- which merges to
+    # NO real content but a non-null open_questions -- spuriously create
+    # or revise a draft filled entirely with placeholder strings while
+    # signaling "ready" (open_questions=()), a live-observed shape.
+    has_real_content = suggestion is not None and any((
+        bool(suggestion.outcome), bool(suggestion.scope),
+        suggestion.non_goals is not None, bool(suggestion.acceptance_criteria),
+    ))
+    # open_questions=[] alone (no other field carrying real content) is
+    # only meaningful as a genuine "ready" signal when revising a draft
+    # that ALREADY has real prior content to be ready about -- for a
+    # brand-new draft (current_envelope is None) it would merge to an
+    # authorization-ready gate made entirely of placeholder strings
+    # ("To be defined during scoping", etc.), which is never a real
+    # proposal regardless of what open_questions says.
+    has_open_questions_signal = (
+        suggestion is not None and suggestion.open_questions is not None
+        and current_envelope is not None
+    )
+    has_proposal = has_real_content or has_open_questions_signal
+    if has_proposal:
+        from jarvis._safe_io import exclusive_entity_lock
+        lock_id = draft_id or str(uuid.uuid4())
+        with exclusive_entity_lock(store.root, lock_id):
+            # Re-read the latest draft here, inside the lock, rather than
+            # trusting the `current_envelope` captured before the (up to
+            # ~2min) converse() dispatch ran. A concurrent turn on the same
+            # draftId could have revised it in between; merging onto a
+            # stale envelope would silently clobber that revision (a
+            # lost-update race). This re-read is the actual revision base.
+            latest_envelope = None
+            if draft_id is not None:
+                try:
+                    latest_envelope = store.get_latest_draft(draft_id)
+                except DraftNotFound:
+                    latest_envelope = None
+            if latest_envelope is None:
+                definition, open_questions = _merged_definition_and_open_questions(None, turn.suggestion)
+                now = _now()
+                draft = MissionDraft(
+                    schema_version="1.0.0", draft_id=lock_id, revision=1, created_at=now, updated_at=now,
+                    raw_intent=message, mission_definition=definition, research_evidence=(),
+                    risks=(), open_questions=open_questions, repository_context=None,
+                )
+                envelope = build_draft_envelope(draft)
+            else:
+                definition, open_questions = _merged_definition_and_open_questions(
+                    latest_envelope.draft, turn.suggestion,
+                )
+                revised = revise_mission_draft(
+                    latest_envelope.draft,
+                    updated_at=_advanced_timestamp(latest_envelope.draft.updated_at),
+                    changes=DraftChanges(mission_definition=definition, open_questions=open_questions),
+                )
+                envelope = build_draft_envelope(revised)
+            store.save_draft(envelope)
+        gate = _draft_gate_projection(envelope.draft.draft_id, envelope)
+
+    return {"reply": turn.reply, "draftId": (gate["id"] if gate else draft_id), "gate": gate}
 
 
 def _draft_gate_projection(draft_id: str, envelope) -> dict:
@@ -397,6 +567,10 @@ class _Handler(BaseHTTPRequestHandler):
             if method == "POST" and self.path == "/v1/proposals":
                 body = self._read_json_body()
                 self._write_json(201, _handle_proposals(self._store(), body))
+                return
+            if method == "POST" and self.path == "/v1/conversation":
+                body = self._read_json_body()
+                self._write_json(200, _handle_conversation(self._store(), body))
                 return
             match = re.fullmatch(r"/v1/gates/([^/]+)/authorize", self.path)
             if method == "POST" and match is not None:

@@ -300,5 +300,241 @@ class RealGateFlowTests(ControlPlaneServerTestCase):
         self.assertEqual(409, status)
 
 
+class ConversationFlowTests(ControlPlaneServerTestCase):
+    """/v1/conversation -- Jarvis's own dispatch is always mocked here
+    (real subscription-CLI behavior is covered independently in
+    tests/test_orchestrator_jarvis_conversation.py's fake-executable-CLI
+    suite); these tests are about the HTTP/draft-persistence wiring."""
+
+    def _patch_converse(self, reply="ok", suggestion=None):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        return mock.patch(
+            "jarvis.control_plane_server.jarvis_conversation.converse",
+            return_value=ConversationTurnResult(reply=reply, suggestion=suggestion),
+        )
+
+    def test_first_turn_with_no_suggestion_produces_a_reply_and_no_draft(self):
+        with self._patch_converse(reply="Tell me more.", suggestion=None):
+            status, body = self._request("POST", "/v1/conversation", {"message": "I want to ship something"})
+        self.assertEqual(200, status)
+        self.assertEqual("Tell me more.", body["reply"])
+        self.assertIsNone(body["gate"])
+        self.assertIsNone(body["draftId"])
+
+    def test_first_turn_with_a_suggestion_creates_exactly_one_draft(self):
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        suggestion = DraftFieldSuggestion(
+            outcome="Ship the thing", scope=("do the thing",), non_goals=(),
+            acceptance_criteria=("it works",), open_questions=(),
+        )
+        with self._patch_converse(reply="Drafted it.", suggestion=suggestion):
+            status, body = self._request("POST", "/v1/conversation", {"message": "Ship the thing, done when it works"})
+        self.assertEqual(200, status)
+        self.assertIsNotNone(body["gate"])
+        self.assertEqual("draft", body["gate"]["kind"])
+        draft_id = body["draftId"]
+        self.assertEqual(draft_id, body["gate"]["id"])
+
+        store = self.server.store
+        envelope = store.get_latest_draft(draft_id)
+        self.assertEqual("Ship the thing", envelope.draft.mission_definition.outcome)
+        self.assertEqual(1, envelope.draft.revision)
+        self.assertEqual((), envelope.draft.open_questions)  # model said it's ready
+
+    def test_second_turn_revises_the_same_draft_never_creates_a_second_one(self):
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        first = DraftFieldSuggestion(
+            outcome=None, scope=("do the thing",), non_goals=None,
+            acceptance_criteria=None, open_questions=("What does done look like?",),
+        )
+        with self._patch_converse(reply="What does done look like?", suggestion=first):
+            _, body1 = self._request("POST", "/v1/conversation", {"message": "I want to do the thing"})
+        draft_id = body1["draftId"]
+
+        second = DraftFieldSuggestion(
+            outcome="Ship the thing", scope=None, non_goals=None,
+            acceptance_criteria=("it works",), open_questions=(),
+        )
+        with self._patch_converse(reply="Ready to authorize.", suggestion=second):
+            status2, body2 = self._request("POST", "/v1/conversation", {
+                "message": "It works end to end", "draftId": draft_id,
+                "history": [{"role": "user", "text": "I want to do the thing"}, {"role": "jarvis", "text": "What does done look like?"}],
+            })
+        self.assertEqual(200, status2)
+        self.assertEqual(draft_id, body2["draftId"])  # same draft, not a new one
+
+        store = self.server.store
+        self.assertEqual((1, 2), store.list_draft_revisions(draft_id))
+        latest = store.get_latest_draft(draft_id)
+        self.assertEqual("Ship the thing", latest.draft.mission_definition.outcome)
+        self.assertEqual(("do the thing",), latest.draft.mission_definition.scope)  # carried forward, not lost
+        self.assertEqual((), latest.draft.open_questions)
+
+    def test_unknown_draft_id_is_404(self):
+        with self._patch_converse(reply="ok", suggestion=None):
+            status, _ = self._request("POST", "/v1/conversation", {
+                "message": "continue", "draftId": "999e4567-e89b-42d3-a456-426614174999",
+            })
+        self.assertEqual(404, status)
+
+    def test_missing_message_is_400(self):
+        status, _ = self._request("POST", "/v1/conversation", {"draftId": None})
+        self.assertEqual(400, status)
+
+    def test_subscription_auth_required_maps_to_503(self):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import SubscriptionAuthRequired
+        with mock.patch(
+            "jarvis.control_plane_server.jarvis_conversation.converse",
+            side_effect=SubscriptionAuthRequired("not logged in"),
+        ):
+            status, body = self._request("POST", "/v1/conversation", {"message": "hi"})
+        self.assertEqual(503, status)
+        self.assertIn("error", body)
+
+    def test_never_writes_decided_by_or_touches_any_mission(self):
+        """The conversational layer must never produce Chugel authority --
+        confirmed here by the strongest available check: zero missions
+        exist after a full conversation that reaches open_questions=()."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        ready = DraftFieldSuggestion(
+            outcome="Ship it", scope=("do it",), non_goals=(),
+            acceptance_criteria=("works",), open_questions=(),
+        )
+        with self._patch_converse(reply="Ready.", suggestion=ready):
+            self._request("POST", "/v1/conversation", {"message": "ship it, done when it works"})
+        self.assertEqual(0, len(chugel.list_missions()))
+
+    def test_concurrent_revision_during_dispatch_is_not_lost(self):
+        """P0-1 regression: _handle_conversation() must base its merge on
+        the draft state read *inside* exclusive_entity_lock, not on the
+        envelope captured before the (potentially slow) converse() call.
+        Here converse()'s mock simulates a second, concurrent request
+        completing and saving revision 2 while the first request's own
+        dispatch is still 'in flight' -- this request's own merge must
+        build on that revision 2, not silently clobber it back to a
+        revision built from the stale revision-1 envelope it read before
+        dispatch started."""
+        from orchestrator.jarvis_conversation import ConversationTurnResult, DraftFieldSuggestion
+        from jarvis.drafts import build_draft_envelope, revise_mission_draft
+        from jarvis.models import DraftChanges, MissionDefinitionDraft
+        from jarvis.control_plane_server import _advanced_timestamp
+        import unittest.mock as mock
+
+        first = DraftFieldSuggestion(
+            outcome=None, scope=("do the thing",), non_goals=None,
+            acceptance_criteria=None, open_questions=("What does done look like?",),
+        )
+        with self._patch_converse(reply="What does done look like?", suggestion=first):
+            _, body1 = self._request("POST", "/v1/conversation", {"message": "I want to do the thing"})
+        draft_id = body1["draftId"]
+
+        store = self.server.store
+
+        def _simulate_concurrent_revision_then_return(*args, **kwargs):
+            # Stands in for a second, concurrent /v1/conversation request
+            # that finishes (dispatch + save) entirely while this
+            # request's own converse() call is still pending.
+            envelope = store.get_latest_draft(draft_id)
+            revised = revise_mission_draft(
+                envelope.draft, updated_at=_advanced_timestamp(envelope.draft.updated_at),
+                changes=DraftChanges(
+                    mission_definition=MissionDefinitionDraft(
+                        outcome=envelope.draft.mission_definition.outcome,
+                        scope=envelope.draft.mission_definition.scope,
+                        non_goals=("concurrently added non-goal",),
+                        acceptance_criteria=envelope.draft.mission_definition.acceptance_criteria,
+                    ),
+                    open_questions=envelope.draft.open_questions,
+                ),
+            )
+            store.save_draft(build_draft_envelope(revised))
+            second = DraftFieldSuggestion(
+                outcome="Ship the thing", scope=None, non_goals=None,
+                acceptance_criteria=("it works",), open_questions=(),
+            )
+            return ConversationTurnResult(reply="Ready to authorize.", suggestion=second)
+
+        with mock.patch(
+            "jarvis.control_plane_server.jarvis_conversation.converse",
+            side_effect=_simulate_concurrent_revision_then_return,
+        ):
+            status2, body2 = self._request("POST", "/v1/conversation", {
+                "message": "It works end to end", "draftId": draft_id,
+            })
+        self.assertEqual(200, status2)
+
+        latest = store.get_latest_draft(draft_id)
+        # Revision 3: built on top of the concurrently-saved revision 2,
+        # not a revision 2 that overwrites/loses it.
+        self.assertEqual(3, latest.draft.revision)
+        self.assertEqual("Ship the thing", latest.draft.mission_definition.outcome)
+        self.assertEqual(("do the thing",), latest.draft.mission_definition.scope)
+        # The field the "concurrent" request set must survive this
+        # request's own merge -- proof the merge based itself on the
+        # freshly re-read (revision 2) draft, not the stale pre-dispatch one.
+        self.assertEqual(("concurrently added non-goal",), latest.draft.mission_definition.non_goals)
+
+    def test_open_questions_only_suggestion_on_a_brand_new_conversation_creates_no_draft(self):
+        """P2 regression (round-2 review, escalated from round-1 P3-1):
+        a live dispatch was observed to produce a suggestion with every
+        field None except open_questions=() -- on a brand-new
+        conversation (no existing draft), naively treating open_questions
+        as sufficient signal would create a draft filled entirely with
+        placeholder outcome/scope/acceptance_criteria while marking it
+        open_questions=() ('ready'), which is never a real proposal."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        only_open_questions = DraftFieldSuggestion(
+            outcome=None, scope=None, non_goals=None, acceptance_criteria=None, open_questions=(),
+        )
+        with self._patch_converse(reply="Sounds good.", suggestion=only_open_questions):
+            status, body = self._request("POST", "/v1/conversation", {"message": "ok"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["gate"])
+        self.assertIsNone(body["draftId"])
+
+    def test_open_questions_only_suggestion_still_revises_an_existing_draft(self):
+        """The same shape (only open_questions provided) IS meaningful
+        when revising a draft that already has real prior content -- it
+        legitimately marks that existing content as now ready."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        first = DraftFieldSuggestion(
+            outcome="Ship the thing", scope=("do the thing",), non_goals=(),
+            acceptance_criteria=("it works",), open_questions=("Anything else?",),
+        )
+        with self._patch_converse(reply="Anything else?", suggestion=first):
+            _, body1 = self._request("POST", "/v1/conversation", {"message": "ship the thing, done when it works"})
+        draft_id = body1["draftId"]
+
+        only_open_questions = DraftFieldSuggestion(
+            outcome=None, scope=None, non_goals=None, acceptance_criteria=None, open_questions=(),
+        )
+        with self._patch_converse(reply="Ready to authorize.", suggestion=only_open_questions):
+            status2, body2 = self._request("POST", "/v1/conversation", {
+                "message": "nope, that's everything", "draftId": draft_id,
+            })
+        self.assertEqual(200, status2)
+        self.assertEqual(draft_id, body2["draftId"])
+        latest = self.server.store.get_latest_draft(draft_id)
+        self.assertEqual((), latest.draft.open_questions)  # now marked ready
+        self.assertEqual("Ship the thing", latest.draft.mission_definition.outcome)  # real content preserved, not clobbered by placeholders
+
+    def test_an_entirely_empty_suggestion_object_creates_no_draft(self):
+        """A suggestion object with every field null means the same thing
+        as suggestion: null -- regression test for the exact gap Emma's
+        review found: without this, a model emitting {} instead of the
+        literal null would spuriously create a placeholder-only draft."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        empty = DraftFieldSuggestion(
+            outcome=None, scope=None, non_goals=None, acceptance_criteria=None, open_questions=None,
+        )
+        with self._patch_converse(reply="Still listening.", suggestion=empty):
+            status, body = self._request("POST", "/v1/conversation", {"message": "hmm"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["gate"])
+        self.assertIsNone(body["draftId"])
+
+
 if __name__ == "__main__":
     unittest.main()

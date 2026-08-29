@@ -1,0 +1,324 @@
+"""Jarvis's own conversational understanding of a natural-language
+exchange with Jose, used only to propose changes to a MissionDraft.
+
+Deliberately separate from Emilio/Emma's AgentInvoker Protocol
+(orchestrator/agent_invocation.py) and from orchestrator/adapters/*.py:
+this module produces no builder/reviewer evidence, never reserves a
+Chugel dispatch slot, and is invisible to dispatch_ledger -- a casual
+chat turn with Jarvis is not a mission attempt, and this module has no
+way to become one. It is a peer of orchestrator/adapters/claude_cli_adapter.py,
+not a caller of it -- the subscription-CLI dispatch technique is
+independently reimplemented here (same convention that module's own
+docstring documents for its own relationship to codex_cli_adapter.py:
+duplicated, never shared, so each dispatch path stays independently
+reviewable and auditable) rather than imported, since a shared helper
+would blur the audit boundary between "Jarvis chatting" and "Emilio/Emma
+executing a mission attempt".
+
+Subscription-only, zero API billing: dispatches through the locally-
+installed Claude Code CLI's already-authenticated claude.ai subscription
+login (`claude auth status` reporting authMethod == "claude.ai"), and
+never reads, constructs, or requires an ANTHROPIC_API_KEY. Refuses closed
+(SubscriptionAuthRequired) if that login is not present, exactly like
+ClaudeCliAdapter's own _verify_claude_subscription_login().
+
+Jarvis is never a decider. This module's only output is a natural-
+language reply and a *proposed* patch to a MissionDraft's fields -- never
+anything resembling decided_by, never a write to Chugel of any kind.
+Persisting the proposed patch (via jarvis.drafts.revise_mission_draft())
+and deciding whether to trust it is entirely the caller's
+responsibility -- today that caller is orchestrator/control plane's own
+HTTP handler in jarvis/control_plane_server.py, which never treats a
+successful converse() call as authorization for anything: it only ever
+saves a new, still-unauthorized draft revision."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass
+
+_TIMEOUT_SECONDS = 120.0
+_MAX_OUTPUT_BYTES = 1_048_576
+_AUTH_TIMEOUT_SECONDS = 15.0
+
+
+class JarvisConversationError(Exception):
+    pass
+
+
+class SubscriptionAuthRequired(JarvisConversationError):
+    """Fail closed: no ANTHROPIC_API_KEY fallback exists anywhere on this
+    path. If the CLI is missing or not logged in via claude.ai, this
+    module refuses rather than silently degrading to a paid API call."""
+    pass
+
+
+@dataclass(frozen=True)
+class DraftFieldSuggestion:
+    """Every field is optional (None = "the conversation hasn't said
+    anything about this yet, don't touch it") -- never a default guess."""
+    outcome: str | None = None
+    scope: tuple[str, ...] | None = None
+    non_goals: tuple[str, ...] | None = None
+    acceptance_criteria: tuple[str, ...] | None = None
+    open_questions: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class ConversationTurnResult:
+    reply: str
+    suggestion: DraftFieldSuggestion | None
+
+
+_SYSTEM_TASK = (
+    "You are Jarvis, a proposal-drafting assistant having a conversation "
+    "with Jose about an objective he wants to accomplish.\n\n"
+    "Your job, every turn:\n"
+    "1. Write a short, natural reply to Jose's latest message.\n"
+    "2. Optionally propose UPDATED VALUES for a MissionDraft's fields, "
+    "based on the ENTIRE conversation so far -- never on anything else. "
+    "Only propose a field if the conversation actually said something "
+    "relevant to it; omit (null) any field the conversation has not "
+    "addressed yet, so the caller never overwrites an already-good value "
+    "with a guess.\n\n"
+    "You have NO authority to approve, authorize, or execute anything. "
+    "You never claim any action was authorized, requested, or performed. "
+    "You only ever draft and ask clarifying questions.\n\n"
+    "Respond with EXACTLY one JSON object and nothing else -- no markdown "
+    "fences, no prose outside the object:\n"
+    "{\n"
+    '  "reply": "<plain text reply to show Jose>",\n'
+    '  "suggestion": {\n'
+    '    "outcome": "<string or null>",\n'
+    '    "scope": ["<string>", ...] or null,\n'
+    '    "non_goals": ["<string>", ...] or null,\n'
+    '    "acceptance_criteria": ["<string>", ...] or null,\n'
+    '    "open_questions": ["<string>", ...] or null\n'
+    "  }\n"
+    "}\n\n"
+    '"open_questions" must list anything still missing or ambiguous '
+    "before this draft could be authorized -- an empty array only when "
+    "outcome, scope, and acceptance_criteria are all concretely specified "
+    "and nothing is left to clarify. Never invent scope/acceptance "
+    "criteria Jose did not actually say."
+)
+
+
+def _discover_claude_cli() -> str:
+    explicit = os.environ.get("JARVIS_CLAUDE_CLI_PATH")
+    if explicit:
+        return explicit
+    found = shutil.which("claude")
+    if found:
+        return found
+    raise SubscriptionAuthRequired("claude CLI was not found on PATH")
+
+
+# Every documented way to steer the `claude` CLI off of its interactive
+# claude.ai subscription login and onto billed/alternate auth: a direct
+# API key, a pre-issued auth token, a redirected endpoint, or routing
+# through a cloud provider's own billing (Bedrock/Vertex). Stripping only
+# ANTHROPIC_API_KEY would leave the other three as live, untested holes
+# in the "zero API billing" guarantee even though the claude.ai-only
+# auth-status gate happens to catch most of them today.
+_NON_SUBSCRIPTION_AUTH_ENV_VARS = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+)
+
+
+def _subscription_environment() -> dict[str, str]:
+    """Return an environment that cannot select Anthropic API-key (or
+    other non-subscription-billing) auth."""
+    environment = os.environ.copy()
+    for var in _NON_SUBSCRIPTION_AUTH_ENV_VARS:
+        environment.pop(var, None)
+    return environment
+
+
+def _verify_claude_subscription_login(cli_path: str) -> None:
+    try:
+        result = subprocess.run(
+            # No --output-format flag: `claude auth status` already emits
+            # JSON by default. Deliberately mirrors
+            # orchestrator/adapters/claude_cli_adapter.py's own
+            # already-live-verified invocation exactly -- an earlier draft
+            # of this line invented an --output-format flag that does not
+            # exist on the real, installed CLI (confirmed live: `claude
+            # auth status --output-format json` errors with "unknown
+            # option '--output-format'"). Caught by live verification
+            # during this same review, not by the fake-CLI test suite,
+            # which only ever exercises a script that accepts whatever
+            # flags it is told to.
+            [cli_path, "auth", "status"],
+            shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=_AUTH_TIMEOUT_SECONDS,
+            env=_subscription_environment(), check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SubscriptionAuthRequired(f"could not check claude auth status: {exc}") from exc
+    if result.returncode != 0:
+        raise SubscriptionAuthRequired(
+            f"claude auth status failed (exit {result.returncode})"
+        )
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise SubscriptionAuthRequired("claude auth status returned unparseable output") from exc
+    if not isinstance(payload, dict) or payload.get("authMethod") != "claude.ai":
+        raise SubscriptionAuthRequired(
+            f"claude CLI is not authenticated via a claude.ai subscription "
+            f"(authMethod={payload.get('authMethod') if isinstance(payload, dict) else None!r})"
+        )
+
+
+def _strip_markdown_fence(text: str) -> str:
+    """Defense in depth only, never the primary contract: model output is
+    not perfectly deterministic even with --system-prompt, and a reply
+    occasionally wrapped in a ```json ... ``` fence despite explicit
+    instructions not to should not be treated as a harder failure than
+    one that isn't. Strips a single leading/trailing fence if present;
+    returns the input unchanged otherwise (including if it doesn't look
+    fenced at all) -- never guesses at partial/malformed fencing."""
+    stripped = text.strip()
+    if not stripped.startswith("```") or not stripped.endswith("```"):
+        return text
+    without_trailing = stripped[:-3]
+    first_newline = without_trailing.find("\n")
+    if first_newline == -1:
+        return text
+    return without_trailing[first_newline + 1:]
+
+
+def _extract_structured_result(raw_stdout: bytes) -> dict | None:
+    """Deliberately duplicated from orchestrator/adapters/claude_cli_adapter.py's
+    function of the same name -- see this module's own docstring for why.
+    Tries, in order: (1) the top-level parsed object directly, if it is a
+    dict and not itself an envelope (heuristically: no type/subtype
+    field), (2) a top-level "result" field that is itself a dict, (3) a
+    top-level "result" field that is a string which itself parses as a
+    JSON object, with one markdown-fence-stripping retry if the first
+    parse fails. Returns None (never raises, never guesses) if none
+    apply."""
+    try:
+        parsed = json.loads(raw_stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if isinstance(parsed, dict) and "type" not in parsed and "subtype" not in parsed:
+        return parsed
+    if isinstance(parsed, dict):
+        result_field = parsed.get("result")
+        if isinstance(result_field, dict):
+            return result_field
+        if isinstance(result_field, str):
+            try:
+                nested = json.loads(result_field)
+            except json.JSONDecodeError:
+                try:
+                    nested = json.loads(_strip_markdown_fence(result_field))
+                except json.JSONDecodeError:
+                    return None
+            if isinstance(nested, dict):
+                return nested
+    return None
+
+
+def _string_tuple_or_none(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise JarvisConversationError("suggestion field must be a list of strings or null")
+    return tuple(value)
+
+
+def _parse_turn(structured: dict) -> ConversationTurnResult:
+    reply = structured.get("reply")
+    if not isinstance(reply, str) or not reply.strip():
+        raise JarvisConversationError("model response is missing a non-empty 'reply' string")
+    raw_suggestion = structured.get("suggestion")
+    if raw_suggestion is None:
+        return ConversationTurnResult(reply=reply, suggestion=None)
+    if not isinstance(raw_suggestion, dict):
+        raise JarvisConversationError("'suggestion' must be an object or null")
+    outcome = raw_suggestion.get("outcome")
+    if outcome is not None and not isinstance(outcome, str):
+        raise JarvisConversationError("suggestion.outcome must be a string or null")
+    suggestion = DraftFieldSuggestion(
+        outcome=outcome,
+        scope=_string_tuple_or_none(raw_suggestion.get("scope")),
+        non_goals=_string_tuple_or_none(raw_suggestion.get("non_goals")),
+        acceptance_criteria=_string_tuple_or_none(raw_suggestion.get("acceptance_criteria")),
+        open_questions=_string_tuple_or_none(raw_suggestion.get("open_questions")),
+    )
+    return ConversationTurnResult(reply=reply, suggestion=suggestion)
+
+
+def converse(
+    history: list[dict],
+    current_draft_fields: dict | None,
+    *,
+    cli_executable: str | None = None,
+) -> ConversationTurnResult:
+    """`history` is [{"role": "user"|"jarvis", "text": "..."}, ...], the
+    full conversation so far, oldest first. `current_draft_fields` is the
+    current MissionDraft.mission_definition as a plain dict (or None for
+    a brand-new conversation) -- shown to the model as context, never
+    trusted back verbatim: only fields the model explicitly re-states in
+    `suggestion` are treated as proposed changes.
+
+    Raises SubscriptionAuthRequired if the CLI is missing or not logged
+    in via a claude.ai subscription -- never falls back to any other auth
+    path. Raises JarvisConversationError on any other dispatch or
+    parsing failure. Never returns a guessed/partial result silently."""
+    cli_path = cli_executable or _discover_claude_cli()
+    _verify_claude_subscription_login(cli_path)
+
+    # Live-discovered during this same review round (reproducible ~1-in-3
+    # against the real CLI): embedding the instructions as a field inside
+    # the JSON payload is unreliable -- the `claude` CLI is Claude Code, a
+    # coding *agent* with its own default persona/context-awareness, and
+    # when run inside a real repository it sometimes "notices" the
+    # surrounding files and responds as Claude Code commenting on the
+    # repo instead of staying in the requested format. Passing the same
+    # instructions via --system-prompt (a full override of Claude Code's
+    # default system prompt, not merely more prompt text) was reliable
+    # across 7/7 live trials after this fix, versus roughly 2/3 before it.
+    # The JSON payload now carries only the actual conversational content.
+    task = {
+        "current_draft_fields": current_draft_fields,
+        "conversation": history,
+    }
+    prompt = json.dumps(task, ensure_ascii=False)
+    try:
+        result = subprocess.run(
+            # Emma's independent review, P0-3: this dispatch is a pure
+            # text-in/text-out transform (return one JSON object) and must
+            # never be able to touch the filesystem, run a shell command,
+            # or reach any MCP server, even though the prompt embeds
+            # caller-supplied conversation text. --allowedTools "" (empty
+            # allow-list) denies every built-in tool outright -- live-
+            # verified against the installed CLI to still produce the
+            # expected structured reply with an empty allow-list.
+            [cli_path, "--print", "--output-format", "json",
+             "--permission-mode", "dontAsk", "--strict-mcp-config",
+             "--allowedTools", "", "--system-prompt", _SYSTEM_TASK],
+            input=prompt.encode("utf-8"), shell=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=_TIMEOUT_SECONDS, env=_subscription_environment(), check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise JarvisConversationError(f"claude CLI dispatch failed: {exc}") from exc
+    if len(result.stdout) > _MAX_OUTPUT_BYTES or len(result.stderr) > _MAX_OUTPUT_BYTES:
+        raise JarvisConversationError("claude CLI produced unexpectedly large output")
+    if result.returncode != 0:
+        raise JarvisConversationError(
+            f"claude CLI exited {result.returncode}: "
+            f"{result.stderr.decode('utf-8', 'replace')[:2000]}"
+        )
+    structured = _extract_structured_result(result.stdout)
+    if structured is None:
+        raise JarvisConversationError("claude CLI output did not contain a parseable JSON object")
+    return _parse_turn(structured)
