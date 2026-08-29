@@ -128,6 +128,11 @@ class DispatchEntryNotFound(ChugelError):
     holds a stale or already-processed invocation_id."""
 
 
+class EvidenceRejectionNotEligible(ChugelError):
+    """An explicit evidence rejection did not match one unresolved,
+    completed dispatch or would contradict already-persisted evidence."""
+
+
 # --- module-level constants ---------------------------------------------
 
 _MISSIONS_DIR = Path(__file__).resolve().parent / "missions"
@@ -919,6 +924,11 @@ def finalize_dispatch(mission_id: str, invocation_id: str) -> dict:
                 f"mission {mission_id}: no RESULT_RECORDED dispatch_ledger entry for "
                 f"invocation_id {invocation_id!r}"
             )
+        if ledger[idx].get("result_classification") == "completed":
+            raise DispatchEntryNotFound(
+                f"mission {mission_id}: completed dispatch {invocation_id!r} must be "
+                "finalized atomically with evidence or an explicit evidence rejection"
+            )
         entry = dict(ledger[idx])
         entry["status"] = "FINALIZED"
         entry["updated_at"] = _now()
@@ -932,6 +942,80 @@ def finalize_dispatch(mission_id: str, invocation_id: str) -> dict:
         if not result.valid:
             raise MissionValidationFailed(
                 f"mission {mission_id}: dispatch finalization failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_evidence_rejection(
+    mission_id: str,
+    invocation_id: str,
+    *,
+    role: str,
+    attempt: int,
+    rejection_code: str,
+) -> dict:
+    """Atomically close a completed dispatch whose evidence Chugel rejected.
+
+    The provider result remains ``completed`` forever.  This operation records
+    only the stable disposition/code, never rejected provider payload.  It is
+    deliberately ineligible for an ambiguous crash window: the caller must
+    identify the exact live invocation and the role/attempt it just tried to
+    persist.  A later reservation may reuse that schema slot with a fresh
+    invocation_id; durable attempt accounting still counts both entries.
+    """
+    if role not in ("emilio", "emma"):
+        raise ValueError(f"role {role!r} is not one of ('emilio', 'emma')")
+    if type(attempt) is not int or attempt not in (0, 1):
+        raise ValueError(f"attempt must be exactly the integer 0 or 1, got {attempt!r}")
+    if rejection_code != "MISSION_EVIDENCE_VALIDATION_FAILED":
+        raise ValueError(f"unsupported evidence rejection code {rejection_code!r}")
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != _MISSION_ROLE_EXPECTED_STATE[(role, attempt)]:
+            raise EvidenceRejectionNotEligible(
+                f"mission {mission_id}: state does not match role={role!r} attempt={attempt}"
+            )
+        ledger = list(record.get("dispatch_ledger") or [])
+        idx = _find_ledger_index(ledger, invocation_id)
+        if idx == -1:
+            raise EvidenceRejectionNotEligible(
+                f"mission {mission_id}: dispatch {invocation_id!r} does not exist"
+            )
+        current = ledger[idx]
+        if (
+            current.get("role") != role
+            or current.get("attempt") != attempt
+            or current.get("status") != "RESULT_RECORDED"
+            or current.get("result_classification") != "completed"
+        ):
+            raise EvidenceRejectionNotEligible(
+                f"mission {mission_id}: dispatch {invocation_id!r} is not the exact "
+                "unresolved completed role/attempt"
+            )
+        evidence_field = "builder_evidence" if role == "emilio" else "reviewer_evidence"
+        if any(
+            isinstance(evidence, dict) and evidence.get("invocation_id") == invocation_id
+            for evidence in record.get(evidence_field) or []
+        ):
+            raise EvidenceRejectionNotEligible(
+                f"mission {mission_id}: dispatch {invocation_id!r} already has persisted evidence"
+            )
+
+        entry = dict(current)
+        entry["status"] = "FINALIZED"
+        entry["evidence_disposition"] = "rejected"
+        entry["evidence_rejection_code"] = rejection_code
+        entry["updated_at"] = _now()
+        ledger[idx] = entry
+        mutated = copy.deepcopy(record)
+        mutated["dispatch_ledger"] = ledger
+        mutated["updated_at"] = _now()
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: evidence rejection failed validation", result.errors
             )
         _write_mission_record(mutated)
         return mutated

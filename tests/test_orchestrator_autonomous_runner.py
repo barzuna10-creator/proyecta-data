@@ -316,6 +316,61 @@ class PruebaPipelineCompletoConPersistenciaReal(AutonomousRunnerRealPersistenceT
         # ids -- the second call never reused anything from the first.
         self.assertEqual(len({e["invocation_id"] for e in ledger}), 4)
 
+    def test_attempt_1_completed_con_evidencia_rechazada_se_recupera_solo_tras_disposicion(self):
+        """Regression for real dispatch 6: Emma returned
+        PASS_WITH_NON_BLOCKING_FINDINGS with a P2, so the provider result was
+        completed but canonical evidence validation rejected it."""
+        mid = self._mission_authorized()
+        first = {
+            "codex": _FakeAdapter([_emilio_completed_template(attempt=0)]),
+            "claude": _FakeAdapter([
+                _emma_completed_template(attempt=0, verdict="CHANGES_REQUIRED")
+            ]),
+        }
+        self.assertEqual(run_mission(mid, first, max_total_attempts=2).state, "CORRECTING")
+
+        p2 = [{"id": "f6", "severity": "P2", "summary": "real mismatch",
+               "file": "src/App.tsx", "line_range": "1-2", "category": "correctness"}]
+        invalid_review = _emma_completed_template(
+            attempt=1, verdict="PASS_WITH_NON_BLOCKING_FINDINGS"
+        )
+        invalid_review["evidence"]["findings"] = p2
+        second = {
+            "codex": _FakeAdapter([_emilio_completed_template(attempt=1)]),
+            "claude": _FakeAdapter([invalid_review]),
+        }
+        with self.assertRaises(chugel.MissionValidationFailed):
+            run_mission(
+                mid, second, max_total_attempts=4,
+                max_builder_attempts=2, max_reviewer_attempts=2,
+            )
+
+        stranded = chugel.get_mission(mid)
+        self.assertEqual(stranded["state"], "REVIEWING")
+        self.assertEqual(len(stranded["reviewer_evidence"]), 1)
+        rejected = stranded["dispatch_ledger"][-1]
+        self.assertEqual(rejected["role"], "emma")
+        self.assertEqual(rejected["attempt"], 1)
+        self.assertEqual(rejected["status"], "FINALIZED")
+        self.assertEqual(rejected["result_classification"], "completed")
+        self.assertEqual(rejected["evidence_disposition"], "rejected")
+
+        third = {
+            "codex": _FakeAdapter([]),
+            "claude": _FakeAdapter([_emma_completed_template(attempt=1, verdict="PASS")]),
+        }
+        result = run_mission(
+            mid, third, max_total_attempts=5,
+            max_builder_attempts=2, max_reviewer_attempts=3,
+        )
+        self.assertEqual(result.status, "AUTHORIZATION_REQUIRED")
+        final = chugel.get_mission(mid)
+        self.assertEqual(final["state"], "PUBLISH_AWAITING_AUTHORIZATION")
+        self.assertEqual(len(final["dispatch_ledger"]), 5)
+        retry = final["dispatch_ledger"][-1]
+        self.assertNotEqual(retry["invocation_id"], rejected["invocation_id"])
+        self.assertEqual(retry["attempt"], 1)
+
 
 # --- restart / crash semantics: zero automatic redispatch -----------------
 

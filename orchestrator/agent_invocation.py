@@ -250,6 +250,25 @@ def record_invocation_result(mission_id: str, invocation_id: str, *, outcome: st
     chugel.record_dispatch_result(mission_id, invocation_id, outcome=outcome)
 
 
+def _persist_explicit_evidence_rejection(
+    request: AgentInvocationRequest, error: chugel.MissionValidationFailed
+) -> None:
+    """Close only the exact completed dispatch whose canonical append failed."""
+    try:
+        chugel.record_evidence_rejection(
+            request.mission_id,
+            request.invocation_id,
+            role=request.agent_role,
+            attempt=request.attempt,
+            rejection_code="MISSION_EVIDENCE_VALIDATION_FAILED",
+        )
+    except chugel.EvidenceRejectionNotEligible:
+        # Direct unit-level consumers may not have gone through the durable
+        # reservation path.  Never replace the original validation failure
+        # with a guessed lifecycle mutation.
+        return
+
+
 def build_emilio_invocation_request(
     mission_id: str, attempt: int, invocation_id: str
 ) -> AgentInvocationRequest:
@@ -419,7 +438,11 @@ def consume_emilio_result(
         # close the ledger entry, never re-derive the classification.
         _finalize_dispatch_if_reserved(request.mission_id, request.invocation_id)
         return None
-    return chugel.record_builder_evidence(request.mission_id, evidence)
+    try:
+        return chugel.record_builder_evidence(request.mission_id, evidence)
+    except chugel.MissionValidationFailed as exc:
+        _persist_explicit_evidence_rejection(request, exc)
+        raise
 
 
 def consume_emma_result(
@@ -463,4 +486,8 @@ def consume_emma_result(
     _check_persisted_builder_independence(request, result)
     evidence = _augmented_completed_evidence(request, result)
     assert evidence is not None  # outcome is completed; helper validates shape
-    return chugel.record_reviewer_evidence(request.mission_id, evidence)
+    try:
+        return chugel.record_reviewer_evidence(request.mission_id, evidence)
+    except chugel.MissionValidationFailed as exc:
+        _persist_explicit_evidence_rejection(request, exc)
+        raise

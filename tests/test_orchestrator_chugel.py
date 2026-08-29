@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -1319,14 +1320,15 @@ class PruebaReserveDispatchDuplicadoYConflicto(DispatchLedgerTestCase):
             chugel.record_dispatch_result(mid, invocation_id, outcome=outcome)
             chugel.reserve_dispatch(mid, role="emilio", attempt=0)  # must not raise
 
-    def test_finalized_no_cuenta_como_reserva_viva(self):
+    def test_completed_no_se_puede_finalizar_sin_evidencia_o_rechazo_explicito(self):
         mid = self._mission_ready_for_emilio()
         _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
         chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
         chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
-        chugel.finalize_dispatch(mid, invocation_id)
-        record, fresh_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
-        self.assertNotEqual(fresh_id, invocation_id)
+        with self.assertRaises(chugel.DispatchEntryNotFound):
+            chugel.finalize_dispatch(mid, invocation_id)
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emilio", attempt=0)
 
 
 class PruebaLedgerLifecycleTransiciones(DispatchLedgerTestCase):
@@ -1370,7 +1372,7 @@ class PruebaLedgerLifecycleTransiciones(DispatchLedgerTestCase):
         mid = self._mission_ready_for_emilio()
         _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
         chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
-        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="failed")
         chugel.finalize_dispatch(mid, invocation_id)
         with self.assertRaises(chugel.DispatchEntryNotFound):
             chugel.finalize_dispatch(mid, invocation_id)
@@ -1420,6 +1422,77 @@ class PruebaEvidenciaFinalizaLedgerAtomicamente(DispatchLedgerTestCase):
             chugel.record_builder_evidence(mid, {"attempt": 0})  # missing required fields
         after = chugel.get_mission(mid)
         self.assertEqual(before, after)
+
+
+class PruebaRechazoExplicitoDeEvidencia(DispatchLedgerTestCase):
+    CODE = "MISSION_EVIDENCE_VALIDATION_FAILED"
+
+    def _completed_emma(self, attempt=0):
+        mid = self._mission_ready_for_emma(attempt=attempt)
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emma", attempt=attempt)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="claude")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        return mid, invocation_id
+
+    def test_rechazo_es_atomico_preserva_completed_y_habilita_id_nuevo(self):
+        mid, first_id = self._completed_emma()
+        before_count = len(chugel.get_mission(mid)["dispatch_ledger"])
+        rejected = chugel.record_evidence_rejection(
+            mid, first_id, role="emma", attempt=0, rejection_code=self.CODE
+        )
+        first = next(e for e in rejected["dispatch_ledger"] if e["invocation_id"] == first_id)
+        self.assertEqual(first["status"], "FINALIZED")
+        self.assertEqual(first["result_classification"], "completed")
+        self.assertEqual(first["evidence_disposition"], "rejected")
+        self.assertEqual(first["evidence_rejection_code"], self.CODE)
+        self.assertEqual(rejected["reviewer_evidence"], [])
+
+        fresh, second_id = chugel.reserve_dispatch(mid, role="emma", attempt=0)
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(len(fresh["dispatch_ledger"]), before_count + 1)
+
+    def test_ausencia_de_evidencia_no_infiere_rechazo(self):
+        mid, invocation_id = self._completed_emma()
+        current = chugel.get_mission(mid)
+        entry = next(e for e in current["dispatch_ledger"] if e["invocation_id"] == invocation_id)
+        self.assertNotIn("evidence_disposition", entry)
+        with self.assertRaises(chugel.DispatchNotEligible):
+            chugel.reserve_dispatch(mid, role="emma", attempt=0)
+
+    def test_rechazo_falla_cerrado_para_identidad_estado_y_resultado_incorrectos(self):
+        mid, invocation_id = self._completed_emma()
+        before = chugel._mission_path(mid).read_bytes()
+        bad_calls = (
+            dict(invocation_id=str(uuid.uuid4()), role="emma", attempt=0),
+            dict(invocation_id=invocation_id, role="emilio", attempt=0),
+            dict(invocation_id=invocation_id, role="emma", attempt=1),
+        )
+        for call in bad_calls:
+            with self.assertRaises(chugel.EvidenceRejectionNotEligible):
+                chugel.record_evidence_rejection(mid, rejection_code=self.CODE, **call)
+            self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
+
+    def test_rechazo_no_puede_coexistir_con_evidencia_persistida(self):
+        mid = self._mission_ready_for_emma(attempt=0)
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emma", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="claude")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")
+        evidence = _reviewer_evidence(attempt=0, verdict="PASS")
+        evidence["invocation_id"] = invocation_id
+        chugel.record_reviewer_evidence(mid, evidence)
+        with self.assertRaises(chugel.EvidenceRejectionNotEligible):
+            chugel.record_evidence_rejection(
+                mid, invocation_id, role="emma", attempt=0, rejection_code=self.CODE
+            )
+
+    def test_codigo_no_allow_listado_falla_sin_escritura(self):
+        mid, invocation_id = self._completed_emma()
+        before = chugel._mission_path(mid).read_bytes()
+        with self.assertRaises(ValueError):
+            chugel.record_evidence_rejection(
+                mid, invocation_id, role="emma", attempt=0, rejection_code="RAW_PROVIDER_TEXT"
+            )
+        self.assertEqual(chugel._mission_path(mid).read_bytes(), before)
 
 
 class PruebaConcurrenciaReservaCrossProceso(DispatchLedgerTestCase):

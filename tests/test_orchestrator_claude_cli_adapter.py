@@ -8,6 +8,7 @@ script Python ejecutable que se hace pasar por el CLI."""
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import tempfile
@@ -16,7 +17,13 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from orchestrator.adapters.claude_cli_adapter import ClaudeCliAdapter, ClaudeCliAdapterError
+from orchestrator.adapters.claude_cli_adapter import (
+    ClaudeCliAdapter,
+    ClaudeCliAdapterError,
+    _EMMA_VERDICT_GRAMMAR,
+    _REVIEWER_VERDICT_SEVERITY_MISMATCH,
+    _reviewer_verdict_severity_mismatch,
+)
 from orchestrator.agent_invocation import AgentInvocationRequest
 
 
@@ -54,6 +61,28 @@ _FAKE_CLAUDE_TEMPLATE = textwrap.dedent('''\
         sys.exit(0)
     if MODE == "success_result_string":
         print(json.dumps({{"type": "result", "subtype": "success", "result": json.dumps(evidence)}}))
+        sys.exit(0)
+    if MODE == "attempt_6_verdict_mismatch":
+        evidence["findings"] = [
+            {{"id": "F4", "severity": "P2"}},
+            {{"id": "F5", "severity": "P2"}},
+            {{"id": "F6", "severity": "P2"}},
+            {{"id": "F7", "severity": "P3"}},
+            {{"id": "F8", "severity": "P3"}},
+            {{"id": "F9", "severity": "P3"}},
+        ]
+        evidence["verdict"] = "PASS_WITH_NON_BLOCKING_FINDINGS"
+        print(json.dumps(evidence))
+        sys.exit(0)
+    if MODE == "attempt_7_verdict_mismatch":
+        evidence["attempt"] = 1
+        evidence["findings"] = [
+            {{"id": "F1", "severity": "P2"}},
+            {{"id": "F2", "severity": "P3"}},
+            {{"id": "F3", "severity": "P3"}},
+        ]
+        evidence["verdict"] = "PASS_WITH_NON_BLOCKING_FINDINGS"
+        print(json.dumps({{"type": "result", "subtype": "success", "result": evidence}}))
         sys.exit(0)
     if MODE == "malformed_json":
         print("{{not valid json")
@@ -125,6 +154,163 @@ class ClaudeCliAdapterTestCase(unittest.TestCase):
 
 
 class PruebaAutenticacionSubscripcion(ClaudeCliAdapterTestCase):
+    def test_credenciales_y_routing_ambientales_no_llegan_a_ningun_subprocess(self):
+        script_path = self._tmp / "fake_claude_environment.py"
+        capture_path = self._tmp / "captured_environment.json"
+        prohibited = (
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "AWS_PROFILE", "BEDROCK_ENDPOINT_URL", "GOOGLE_APPLICATION_CREDENTIALS",
+            "VERTEX_REGION",
+        )
+        script_path.write_text(textwrap.dedent(f'''\
+            #!/usr/bin/env python3
+            import json, os, sys
+            prohibited = {prohibited!r}
+            captured = {{"phase": "auth" if sys.argv[1:3] == ["auth", "status"] else "dispatch",
+                         "leaked": sorted(name for name in prohibited if name in os.environ),
+                         "profile_preserved": os.environ.get("CLAUDE_CONFIG_DIR") == "trusted-profile"}}
+            with open({str(capture_path)!r}, "a", encoding="utf-8") as f:
+                f.write(json.dumps(captured) + "\\n")
+            if sys.argv[1:3] == ["auth", "status"]:
+                print(json.dumps({_SUBSCRIPTION_AUTH!r}))
+                sys.exit(0)
+            sys.stdin.read()
+            print(json.dumps({{"attempt": 0, "invoked_at": "2026-08-25T21:05:00Z",
+                "artifact_identity_confirmed_at_start": {{"mode":"commit","commit_sha":"a"*40,
+                    "patch_path":None,"patch_sha256":None,"patch_byte_size":None}},
+                "artifact_identity_confirmed_before_conclusion": {{"mode":"commit","commit_sha":"a"*40,
+                    "patch_path":None,"patch_sha256":None,"patch_byte_size":None}},
+                "rechecked_commands": [], "findings": [], "verdict": "PASS", "blocked_reason": None}}))
+        '''), encoding="utf-8")
+        script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        ambient = {name: "must-not-leak" for name in prohibited}
+        ambient["CLAUDE_CONFIG_DIR"] = "trusted-profile"
+        with unittest.mock.patch.dict(os.environ, ambient):
+            result = ClaudeCliAdapter(cli_path=str(script_path)).invoke(_request(self._worktree))
+        self.assertEqual(result.outcome, "completed")
+        captures = [json.loads(line) for line in capture_path.read_text().splitlines()]
+        self.assertEqual([item["phase"] for item in captures], ["auth", "dispatch"])
+        self.assertTrue(all(item["leaked"] == [] for item in captures))
+        self.assertTrue(all(item["profile_preserved"] for item in captures))
+
+
+class PruebaContratoVeredictoSeveridad(unittest.TestCase):
+    @staticmethod
+    def _evidence(verdict, severities):
+        return {
+            "verdict": verdict,
+            "findings": [
+                {"id": f"F{index}", "severity": severity}
+                for index, severity in enumerate(severities, 1)
+            ],
+        }
+
+    def test_payload_real_intento_6_es_rechazado_sin_corregir_veredicto(self):
+        evidence = self._evidence(
+            "PASS_WITH_NON_BLOCKING_FINDINGS",
+            ["P2", "P2", "P2", "P3", "P3", "P3"],
+        )
+        original = json.loads(json.dumps(evidence))
+        self.assertTrue(_reviewer_verdict_severity_mismatch(evidence))
+        self.assertEqual(evidence, original)
+        self.assertEqual(
+            _REVIEWER_VERDICT_SEVERITY_MISMATCH,
+            "REVIEWER_VERDICT_SEVERITY_MISMATCH",
+        )
+
+    def test_combinaciones_canonicas_validas(self):
+        valid = (
+            self._evidence("PASS", []),
+            self._evidence("PASS_WITH_NON_BLOCKING_FINDINGS", ["P3"]),
+            self._evidence("PASS_WITH_NON_BLOCKING_FINDINGS", ["P3", "P3"]),
+            self._evidence("CHANGES_REQUIRED", ["P1"]),
+            self._evidence("CHANGES_REQUIRED", ["P2"]),
+            self._evidence("CHANGES_REQUIRED", ["P1", "P2", "P3"]),
+            self._evidence("BLOCKED", ["P0"]),
+            self._evidence("BLOCKED", ["P0", "P1", "P2", "P3"]),
+        )
+        for evidence in valid:
+            with self.subTest(verdict=evidence["verdict"]):
+                self.assertFalse(_reviewer_verdict_severity_mismatch(evidence))
+
+    def test_toda_combinacion_no_canonica_falla_cerrada(self):
+        invalid = (
+            self._evidence("BLOCKED", []),
+            self._evidence("BLOCKED", ["P2"]),
+            self._evidence("PASS_WITH_NON_BLOCKING_FINDINGS", []),
+            self._evidence("PASS_WITH_NON_BLOCKING_FINDINGS", ["P2", "P3"]),
+            self._evidence("CHANGES_REQUIRED", []),
+            self._evidence("CHANGES_REQUIRED", ["P3"]),
+            self._evidence("PASS", ["P3"]),
+            self._evidence("PASS", ["P0"]),
+        )
+        for evidence in invalid:
+            with self.subTest(verdict=evidence["verdict"], findings=evidence["findings"]):
+                self.assertTrue(_reviewer_verdict_severity_mismatch(evidence))
+
+
+class PruebaContratoVeredictoSeveridadEnAdapter(ClaudeCliAdapterTestCase):
+    def test_intento_6_devuelve_invalid_output_antes_de_chugel(self):
+        cli = _write_fake_claude(
+            self._tmp,
+            auth_status=_SUBSCRIPTION_AUTH,
+            mode="attempt_6_verdict_mismatch",
+        )
+        result = ClaudeCliAdapter(cli_path=cli).invoke(_request(self._worktree))
+        self.assertEqual(result.outcome, "invalid_output")
+        self.assertEqual(result.error_detail, _REVIEWER_VERDICT_SEVERITY_MISMATCH)
+        self.assertIsNone(result.evidence)
+
+    def test_intento_7_recibe_gramatica_y_sigue_fallando_cerrado_si_la_contradice(self):
+        script_path = self._tmp / "fake_claude_attempt_7.py"
+        capture_path = self._tmp / "captured_attempt_7_prompt.txt"
+        script_path.write_text(textwrap.dedent(f'''\
+            #!/usr/bin/env python3
+            import json, sys
+            if sys.argv[1:3] == ["auth", "status"]:
+                print(json.dumps({_SUBSCRIPTION_AUTH!r}))
+                sys.exit(0)
+            prompt = sys.stdin.read()
+            with open({str(capture_path)!r}, "w", encoding="utf-8") as f:
+                f.write(prompt)
+            evidence = {{
+                "attempt": 1, "invoked_at": "2026-08-29T01:02:11Z",
+                "artifact_identity_confirmed_at_start": {{"mode":"commit","commit_sha":"a"*40,
+                    "patch_path":None,"patch_sha256":None,"patch_byte_size":None}},
+                "artifact_identity_confirmed_before_conclusion": {{"mode":"commit","commit_sha":"a"*40,
+                    "patch_path":None,"patch_sha256":None,"patch_byte_size":None}},
+                "rechecked_commands": [],
+                "findings": [
+                    {{"id":"F1","severity":"P2"}},
+                    {{"id":"F2","severity":"P3"}},
+                    {{"id":"F3","severity":"P3"}},
+                ],
+                "verdict": "PASS_WITH_NON_BLOCKING_FINDINGS", "blocked_reason": None,
+            }}
+            print(json.dumps({{"type":"result","subtype":"success","result":evidence}}))
+        '''), encoding="utf-8")
+        script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+        result = ClaudeCliAdapter(cli_path=str(script_path)).invoke(
+            _request(self._worktree, attempt=1)
+        )
+        prompt = json.loads(capture_path.read_text(encoding="utf-8"))
+        grammar = prompt["_zentra_reviewer_verdict_grammar"]
+        for rule in (
+            "severity P0, verdict MUST be BLOCKED",
+            "severity P1 or P2", "verdict MUST be CHANGES_REQUIRED",
+            "every finding has severity P3", "PASS is allowed only when findings is empty",
+        ):
+            self.assertIn(rule, grammar)
+        self.assertEqual(result.outcome, "invalid_output")
+        self.assertEqual(result.error_detail, _REVIEWER_VERDICT_SEVERITY_MISMATCH)
+        self.assertIsNone(result.evidence)
+
     def test_login_claude_ai_confirmado_permite_invocar(self):
         cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="success_bare")
         adapter = ClaudeCliAdapter(cli_path=cli)

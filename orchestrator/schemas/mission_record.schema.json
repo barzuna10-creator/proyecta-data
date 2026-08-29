@@ -402,10 +402,38 @@
             }
           ]
         },
+        "evidence_disposition": {
+          "type": "string",
+          "enum": ["rejected"]
+        },
+        "evidence_rejection_code": {
+          "type": "string",
+          "enum": ["MISSION_EVIDENCE_VALIDATION_FAILED"]
+        },
         "reserved_at": { "$ref": "#/definitions/timestamp" },
         "updated_at": { "$ref": "#/definitions/timestamp" }
       },
       "allOf": [
+        {
+          "if": {
+            "required": ["evidence_disposition"],
+            "properties": { "evidence_disposition": { "const": "rejected" } }
+          },
+          "then": {
+            "required": ["evidence_rejection_code"],
+            "properties": {
+              "status": { "const": "FINALIZED" },
+              "result_classification": { "const": "completed" }
+            }
+          }
+        },
+        {
+          "if": { "required": ["evidence_rejection_code"] },
+          "then": {
+            "required": ["evidence_disposition"],
+            "properties": { "evidence_disposition": { "const": "rejected" } }
+          }
+        },
         {
           "if": { "properties": { "status": { "const": "RESERVED" } } },
           "then": {

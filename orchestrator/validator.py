@@ -439,28 +439,45 @@ def _check_reviewer_verdict_consistency(record: dict) -> list[ValidationError]:
         severities = _finding_severities(entry)
         path = f"$.reviewer_evidence[{idx}]"
 
-        if "P0" in severities and verdict != "BLOCKED":
+        if "P0" in severities:
+            expected_verdict = "BLOCKED"
+        elif any(severity in ("P1", "P2") for severity in severities):
+            expected_verdict = "CHANGES_REQUIRED"
+        elif severities:
+            expected_verdict = "PASS_WITH_NON_BLOCKING_FINDINGS"
+        else:
+            expected_verdict = "PASS"
+
+        if verdict == expected_verdict:
+            continue
+        if expected_verdict == "BLOCKED":
             errors.append(ValidationError(
                 "VERDICT_SEVERITY_MISMATCH_P0",
                 "a P0 finding requires verdict BLOCKED (docs/zentra/REVIEWER_QA_V1.md severity model)",
                 path + ".verdict",
             ))
-        if verdict == "PASS" and severities:
+        elif verdict == "PASS":
             errors.append(ValidationError(
                 "VERDICT_SEVERITY_MISMATCH_PASS",
                 "PASS requires an empty findings list",
                 path + ".findings",
             ))
-        if verdict == "PASS_WITH_NON_BLOCKING_FINDINGS" and any(s != "P3" for s in severities):
+        elif verdict == "PASS_WITH_NON_BLOCKING_FINDINGS":
             errors.append(ValidationError(
                 "VERDICT_SEVERITY_MISMATCH_NON_BLOCKING",
-                "PASS_WITH_NON_BLOCKING_FINDINGS allows only P3 findings",
+                "PASS_WITH_NON_BLOCKING_FINDINGS requires one or more P3 findings and no other severity",
                 path + ".findings",
             ))
-        if verdict == "CHANGES_REQUIRED" and not any(s in ("P1", "P2") for s in severities):
+        elif verdict == "CHANGES_REQUIRED":
             errors.append(ValidationError(
                 "VERDICT_SEVERITY_MISMATCH_CHANGES_REQUIRED",
                 "CHANGES_REQUIRED requires at least one P1 or P2 finding",
+                path + ".findings",
+            ))
+        else:
+            errors.append(ValidationError(
+                "VERDICT_SEVERITY_MISMATCH_BLOCKED",
+                "BLOCKED requires at least one P0 finding",
                 path + ".findings",
             ))
 
@@ -647,6 +664,7 @@ def _check_dispatch_ledger_consistency(record: dict) -> list[ValidationError]:
         attempt = entry.get("attempt")
         invocation_id = entry.get("invocation_id")
         status = entry.get("status")
+        evidence_disposition = entry.get("evidence_disposition")
 
         if type(attempt) is not int or attempt not in (0, 1):
             errors.append(ValidationError(
@@ -677,6 +695,40 @@ def _check_dispatch_ledger_consistency(record: dict) -> list[ValidationError]:
         if status != "FINALIZED":
             slot = (role, attempt)
             live_by_slot.setdefault(slot, []).append(idx)
+
+        if evidence_disposition == "rejected":
+            evidence_field = "builder_evidence" if role == "emilio" else "reviewer_evidence"
+            matching_evidence = any(
+                isinstance(evidence, dict)
+                and evidence.get("invocation_id") == invocation_id
+                for evidence in record.get(evidence_field) or []
+            )
+            if matching_evidence:
+                errors.append(ValidationError(
+                    "CONTRADICTORY_EVIDENCE_DISPOSITION",
+                    f"dispatch_ledger[{idx}] marks evidence rejected but matching "
+                    f"{evidence_field} is persisted",
+                    path + ".evidence_disposition",
+                ))
+        else:
+            evidence_field = "builder_evidence" if role == "emilio" else "reviewer_evidence"
+            matching_evidence = any(
+                isinstance(evidence, dict)
+                and evidence.get("invocation_id") == invocation_id
+                for evidence in record.get(evidence_field) or []
+            )
+
+        if (
+            status == "FINALIZED"
+            and entry.get("result_classification") == "completed"
+            and not matching_evidence
+            and evidence_disposition != "rejected"
+        ):
+            errors.append(ValidationError(
+                "AMBIGUOUS_COMPLETED_DISPATCH",
+                "a FINALIZED completed dispatch requires matching persisted evidence XOR an explicit rejection",
+                path,
+            ))
 
     for (role, attempt), indices in live_by_slot.items():
         if len(indices) > 1:

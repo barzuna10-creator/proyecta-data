@@ -273,6 +273,27 @@ class PruebaConsistenciaVeredictoSeveridad(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("VERDICT_SEVERITY_MISMATCH_NON_BLOCKING", error_codes(result))
 
+    def test_pass_with_non_blocking_sin_findings_es_invalido(self):
+        record = _built_and_reviewed_pass_record()
+        record["reviewer_evidence"][0]["verdict"] = "PASS_WITH_NON_BLOCKING_FINDINGS"
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("VERDICT_SEVERITY_MISMATCH_NON_BLOCKING", error_codes(result))
+
+    def test_blocked_sin_p0_es_invalido(self):
+        for findings in ([], [
+            {"id": "F1", "severity": "P2", "summary": "x", "file": None,
+             "line_range": None, "category": "correctness"}
+        ]):
+            with self.subTest(findings=findings):
+                record = _built_and_reviewed_pass_record()
+                record["reviewer_evidence"][0]["verdict"] = "BLOCKED"
+                record["reviewer_evidence"][0]["blocked_reason"] = "blocked"
+                record["reviewer_evidence"][0]["findings"] = findings
+                result = validate_mission_record(record)
+                self.assertFalse(result.valid)
+                self.assertIn("VERDICT_SEVERITY_MISMATCH_BLOCKED", error_codes(result))
+
     def test_changes_required_sin_p1_p2_es_invalido(self):
         record = _built_and_reviewed_pass_record()
         record["reviewer_evidence"][0]["verdict"] = "CHANGES_REQUIRED"
@@ -350,7 +371,10 @@ class PruebaConsistenciaIdentidadDeArtefacto(unittest.TestCase):
         record = _built_and_reviewed_pass_record()
         record["reviewer_evidence"][0]["artifact_identity_confirmed_before_conclusion"] = ARTIFACT_B
         record["reviewer_evidence"][0]["verdict"] = "BLOCKED"
-        record["reviewer_evidence"][0]["findings"] = []
+        record["reviewer_evidence"][0]["findings"] = [{
+            "id": "F1", "severity": "P0", "summary": "artifact drifted mid-review",
+            "file": None, "line_range": None, "category": "artifact_identity",
+        }]
         record["reviewer_evidence"][0]["blocked_reason"] = "artifact drifted mid-review"
         result = validate_mission_record(record)
         self.assertTrue(result.valid, error_codes(result))
@@ -1310,12 +1334,34 @@ class PruebaDispatchLedgerConsistencia(unittest.TestCase):
         result = validate_mission_record(record)
         self.assertTrue(result.valid, error_codes(result))
 
-    def test_entrada_finalizada_con_resultado_completed_es_valida(self):
+    def test_entrada_finalizada_completed_sin_disposicion_es_invalida(self):
         record = _minimal_intake_record()
         record["dispatch_ledger"] = [_ledger_entry(
             status="FINALIZED", provider="codex", model="codex-1",
             result_classification="completed",
         )]
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("AMBIGUOUS_COMPLETED_DISPATCH", error_codes(result))
+
+    def test_result_recorded_completed_permanece_no_resuelto(self):
+        record = _minimal_intake_record()
+        record["dispatch_ledger"] = [_ledger_entry(
+            status="RESULT_RECORDED", provider="codex", model="codex-1",
+            result_classification="completed",
+        )]
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
+
+    def test_finalized_completed_con_rechazo_explicito_es_valido(self):
+        record = _minimal_intake_record()
+        entry = _ledger_entry(
+            status="FINALIZED", provider="codex", model="codex-1",
+            result_classification="completed",
+        )
+        entry["evidence_disposition"] = "rejected"
+        entry["evidence_rejection_code"] = "MISSION_EVIDENCE_VALIDATION_FAILED"
+        record["dispatch_ledger"] = [entry]
         result = validate_mission_record(record)
         self.assertTrue(result.valid, error_codes(result))
 
