@@ -83,19 +83,28 @@ def _find_existing_pr(branch: str, *, gh_executable: str, repository_root: str) 
 
 
 def _create_pr(branch: str, base: str, title: str, *, gh_executable: str, repository_root: str) -> dict:
+    """`gh pr create` does not support `--json` (unlike `gh pr view`/`gh pr
+    list`) -- on success it prints only the new PR's URL as plain text to
+    stdout. This never parses that stdout. Immediately after a successful
+    create, it delegates to _find_existing_pr() -- the same, already-correct
+    `--json`-based query this module's check-before-create step already
+    uses -- to obtain structured number/url/state from one single source
+    of truth."""
     result = _run(
         [gh_executable, "pr", "create", "--head", branch, "--base", base,
-         "--title", title, "--body", "", "--json", "number,url"],
+         "--title", title, "--body", ""],
         cwd=repository_root, timeout=_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise PublishExecutorError(
             f"gh pr create failed (exit {result.returncode}): {result.stderr.decode('utf-8', 'replace')}"
         )
-    try:
-        return json.loads(result.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise PublishExecutorError("gh pr create returned unparseable output") from exc
+    created = _find_existing_pr(branch, gh_executable=gh_executable, repository_root=repository_root)
+    if created is None:
+        raise PublishExecutorError(
+            "gh pr create reported success but no PR is now found for this branch"
+        )
+    return created
 
 
 def _pr_view(pr_number: int, *, gh_executable: str, repository_root: str) -> dict:
@@ -151,6 +160,12 @@ def run(
 
     try:
         if state == "PUBLISHING":
+            from orchestrator.publish_commit_materializer import materialize_reviewed_commit
+            materialize_reviewed_commit(
+                mission_id, repository_root, record["repository"]["base_sha"],
+                git_executable=git_executable,
+            )
+
             _git_push(repository_root, branch, git_executable=git_executable)
 
             existing = _find_existing_pr(branch, gh_executable=gh_executable, repository_root=repository_root)
