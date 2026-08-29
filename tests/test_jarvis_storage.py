@@ -42,6 +42,13 @@ class JarvisStorageTests(unittest.TestCase):
         with self.assertRaises(DraftAlreadyExists):
             self.store.save_draft(self.envelope)
 
+    def test_reopening_an_existing_store_root_does_not_raise(self):
+        """Control Plane V1: a server restart re-opens FileJarvisStore
+        against its already-populated root -- this must never raise."""
+        self.store.save_draft(self.envelope)
+        reopened = FileJarvisStore(self.root)
+        self.assertEqual(self.envelope, reopened.get_draft(DRAFT_ID, 1))
+
     def test_multiple_revisions_and_latest(self):
         self.store.save_draft(self.envelope)
         second = build_draft_envelope(dataclasses.replace(
@@ -159,6 +166,86 @@ class JarvisStorageTests(unittest.TestCase):
         for thread in threads:
             thread.join()
         self.assertCountEqual(["saved", "exists"], outcomes)
+
+
+class ProposalIdempotencyTests(unittest.TestCase):
+    """Control Plane V1: proposal_id is only ever an idempotency key over a
+    request, never an identity -- the server always mints draft_id."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.store = FileJarvisStore(Path(self.temporary.name) / "jarvis")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_same_proposal_same_content_returns_same_draft_id_and_writes_once(self):
+        proposal_id = "223e4567-e89b-42d3-a456-426614174001"
+        draft_id = "323e4567-e89b-42d3-a456-426614174002"
+        digest = "a" * 64
+        returned_first = self.store.record_proposal(proposal_id, digest, draft_id)
+        returned_second = self.store.record_proposal(proposal_id, digest, "999e4567-e89b-42d3-a456-426614174999")
+        self.assertEqual(draft_id, returned_first)
+        self.assertEqual(draft_id, returned_second)  # second call's draft_id argument is ignored
+
+    def test_same_proposal_different_content_fails_closed(self):
+        from jarvis.storage import ProposalContentMismatch
+        proposal_id = "223e4567-e89b-42d3-a456-426614174001"
+        draft_id = "323e4567-e89b-42d3-a456-426614174002"
+        self.store.record_proposal(proposal_id, "a" * 64, draft_id)
+        with self.assertRaises(ProposalContentMismatch):
+            self.store.record_proposal(proposal_id, "b" * 64, "999e4567-e89b-42d3-a456-426614174999")
+        # the original association is untouched
+        self.assertEqual(draft_id, self.store.get_proposal(proposal_id)["draft_id"])
+
+    def test_survives_restart_via_a_fresh_store_instance(self):
+        proposal_id = "223e4567-e89b-42d3-a456-426614174001"
+        draft_id = "323e4567-e89b-42d3-a456-426614174002"
+        digest = "a" * 64
+        self.store.record_proposal(proposal_id, digest, draft_id)
+        reopened = FileJarvisStore(self.store.root)  # simulates a fresh process
+        self.assertEqual(
+            draft_id,
+            reopened.record_proposal(proposal_id, digest, "999e4567-e89b-42d3-a456-426614174999"),
+        )
+
+    def test_unknown_proposal_returns_none(self):
+        self.assertIsNone(self.store.get_proposal("223e4567-e89b-42d3-a456-426614174001"))
+
+
+class AuthorizationEffectTests(unittest.TestCase):
+    """The durable idempotency signal jarvis.mission_authorization_bridge
+    relies on to never create a mission twice for the same intent."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.store = FileJarvisStore(Path(self.temporary.name) / "jarvis")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_recording_twice_with_same_mission_id_is_idempotent(self):
+        intent_id = "c" * 64
+        mission_id = "423e4567-e89b-42d3-a456-426614174003"
+        self.assertEqual(mission_id, self.store.record_authorization_effect(intent_id, mission_id))
+        self.assertEqual(mission_id, self.store.record_authorization_effect(intent_id, mission_id))
+
+    def test_recording_twice_with_different_mission_id_fails_closed(self):
+        from jarvis.storage import AuthorizationEffectMismatch
+        intent_id = "c" * 64
+        self.store.record_authorization_effect(intent_id, "423e4567-e89b-42d3-a456-426614174003")
+        with self.assertRaises(AuthorizationEffectMismatch):
+            self.store.record_authorization_effect(intent_id, "523e4567-e89b-42d3-a456-426614174004")
+
+    def test_unrecorded_effect_returns_none(self):
+        self.assertIsNone(self.store.get_authorization_effect("c" * 64))
+
+    def test_mark_draft_authorized_removes_it_from_pending(self):
+        self.store.save_draft(build_draft_envelope(valid_draft()))
+        self.assertIn(DRAFT_ID, self.store.list_pending_draft_ids())
+        self.store.mark_draft_authorized(DRAFT_ID)
+        self.assertNotIn(DRAFT_ID, self.store.list_pending_draft_ids())
+        self.store.mark_draft_authorized(DRAFT_ID)  # idempotent, no error
 
 
 if __name__ == "__main__":
