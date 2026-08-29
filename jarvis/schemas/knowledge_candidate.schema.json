@@ -15,6 +15,7 @@
     "based_on":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string"}},
     "contradicts":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string"}},
     "supersedes":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string"}},
-    "uncertainty_reason":{"type":["string","null"]}
+    "uncertainty_reason":{"type":["string","null"]},
+    "tier":{"enum":["canonical","complementary",null]}
   }
 }

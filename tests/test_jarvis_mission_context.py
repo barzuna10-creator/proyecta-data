@@ -39,8 +39,8 @@ class MissionContextTestCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _promote(self, candidate_id, claim):
-        content = candidate(candidate_id=candidate_id, claim=claim, applicability=KnowledgeApplicability(("jarvis",)))
+    def _promote(self, candidate_id, claim, *, tier=None):
+        content = candidate(candidate_id=candidate_id, claim=claim, applicability=KnowledgeApplicability(("jarvis",)), tier=tier)
         envelope = build_candidate_envelope(content)
         self.store.save_candidate(envelope)
         self.store.transition_candidate(candidate_id, "awaiting_emma_review")
@@ -62,6 +62,11 @@ class DraftBriefingTests(MissionContextTestCase):
     def test_no_citations_when_nothing_matches(self):
         briefing = draft_briefing(self.store, self.resolver, product_areas=("billing",))
         self.assertEqual(briefing.citations, ())
+
+    def test_citation_carries_the_entrys_tier_through_unchanged(self):
+        self._promote("cccccccc-0003-4ccc-8ccc-cccccccccccc", "A canonical claim.", tier="canonical")
+        briefing = draft_briefing(self.store, self.resolver, product_areas=("jarvis",))
+        self.assertEqual("canonical", briefing.citations[0].tier)
 
 
 class KnowledgeIsolationFromMissionDefinitionTests(MissionContextTestCase):

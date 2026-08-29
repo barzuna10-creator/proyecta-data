@@ -84,6 +84,24 @@ _SYSTEM_TASK = (
     "relevant to it; omit (null) any field the conversation has not "
     "addressed yet, so the caller never overwrites an already-good value "
     "with a guess.\n\n"
+    "The JSON input may include a \"trusted_citations\" array -- already-"
+    "authorized knowledge about Zentra (José's product), each with "
+    "knowledgeId, claim, label, and tier (\"canonical\" or \"complementary\", "
+    "or null meaning unclassified). Treat \"canonical\" citations as the "
+    "primary source of truth; treat \"complementary\" ones as historical "
+    "color that can add detail but never overrides or contradicts a "
+    "canonical citation on the same topic. Treat a null tier as the LEAST "
+    "authoritative of the three -- weaker than \"complementary\", never "
+    "elevated to \"canonical\" just because it appears in the list; a "
+    "canonical or complementary citation always takes precedence over one "
+    "with a null tier on the same topic. If trusted_citations is empty "
+    "or nothing in it is relevant to what Jose is asking, say plainly "
+    "that you don't have authorized knowledge about that yet -- never "
+    "invent Zentra facts to fill the gap. A citation is real, sourced "
+    "information you may state directly in your reply; it is never an "
+    "authorization for anything, and it never becomes a MissionDraft "
+    "field's wording verbatim -- summarize or reference it in the reply "
+    "text, don't launder it into scope/acceptance_criteria/outcome.\n\n"
     "You have NO authority to approve, authorize, or execute anything. "
     "You never claim any action was authorized, requested, or performed. "
     "You only ever draft and ask clarifying questions.\n\n"
@@ -260,6 +278,7 @@ def converse(
     history: list[dict],
     current_draft_fields: dict | None,
     *,
+    trusted_citations: tuple[dict, ...] = (),
     cli_executable: str | None = None,
 ) -> ConversationTurnResult:
     """`history` is [{"role": "user"|"jarvis", "text": "..."}, ...], the
@@ -268,6 +287,14 @@ def converse(
     a brand-new conversation) -- shown to the model as context, never
     trusted back verbatim: only fields the model explicitly re-states in
     `suggestion` are treated as proposed changes.
+
+    `trusted_citations` (Mission 005) is a read-only, already-authorized
+    list of {"knowledgeId", "claim", "label", "tier"} dicts -- produced
+    upstream by jarvis.mission_context.draft_briefing(), never by this
+    module, and passed straight through into the model's prompt as a
+    separate field from `current_draft_fields`. Empty by default: a
+    caller that never wires knowledge in gets the exact pre-Mission-005
+    behavior.
 
     Raises SubscriptionAuthRequired if the CLI is missing or not logged
     in via a claude.ai subscription -- never falls back to any other auth
@@ -290,6 +317,7 @@ def converse(
     task = {
         "current_draft_fields": current_draft_fields,
         "conversation": history,
+        "trusted_citations": list(trusted_citations),
     }
     prompt = json.dumps(task, ensure_ascii=False)
     try:

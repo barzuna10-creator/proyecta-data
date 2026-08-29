@@ -20,6 +20,10 @@ class BriefingCitation:
     knowledge_id: str
     claim: str
     label: str
+    # Explicit authority tier, carried through unchanged from the
+    # KnowledgeEntry -- None means unclassified legacy content, never
+    # silently treated as canonical by anything reading this citation.
+    tier: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +47,7 @@ def draft_briefing(
         store, resolver, product_areas=product_areas, top_k=top_k
     )
     citations = tuple(
-        BriefingCitation(result.entry.knowledge_id, result.entry.claim, result.entry.label)
+        BriefingCitation(result.entry.knowledge_id, result.entry.claim, result.entry.label, result.entry.tier)
         for result in response.results
     )
     return ProposalBriefing(citations, response.omitted_count)

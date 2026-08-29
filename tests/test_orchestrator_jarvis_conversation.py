@@ -61,6 +61,14 @@ _FAKE_CLAUDE_TEMPLATE = textwrap.dedent('''\
         report = {{"reply": seen, "suggestion": None}}
         print(json.dumps(report))
         sys.exit(0)
+    if MODE == "echo_trusted_citations":
+        received = json.loads(stdin_data)
+        # Echo exactly what was received back as the reply text, so the
+        # test can assert on precisely what reached the subprocess's
+        # stdin -- not what the caller merely intended to send.
+        report = {{"reply": json.dumps(received.get("trusted_citations")), "suggestion": None}}
+        print(json.dumps(report))
+        sys.exit(0)
     if MODE == "no_suggestion_yet":
         print(json.dumps({{"reply": "Tell me more about the outcome you want.", "suggestion": None}}))
         sys.exit(0)
@@ -155,6 +163,19 @@ class HappyPathTests(unittest.TestCase):
         result = converse([{"role": "user", "text": "hey"}], None, cli_executable=cli)
         self.assertEqual("Tell me more about the outcome you want.", result.reply)
         self.assertIsNone(result.suggestion)
+
+    def test_trusted_citations_reach_the_subprocess_stdin_exactly(self):
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="echo_trusted_citations")
+        citations = ({"knowledgeId": "k1", "claim": "Zentra is a cost platform.", "label": "FACT", "tier": "canonical"},)
+        result = converse([], None, trusted_citations=citations, cli_executable=cli)
+        import json as _json
+        self.assertEqual(list(citations), _json.loads(result.reply))
+
+    def test_default_trusted_citations_is_an_empty_list_on_the_wire(self):
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="echo_trusted_citations")
+        result = converse([], None, cli_executable=cli)  # trusted_citations omitted
+        import json as _json
+        self.assertEqual([], _json.loads(result.reply))
 
 
 class FailClosedTests(unittest.TestCase):

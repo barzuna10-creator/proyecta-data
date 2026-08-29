@@ -23,6 +23,16 @@ CandidateStatus = Literal[
 ]
 KnowledgeEntryStatus = Literal["active", "stale", "conflicted", "superseded", "retired"]
 EmmaVerdict = Literal["PASS", "CHANGES_REQUIRED", "BLOCKED"]
+# Authority tier -- deliberately distinct from KnowledgeLabel (a truth
+# label) and KnowledgeEntryStatus (a lifecycle state). None means
+# "unknown/not classified" -- the only backward-compatible reading for
+# content persisted before this field existed. None must never be
+# silently treated as "canonical": jarvis.knowledge_retrieval ranks it
+# below both canonical and complementary, and _every_ new candidate this
+# codebase constructs going forward must set it explicitly (see
+# require_explicit_tier() below) -- None is a legacy-read affordance
+# only, never a value new code is allowed to choose deliberately.
+EvidenceTier = Literal["canonical", "complementary"]
 
 _UUID = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -65,6 +75,11 @@ class KnowledgeCandidateContent:
     contradicts: tuple[str, ...] = ()
     supersedes: tuple[str, ...] = ()
     uncertainty_reason: str | None = None
+    # Backward-compatible: absent in content persisted before this field
+    # existed (see candidate_content_from_dict()'s .get()). Never defaults
+    # to "canonical" or "complementary" -- absence reads as None, exactly
+    # what it is: unclassified, never an implicit upgrade in authority.
+    tier: EvidenceTier | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +124,11 @@ class KnowledgeEntry:
     candidate_id: str
     candidate_revision: int
     candidate_content_digest: str
+    # Copied verbatim from the promoting candidate's own tier at
+    # promotion time (see knowledge_storage.promote()) -- never inferred,
+    # never defaulted here. Backward-compatible read: absent in entries
+    # persisted before this field existed (see knowledge_entry_from_dict()).
+    tier: EvidenceTier | None = None
 
 
 def _timestamp_valid(value: object) -> bool:
@@ -171,6 +191,11 @@ def candidate_content_from_dict(value: dict[str, Any]) -> KnowledgeCandidateCont
         research_evidence=tuple(research_evidence_from_dict(item) for item in value["research_evidence"]),
         based_on=tuple(value["based_on"]), contradicts=tuple(value["contradicts"]), supersedes=tuple(value["supersedes"]),
         uncertainty_reason=value["uncertainty_reason"],
+        # .get(), not [...]: content persisted before this field existed
+        # has no "tier" key at all -- that must keep loading, as None
+        # (unclassified), never raise and never silently default to a
+        # specific tier.
+        tier=value.get("tier"),
     )
 
 
@@ -206,6 +231,17 @@ def build_candidate_envelope(content: KnowledgeCandidateContent) -> KnowledgeCan
     return KnowledgeCandidateEnvelope(content, "sha256", hashlib.sha256(canonical_candidate_bytes(content)).hexdigest())
 
 
+def require_explicit_tier(content: KnowledgeCandidateContent) -> None:
+    """A stricter check than validate_candidate_content()/the schema:
+    tier is optional at the storage/schema layer (content persisted
+    before this field existed must keep loading as tier=None), but any
+    NEW candidate this codebase itself constructs must always set it
+    explicitly. Call this before save_candidate() for anything freshly
+    authored -- never for a value read back from storage."""
+    if content.tier not in ("canonical", "complementary"):
+        raise ValueError("KNOWLEDGE_TIER_REQUIRED")
+
+
 def knowledge_entry_to_dict(entry: KnowledgeEntry) -> dict[str, Any]:
     return _json_value(entry)
 
@@ -231,6 +267,8 @@ def knowledge_entry_from_dict(value: dict[str, Any]) -> KnowledgeEntry:
         based_on=tuple(value["based_on"]), contradicts=tuple(value["contradicts"]), supersedes=tuple(value["supersedes"]),
         candidate_id=value["candidate_id"], candidate_revision=value["candidate_revision"],
         candidate_content_digest=value["candidate_content_digest"],
+        # Same backward-compatible .get() as candidate_content_from_dict().
+        tier=value.get("tier"),
     )
 
 

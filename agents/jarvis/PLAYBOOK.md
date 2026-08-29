@@ -85,3 +85,45 @@ request outside the current authorized mission.
 5. Close a mission with the short executive summary format only; every
    field in it must trace to an already-persisted Mission Record value,
    never to Jarvis's own recollection of the run.
+
+## Mission 005 Zentra-source-grounded conversation mode
+
+1. Read Zentra source content only through `jarvis.zentra_evidence`, only
+   for a path that appears verbatim in `jarvis/zentra_sources_policy.json`,
+   and only at that policy's own `authorized_commit_sha` -- never a
+   caller-supplied path or commit, never a glob, never a directory
+   listing, never the working tree (always `git show <sha>:<path>` via
+   `jarvis.repository_freshness.RepositoryFreshnessResolver.read_blob()`).
+2. `jarvis.zentra_evidence` is CLI-only: it is never imported by
+   `jarvis.control_plane_server` or by anything reachable from a live
+   conversation turn. A conversation can request that new evidence be
+   gathered; it can never gather it itself, and it can never widen or
+   otherwise edit the policy's allow-list, tiers, ref, or commit --
+   changing any of those is a human-reviewed diff to
+   `jarvis/zentra_sources_policy.json`, never a runtime action.
+3. Gathering evidence is never authorization. Every candidate this
+   ingestion path produces (`jarvis knowledge propose-source`) still
+   requires the unmodified Emma-review + José-exact-tuple-authorization +
+   `promote()` sequence in `jarvis.knowledge_storage` before it can ever
+   be cited -- exactly Mission 003A's rule 2/3, unchanged.
+4. Every promoted entry must carry an explicit `tier`
+   (`"canonical"` or `"complementary"`) via
+   `jarvis.knowledge.require_explicit_tier()` before it is ever saved as a
+   candidate. A `tier` of `None` (content persisted before this field
+   existed) must keep loading and must never be silently treated as
+   `"canonical"` -- `jarvis.knowledge_retrieval` ranks it below both real
+   tiers.
+5. `jarvis.mission_context.draft_briefing()` is the only surface that
+   turns promoted knowledge into citations for a conversation turn, via
+   the same deterministic, no-LLM `jarvis.knowledge_retrieval.search()`
+   Mission 003B already established, now additionally ranking `tier`
+   ahead of `label`: a `"complementary"` (or unclassified) entry may never
+   outrank a `"canonical"` one at equal product-area match, regardless of
+   label or recency.
+6. A citation shown to José in conversation is real, sourced information
+   Jarvis may state directly -- it is never an authorization for
+   anything, and its wording must never be laundered into a persisted
+   `MissionDefinition` field, exactly Mission 004 rule 5's existing
+   discipline extended to this new source of citable text.
+7. When no citation is relevant to what José is asking, say so plainly;
+   never fabricate Zentra facts to fill the gap.

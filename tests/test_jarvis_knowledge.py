@@ -4,7 +4,9 @@ import unittest
 from jarvis.knowledge import (
     CANDIDATE_TRANSITIONS, ENTRY_TRANSITIONS, KnowledgeApplicability,
     KnowledgeCandidateContent, RepositoryBinding, build_candidate_envelope,
-    require_candidate_transition, require_entry_transition, validate_repository_binding,
+    candidate_content_from_dict, candidate_content_to_dict,
+    require_candidate_transition, require_entry_transition, require_explicit_tier,
+    validate_repository_binding,
 )
 from jarvis.models import EvidenceSource, ResearchEvidence
 
@@ -55,6 +57,50 @@ class KnowledgeModelTests(unittest.TestCase):
         for label in ("INFERENCE", "ASSUMPTION"):
             with self.assertRaisesRegex(ValueError, "NOT_PROMOTABLE"):
                 require_candidate_transition("awaiting_human_authorization", "accepted", label=label)
+
+
+class EvidenceTierBackwardCompatibilityTests(unittest.TestCase):
+    """Regression coverage for the tier field's backward-compatibility
+    requirement: introducing it must never make previously-valid content
+    fail to load, and absence must never be silently upgraded to a
+    specific tier."""
+
+    def test_default_tier_is_none_not_a_guessed_classification(self):
+        self.assertIsNone(candidate().tier)
+
+    def test_a_legacy_dict_with_no_tier_key_at_all_still_loads(self):
+        # Simulates content persisted before this field existed -- not a
+        # dict with tier: null, but one where the key is entirely absent,
+        # exactly what candidate_content_to_dict() produced pre-migration.
+        legacy = candidate_content_to_dict(candidate())
+        self.assertIn("tier", legacy)  # current serialization always includes it...
+        del legacy["tier"]  # ...so this line manufactures the pre-migration shape.
+        loaded = candidate_content_from_dict(legacy)
+        self.assertIsNone(loaded.tier)
+
+    def test_legacy_content_without_tier_still_builds_a_valid_envelope(self):
+        # The schema must not require "tier" -- a historical candidate
+        # missing it must still pass validate_candidate_content() (called
+        # by build_candidate_envelope()), not become KNOWLEDGE_CORRUPT.
+        legacy = candidate_content_to_dict(candidate())
+        del legacy["tier"]
+        loaded = candidate_content_from_dict(legacy)
+        envelope = build_candidate_envelope(loaded)  # must not raise
+        self.assertIsNone(envelope.content.tier)
+
+    def test_explicit_tier_round_trips_exactly(self):
+        for tier in ("canonical", "complementary"):
+            with self.subTest(tier=tier):
+                loaded = candidate_content_from_dict(candidate_content_to_dict(candidate(tier=tier)))
+                self.assertEqual(tier, loaded.tier)
+
+    def test_require_explicit_tier_rejects_none(self):
+        with self.assertRaisesRegex(ValueError, "KNOWLEDGE_TIER_REQUIRED"):
+            require_explicit_tier(candidate())  # tier defaults to None
+
+    def test_require_explicit_tier_accepts_canonical_and_complementary(self):
+        for tier in ("canonical", "complementary"):
+            require_explicit_tier(candidate(tier=tier))  # must not raise
 
 
 if __name__ == "__main__": unittest.main()

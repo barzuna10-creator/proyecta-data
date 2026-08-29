@@ -50,8 +50,8 @@ class KnowledgeRetrievalTestCase(unittest.TestCase):
         self.store.save_authorization(authorization)
         return review, authorization
 
-    def promote_new(self, candidate_id, *, product_areas=("jarvis",), repository_binding=None, label="FACT"):
-        content = candidate(candidate_id=candidate_id, applicability=KnowledgeApplicability(tuple(product_areas)), repository_binding=repository_binding, label=label)
+    def promote_new(self, candidate_id, *, product_areas=("jarvis",), repository_binding=None, label="FACT", tier=None):
+        content = candidate(candidate_id=candidate_id, applicability=KnowledgeApplicability(tuple(product_areas)), repository_binding=repository_binding, label=label, tier=tier)
         if label == "INTENT":
             content = dataclasses.replace(content, research_evidence=(
                 dataclasses.replace(content.research_evidence[0], label="INTENT", sources=(
@@ -160,6 +160,36 @@ class RankingDeterminismTests(KnowledgeRetrievalTestCase):
         response = search(self.store, self.resolver, product_areas=("x", "y"))
         self.assertEqual(response.results[0].entry.knowledge_id, "aaaaaaaa-0020-4aaa-8aaa-aaaaaaaaaaaa")
 
+    def test_canonical_outranks_complementary_even_when_label_favors_complementary(self):
+        # complementary+INTENT would normally rank ahead of a plain FACT
+        # under label priority alone -- tier must dominate that.
+        self.promote_new("aaaaaaaa-0030-4aaa-8aaa-aaaaaaaaaaaa", product_areas=("x",), label="FACT", tier="canonical")
+        self.promote_new("bbbbbbbb-0031-4bbb-8bbb-bbbbbbbbbbbb", product_areas=("x",), label="INTENT", tier="complementary")
+        response = search(self.store, self.resolver, product_areas=("x",))
+        self.assertEqual(
+            [r.entry.knowledge_id for r in response.results],
+            ["aaaaaaaa-0030-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-0031-4bbb-8bbb-bbbbbbbbbbbb"],
+        )
+
+    def test_complementary_outranks_unclassified_legacy_tier(self):
+        self.promote_new("aaaaaaaa-0032-4aaa-8aaa-aaaaaaaaaaaa", product_areas=("x",), tier=None)
+        self.promote_new("bbbbbbbb-0033-4bbb-8bbb-bbbbbbbbbbbb", product_areas=("x",), tier="complementary")
+        response = search(self.store, self.resolver, product_areas=("x",))
+        self.assertEqual(
+            [r.entry.knowledge_id for r in response.results],
+            ["bbbbbbbb-0033-4bbb-8bbb-bbbbbbbbbbbb", "aaaaaaaa-0032-4aaa-8aaa-aaaaaaaaaaaa"],
+        )
+
+    def test_match_reasons_carry_an_explicit_tier_tag(self):
+        self.promote_new("aaaaaaaa-0034-4aaa-8aaa-aaaaaaaaaaaa", product_areas=("x",), tier="canonical")
+        self.promote_new("bbbbbbbb-0035-4bbb-8bbb-bbbbbbbbbbbb", product_areas=("x",), tier="complementary")
+        self.promote_new("cccccccc-0036-4ccc-8ccc-cccccccccccc", product_areas=("x",), tier=None)
+        response = search(self.store, self.resolver, product_areas=("x",))
+        tags = {r.entry.knowledge_id: r.match_reasons for r in response.results}
+        self.assertIn("TIER_CANONICAL", tags["aaaaaaaa-0034-4aaa-8aaa-aaaaaaaaaaaa"])
+        self.assertIn("TIER_COMPLEMENTARY", tags["bbbbbbbb-0035-4bbb-8bbb-bbbbbbbbbbbb"])
+        self.assertIn("TIER_UNKNOWN_LEGACY", tags["cccccccc-0036-4ccc-8ccc-cccccccccccc"])
+
 
 class TopKBoundsTests(KnowledgeRetrievalTestCase):
     def test_top_k_zero_rejected(self):
@@ -200,6 +230,58 @@ class NoLeakTests(KnowledgeRetrievalTestCase):
         response = search(self.store, self.resolver)
         self.assertNotIn("FRESHNESS", repr(response))
         self.assertNotIn(str(self.repo), repr(response))
+
+
+class SupersedeMechanismTests(KnowledgeRetrievalTestCase):
+    """Mission 005's real HANDOFF_MISSION_002 -> HANDOFF_MISSION_002_CORRECCION
+    scenario: proves the actual, already-existing supersede mechanism
+    (a revision-only candidate transitioning the original entry's own
+    status to "superseded", exactly what jarvis.knowledge_storage's
+    _validate_transition_evidence()/promote() already enforce) genuinely
+    removes the original from search results -- not merely that a field
+    round-trips through a schema. This is a plain candidate operation
+    using existing machinery; it is not a policy-file concept."""
+
+    def test_a_superseded_original_is_excluded_and_the_correction_alone_is_returned(self):
+        original_id = "aaaaaaaa-0050-4aaa-8aaa-aaaaaaaaaaaa"
+        self.promote_new(original_id, product_areas=("zentra",), tier="complementary")
+        response_before = search(self.store, self.resolver, product_areas=("zentra",))
+        self.assertEqual([original_id], [r.entry.knowledge_id for r in response_before.results])
+
+        # The correction's own new entry -- a distinct knowledge_id, with
+        # its content.supersedes recording (for provenance/documentation)
+        # which original claim it corrects.
+        correction_id = "bbbbbbbb-0051-4bbb-8bbb-bbbbbbbbbbbb"
+        correction_content = candidate(
+            candidate_id=correction_id, claim="Corrected: the real status.",
+            applicability=KnowledgeApplicability(("zentra",)), tier="complementary",
+            supersedes=(original_id,),
+        )
+        correction_envelope = build_candidate_envelope(correction_content)
+        review, authorization = self.ready(correction_envelope)
+        self.store.promote(correction_id, review, authorization)
+
+        # The actual mechanism that removes the original from search: a
+        # SEPARATE, revision-only candidate targeting the original's own
+        # knowledge_id, transitioning its status from active to
+        # superseded. _validate_transition_evidence() requires
+        # target.knowledge_id to appear in this candidate's own
+        # `supersedes` tuple -- the existing, unmodified rule.
+        transition_id = "cccccccc-0052-4ccc-8ccc-cccccccccccc"
+        transition_content = dataclasses.replace(
+            candidate(candidate_id=transition_id),
+            target_knowledge_id=original_id, expected_target_revision=1, expected_current_status="active",
+            proposed_entry_status="superseded", supersedes=(original_id,),
+        )
+        transition_envelope = build_candidate_envelope(transition_content)
+        review2, authorization2 = self.ready(transition_envelope)
+        self.store.promote(transition_id, review2, authorization2)
+
+        response_after = search(self.store, self.resolver, product_areas=("zentra",))
+        result_ids = [r.entry.knowledge_id for r in response_after.results]
+        self.assertNotIn(original_id, result_ids)  # excluded: status is now "superseded", not "active"
+        self.assertIn(correction_id, result_ids)  # the correction is still returned
+        self.assertEqual("superseded", self.store.get_latest_entry(original_id).status)
 
 
 if __name__ == "__main__":

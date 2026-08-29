@@ -535,6 +535,122 @@ class ConversationFlowTests(ControlPlaneServerTestCase):
         self.assertIsNone(body["gate"])
         self.assertIsNone(body["draftId"])
 
+    def test_not_configured_knowledge_store_passes_empty_citations(self):
+        # The default ControlPlaneServerTestCase server never sets
+        # knowledge_store_root/zentra_repository_root -- Mission 005's
+        # explicit "unset = exactly pre-Mission-005 behavior" contract.
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        converse = mock.Mock(return_value=ConversationTurnResult(reply="ok", suggestion=None))
+        with mock.patch("jarvis.control_plane_server.jarvis_conversation.converse", converse):
+            self._request("POST", "/v1/conversation", {"message": "hi"})
+        self.assertEqual((), converse.call_args.kwargs["trusted_citations"])
+
+
+class ConversationKnowledgeCitationTests(unittest.TestCase):
+    """Mission 005's Capa 2 wiring: a real, promoted, canonical
+    KnowledgeEntry reaches converse() as a trusted_citations entry, and
+    the fixed, non-caller-controlled product_areas=("zentra",) is what
+    /v1/conversation always searches with."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_missions_dir = chugel._MISSIONS_DIR
+        chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+
+        import subprocess
+
+        self.repo = Path(self._tmpdir.name) / "zentra-repo"
+        self.repo.mkdir()
+        for args in (
+            ("git", "init", "-q", "-b", "main"), ("git", "config", "user.email", "x@example.invalid"),
+            ("git", "config", "user.name", "x"),
+        ):
+            subprocess.run(args, cwd=str(self.repo), check=True, capture_output=True)
+        (self.repo / "f.txt").write_text("1", encoding="utf-8")
+        subprocess.run(("git", "add", "f.txt"), cwd=str(self.repo), check=True, capture_output=True)
+        subprocess.run(("git", "commit", "-q", "-m", "seed"), cwd=str(self.repo), check=True, capture_output=True)
+
+        from jarvis.knowledge import EmmaKnowledgeReview, KnowledgeApplicability, build_candidate_envelope
+        from jarvis.knowledge_authorization import parse_knowledge_authorization, render_knowledge_authorization
+        from jarvis.knowledge_storage import FileKnowledgeStore
+        from tests.test_jarvis_knowledge import candidate
+
+        knowledge_root = Path(self._tmpdir.name) / "knowledge"
+        store = FileKnowledgeStore(knowledge_root)
+        cid = "123e4567-e89b-42d3-a456-426614174111"
+        content = candidate(
+            candidate_id=cid, claim="Zentra is a construction-cost intelligence platform.",
+            applicability=KnowledgeApplicability(("zentra",)), tier="canonical",
+        )
+        envelope = build_candidate_envelope(content)
+        store.save_candidate(envelope)
+        store.transition_candidate(cid, "awaiting_emma_review")
+        store.transition_candidate(cid, "awaiting_human_authorization")
+        review = EmmaKnowledgeReview(cid, 1, envelope.content_digest, "PASS", "2026-08-26T00:00:01Z")
+        authorization = parse_knowledge_authorization(render_knowledge_authorization(envelope))
+        store.save_review(review)
+        store.save_authorization(authorization)
+        store.promote(cid, review, authorization)
+
+        from jarvis.control_plane_server import ControlPlaneConfig, build_server
+        config = ControlPlaneConfig(
+            host="127.0.0.1", port=0, token=_TOKEN, store_root=str(Path(self._tmpdir.name) / "jarvis"),
+            knowledge_store_root=str(knowledge_root), zentra_repository_root=str(self.repo),
+        )
+        self.server = build_server(config)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+        chugel._MISSIONS_DIR = self._original_missions_dir
+        self._tmpdir.cleanup()
+
+    def _request(self, method, path, body=None, token=_TOKEN):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def test_a_real_promoted_canonical_entry_reaches_converse_as_a_citation(self):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        converse = mock.Mock(return_value=ConversationTurnResult(reply="ok", suggestion=None))
+        with mock.patch("jarvis.control_plane_server.jarvis_conversation.converse", converse):
+            status, _ = self._request("POST", "/v1/conversation", {"message": "what is zentra"})
+        self.assertEqual(200, status)
+        citations = converse.call_args.kwargs["trusted_citations"]
+        self.assertEqual(1, len(citations))
+        self.assertEqual("Zentra is a construction-cost intelligence platform.", citations[0]["claim"])
+        self.assertEqual("canonical", citations[0]["tier"])
+        self.assertEqual("FACT", citations[0]["label"])
+
+    def test_the_fixed_zentra_product_area_is_always_used_not_caller_supplied(self):
+        # /v1/conversation's request body has no field for product_areas
+        # at all -- proves the search area is fixed server-side, never
+        # something a client could widen or redirect.
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        converse = mock.Mock(return_value=ConversationTurnResult(reply="ok", suggestion=None))
+        with mock.patch("jarvis.control_plane_server.jarvis_conversation.converse", converse):
+            self._request("POST", "/v1/conversation", {
+                "message": "hi", "product_areas": ["totally-different-area"],
+            })
+        citations = converse.call_args.kwargs["trusted_citations"]
+        self.assertEqual(1, len(citations))  # still matched -- the extra body field was ignored
+
 
 if __name__ == "__main__":
     unittest.main()

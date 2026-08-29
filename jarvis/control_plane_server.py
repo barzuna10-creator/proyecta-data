@@ -48,13 +48,16 @@ from orchestrator.validator import HUMAN_DECIDER
 
 from jarvis import mission_query, mission_write
 from jarvis.drafts import build_draft_envelope, revise_mission_draft
+from jarvis.knowledge_storage import FileKnowledgeStore
 from jarvis.mission_authorization_bridge import (
     close_draft_authorization,
     DraftAuthorizationAttributionError,
     DraftAuthorizationDivergenceError,
     DraftAuthorizationRefused,
 )
+from jarvis.mission_context import draft_briefing
 from jarvis.models import AuthorizationIntent, DraftChanges, MissionDefinitionDraft, MissionDraft
+from jarvis.repository_freshness import RepositoryFreshnessResolver
 from jarvis.storage import (
     DraftAlreadyExists, DraftNotFound, FileJarvisStore, ProposalContentMismatch,
 )
@@ -105,7 +108,10 @@ def _gate_id_for(mission_id: str, gate_name: str) -> str:
 
 
 class ControlPlaneConfig:
-    def __init__(self, *, host: str, port: int, token: str, store_root: str):
+    def __init__(
+        self, *, host: str, port: int, token: str, store_root: str,
+        knowledge_store_root: str | None = None, zentra_repository_root: str | None = None,
+    ):
         if host not in _LOOPBACK_HOSTS:
             raise ValueError("Control Plane must bind to a loopback host")
         if not isinstance(token, str) or len(token) < 32:
@@ -116,6 +122,14 @@ class ControlPlaneConfig:
         self.port = port
         self.token = token
         self.store_root = Path(store_root)
+        # Both optional, and deliberately independent of each other's
+        # presence at this layer -- Mission 005's citation wiring is a
+        # pure addition. Unset (either or both): the conversational turn
+        # behaves exactly as it did before this feature existed, with no
+        # citations, no error, no degraded mode. Never auto-provisioned,
+        # never inferred from another setting.
+        self.knowledge_store_root = Path(knowledge_store_root) if knowledge_store_root else None
+        self.zentra_repository_root = Path(zentra_repository_root) if zentra_repository_root else None
 
 
 def load_config(env: dict | None = None) -> ControlPlaneConfig:
@@ -132,7 +146,11 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
     store_root = env.get("CONTROL_PLANE_STORE_ROOT")
     if not store_root:
         raise ValueError("CONTROL_PLANE_STORE_ROOT is required")
-    return ControlPlaneConfig(host=host, port=port, token=token, store_root=store_root)
+    return ControlPlaneConfig(
+        host=host, port=port, token=token, store_root=store_root,
+        knowledge_store_root=env.get("CONTROL_PLANE_KNOWLEDGE_STORE_ROOT") or None,
+        zentra_repository_root=env.get("CONTROL_PLANE_ZENTRA_REPOSITORY_ROOT") or None,
+    )
 
 
 class _ApiError(Exception):
@@ -200,13 +218,24 @@ def _merged_definition_and_open_questions(
     return definition, open_questions
 
 
-def _handle_conversation(store: FileJarvisStore, body: dict) -> dict:
+def _handle_conversation(
+    store: FileJarvisStore, body: dict, *,
+    knowledge_store: FileKnowledgeStore | None = None,
+    zentra_resolver: RepositoryFreshnessResolver | None = None,
+) -> dict:
     """Jarvis's own natural-language understanding of one conversation
     turn, producing a reply and -- never automatically, only when Jarvis's
     own dispatch proposes one -- an updated MissionDraft revision. This
     never authorizes anything: the draft this saves is exactly as
     unauthorized as the one /v1/proposals produces, subject to the exact
-    same digest/revision-exact authorization flow in _handle_authorize()."""
+    same digest/revision-exact authorization flow in _handle_authorize().
+
+    knowledge_store/zentra_resolver are optional (Mission 005): when both
+    are configured, already-authorized trusted knowledge is surfaced to
+    the model as read-only citations via jarvis.mission_context.draft_briefing()
+    -- unmodified, unmediated by this function beyond passing its output
+    through. When either is absent, this turn behaves exactly as it did
+    before Mission 005 existed: no citations, no error, no degraded mode."""
     message = body.get("message")
     if not isinstance(message, str) or not message.strip() or len(message) > 4000:
         raise _ApiError(400, "message rejected")
@@ -239,8 +268,23 @@ def _handle_conversation(store: FileJarvisStore, body: dict) -> dict:
             "open_questions": list(current_envelope.draft.open_questions),
         }
 
+    trusted_citations: tuple[dict, ...] = ()
+    if knowledge_store is not None and zentra_resolver is not None:
+        # Fixed, general area for this conversational surface -- not
+        # caller-supplied, not derived from `message`. Every source on
+        # the Zentra allow-list is authored under this one area (see
+        # jarvis/zentra_sources_policy.json); narrower areas remain
+        # available to other callers of draft_briefing() should a more
+        # targeted use ever need them, but this endpoint only ever asks
+        # the broad question.
+        briefing = draft_briefing(knowledge_store, zentra_resolver, product_areas=("zentra",))
+        trusted_citations = tuple(
+            {"knowledgeId": c.knowledge_id, "claim": c.claim, "label": c.label, "tier": c.tier}
+            for c in briefing.citations
+        )
+
     try:
-        turn = jarvis_conversation.converse(history, current_fields)
+        turn = jarvis_conversation.converse(history, current_fields, trusted_citations=trusted_citations)
     except jarvis_conversation.SubscriptionAuthRequired as exc:
         raise _ApiError(503, f"conversational dispatch unavailable: {exc}") from exc
     except jarvis_conversation.JarvisConversationError as exc:
@@ -524,6 +568,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _store(self) -> FileJarvisStore:
         return self.server.store  # type: ignore[attr-defined]
 
+    def _knowledge_store(self) -> FileKnowledgeStore | None:
+        return self.server.knowledge_store  # type: ignore[attr-defined]
+
+    def _zentra_resolver(self) -> RepositoryFreshnessResolver | None:
+        return self.server.zentra_resolver  # type: ignore[attr-defined]
+
     def _authenticated(self) -> bool:
         header = self.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
@@ -570,7 +620,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and self.path == "/v1/conversation":
                 body = self._read_json_body()
-                self._write_json(200, _handle_conversation(self._store(), body))
+                self._write_json(200, _handle_conversation(
+                    self._store(), body,
+                    knowledge_store=self._knowledge_store(), zentra_resolver=self._zentra_resolver(),
+                ))
                 return
             match = re.fullmatch(r"/v1/gates/([^/]+)/authorize", self.path)
             if method == "POST" and match is not None:
@@ -605,6 +658,15 @@ def build_server(config: ControlPlaneConfig) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((config.host, config.port), _Handler)
     server.config = config  # type: ignore[attr-defined]
     server.store = FileJarvisStore(config.store_root)  # type: ignore[attr-defined]
+    # Constructed once at startup, not per-request: a misconfigured path
+    # here must fail server startup loudly, not be swallowed inside a
+    # live conversation turn.
+    server.knowledge_store = (  # type: ignore[attr-defined]
+        FileKnowledgeStore(config.knowledge_store_root) if config.knowledge_store_root else None
+    )
+    server.zentra_resolver = (  # type: ignore[attr-defined]
+        RepositoryFreshnessResolver(config.zentra_repository_root) if config.zentra_repository_root else None
+    )
     return server
 
 
