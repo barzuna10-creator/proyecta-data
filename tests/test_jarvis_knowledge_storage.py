@@ -5,7 +5,10 @@ import tempfile
 import unittest
 
 from jarvis._safe_io import MAX_JSON_BYTES
-from jarvis.knowledge import EmmaKnowledgeReview, KnowledgeCandidateContent, build_candidate_envelope
+from jarvis.knowledge import (
+    EmmaKnowledgeReview, KnowledgeCandidateContent, build_candidate_envelope, knowledge_entry_from_dict,
+    knowledge_entry_to_dict,
+)
 from jarvis.knowledge_authorization import parse_knowledge_authorization, render_knowledge_authorization
 from jarvis.knowledge_storage import (
     FileKnowledgeStore, KnowledgeCorrupt, KnowledgeEntryListing, KnowledgeTargetStateChanged, promotion_id,
@@ -85,6 +88,72 @@ class KnowledgeStorageTests(unittest.TestCase):
         entry = self.store.promote(CID, review, authorization)
         self.assertEqual(self.store.get_candidate_status(CID), "accepted")
         self.assertEqual(self.store.promote(CID, review, authorization), entry)
+
+    def test_promote_propagates_the_candidates_tier_onto_the_entry(self):
+        envelope = build_candidate_envelope(candidate(tier="canonical"))
+        review, authorization = self.ready(envelope)
+        entry = self.store.promote(CID, review, authorization)
+        self.assertEqual("canonical", entry.tier)
+
+    def test_a_promoted_entry_persisted_before_tier_existed_still_loads_and_lists(self):
+        """Regression for the explicit backward-compatibility requirement:
+        introducing `tier` must never make previously-valid, already-
+        committed knowledge fail to load, and a missing tier must never
+        be silently upgraded to a specific classification."""
+        envelope = build_candidate_envelope(candidate())  # tier defaults to None
+        review, authorization = self.ready(envelope)
+        entry = self.store.promote(CID, review, authorization)
+        self.assertIsNone(entry.tier)
+        pid = promotion_id(CID, 1, envelope.content_digest)
+        bundle = self.root / "promotions" / pid
+        entry_path = bundle / "knowledge-entry.json"
+        manifest_path = bundle / "manifest.json"
+        marker_path = bundle / "COMMITTED"
+
+        # Manufacture the exact pre-migration on-disk shape: a committed
+        # knowledge-entry.json with no "tier" key at all (not tier: null),
+        # with its manifest digest and that manifest's own COMMITTED-marker
+        # digest updated to match in the same hash chain -- exactly what a
+        # real bundle committed before this field existed would look like
+        # on disk (entry/manifest/marker always agreed at write time; this
+        # reproduces that consistent old shape rather than an artificially
+        # corrupted one).
+        import hashlib as _hashlib
+
+        def _canonical(value):
+            return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+        stored = json.loads(entry_path.read_text(encoding="utf-8"))
+        self.assertIn("tier", stored)
+        del stored["tier"]
+        entry_bytes = _canonical(stored)
+        entry_path.write_bytes(entry_bytes)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["knowledge_entry_sha256"] = _hashlib.sha256(entry_bytes).hexdigest()
+        manifest_bytes = _canonical(manifest)
+        manifest_path.write_bytes(manifest_bytes)
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["manifest_sha256"] = _hashlib.sha256(manifest_bytes).hexdigest()
+        marker_path.write_bytes(_canonical(marker))
+
+        # A direct dict-level load must still work (candidate-event/manifest
+        # digests are unaffected -- only the entry payload's own shape changed).
+        reloaded_from_dict = knowledge_entry_from_dict(stored)
+        self.assertIsNone(reloaded_from_dict.tier)
+
+        # And the store's own listing path (used by knowledge_retrieval.search())
+        # must still surface it -- never omit it, never fail closed on this alone.
+        restarted = FileKnowledgeStore(self.root)
+        listing = restarted.list_latest_entries()
+        self.assertEqual(0, listing.omitted_count)
+        self.assertEqual(1, len(listing.entries))
+        self.assertIsNone(listing.entries[0].tier)
+
+    def test_knowledge_entry_dict_round_trip_preserves_explicit_tier(self):
+        envelope = build_candidate_envelope(candidate(tier="complementary"))
+        review, authorization = self.ready(envelope)
+        entry = self.store.promote(CID, review, authorization)
+        self.assertEqual(entry, knowledge_entry_from_dict(knowledge_entry_to_dict(entry)))
 
 
 def _hex_between(lo: str, hi: str) -> str:

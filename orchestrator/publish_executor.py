@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 
 from orchestrator import chugel
+from orchestrator.gh_check_status import normalize_check_entry
 
 _TIMEOUT_SECONDS = 30.0
 _MAX_OUTPUT_BYTES = 65536
@@ -83,19 +84,28 @@ def _find_existing_pr(branch: str, *, gh_executable: str, repository_root: str) 
 
 
 def _create_pr(branch: str, base: str, title: str, *, gh_executable: str, repository_root: str) -> dict:
+    """`gh pr create` does not support `--json` (unlike `gh pr view`/`gh pr
+    list`) -- on success it prints only the new PR's URL as plain text to
+    stdout. This never parses that stdout. Immediately after a successful
+    create, it delegates to _find_existing_pr() -- the same, already-correct
+    `--json`-based query this module's check-before-create step already
+    uses -- to obtain structured number/url/state from one single source
+    of truth."""
     result = _run(
         [gh_executable, "pr", "create", "--head", branch, "--base", base,
-         "--title", title, "--body", "", "--json", "number,url"],
+         "--title", title, "--body", ""],
         cwd=repository_root, timeout=_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise PublishExecutorError(
             f"gh pr create failed (exit {result.returncode}): {result.stderr.decode('utf-8', 'replace')}"
         )
-    try:
-        return json.loads(result.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise PublishExecutorError("gh pr create returned unparseable output") from exc
+    created = _find_existing_pr(branch, gh_executable=gh_executable, repository_root=repository_root)
+    if created is None:
+        raise PublishExecutorError(
+            "gh pr create reported success but no PR is now found for this branch"
+        )
+    return created
 
 
 def _pr_view(pr_number: int, *, gh_executable: str, repository_root: str) -> dict:
@@ -115,12 +125,17 @@ def _pr_view(pr_number: int, *, gh_executable: str, repository_root: str) -> dic
 def _ci_conclusion(pr_view: dict) -> str | None:
     """Reduce statusCheckRollup entries to a single terminal conclusion,
     or None while still pending. Any non-success terminal state on any
-    check is treated as failure -- fail closed rather than average."""
+    check is treated as failure -- fail closed rather than average.
+    Per-entry normalization (CheckRun vs. StatusContext, fail-closed on
+    anything unrecognized) is shared with orchestrator/merge_executor.py
+    via orchestrator/gh_check_status.py -- only this reduction, which
+    needs the cancelled/timed_out distinction merge_executor's single-shot
+    gate does not, is specific to this module."""
     checks = pr_view.get("statusCheckRollup") or []
     if not checks:
         return None
-    statuses = [c.get("conclusion") or c.get("status") for c in checks]
-    if any(s in (None, "IN_PROGRESS", "QUEUED", "PENDING") for s in statuses):
+    statuses = [normalize_check_entry(c) for c in checks]
+    if any(s == "PENDING" for s in statuses):
         return None
     if all(s in ("SUCCESS", "NEUTRAL", "SKIPPED") for s in statuses):
         return "success"
@@ -151,6 +166,12 @@ def run(
 
     try:
         if state == "PUBLISHING":
+            from orchestrator.publish_commit_materializer import materialize_reviewed_commit
+            materialize_reviewed_commit(
+                mission_id, repository_root, record["repository"]["base_sha"],
+                git_executable=git_executable,
+            )
+
             _git_push(repository_root, branch, git_executable=git_executable)
 
             existing = _find_existing_pr(branch, gh_executable=gh_executable, repository_root=repository_root)

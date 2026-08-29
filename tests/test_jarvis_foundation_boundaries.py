@@ -27,9 +27,19 @@ ALLOWED_COORDINATOR_CHUGEL_CALLS = {"get_mission"}
 KNOWLEDGE_MODULES = {
     "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",
     "jarvis.learning_projection", "jarvis.knowledge_retrieval", "jarvis.repository_freshness",
+    "jarvis.zentra_evidence",
 }
 SOLE_SUBPROCESS_MODULE = "repository_freshness.py"
 SOLE_KNOWLEDGE_SEARCH_MODULES = {"mission_context.py", "knowledge_retrieval.py", "cli.py"}
+# Mission 005: the module that reads jarvis/zentra_sources_policy.json
+# (the SHA/ref/repo/allow-list/tier manifest) and calls
+# RepositoryFreshnessResolver.read_blob(). Never jarvis.control_plane_server,
+# never orchestrator.jarvis_conversation -- there is structurally no path
+# from a live conversation turn to this policy or to read_blob(). cli.py
+# is included because it is the only human-operator entry point that
+# invokes zentra_evidence's ingestion path (see the "knowledge propose-source"
+# subcommand).
+SOLE_ZENTRA_POLICY_READERS = {"zentra_evidence.py", "cli.py"}
 SOLE_COORDINATOR_IMPORTER = "mission_coordinator.py"
 COORDINATOR_ONLY_IMPORTS = {"orchestrator.autonomous_runner", "orchestrator.publish_executor",
                             "orchestrator.merge_executor", "orchestrator.publish_identity_repair"}
@@ -210,6 +220,7 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
         for name in (
             "knowledge.py", "knowledge_storage.py", "knowledge_authorization.py",
             "learning_projection.py", "knowledge_retrieval.py", "repository_freshness.py",
+            "zentra_evidence.py",
         ):
             source = (ROOT / "jarvis" / name).read_text(encoding="utf-8")
             tree = ast.parse(source, filename=name)
@@ -261,6 +272,62 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
         names = set(self._imports(path))
         forbidden = {"jarvis.knowledge_retrieval", "jarvis.knowledge_storage", "jarvis.repository_freshness"}
         self.assertTrue(forbidden.isdisjoint(names), names)
+
+    # --- Mission 005 additions ---------------------------------------
+
+    def test_only_narrow_seam_modules_read_the_zentra_sources_policy(self):
+        """Structural enforcement of 'impossible to expand from
+        conversation': jarvis.zentra_evidence (the only module that loads
+        zentra_sources_policy.json and calls read_blob()) may only be
+        imported by itself and by the human-operator CLI -- never by
+        jarvis.control_plane_server or anything reachable from a live
+        conversation turn."""
+        for path in (ROOT / "jarvis").glob("*.py"):
+            if path.name in SOLE_ZENTRA_POLICY_READERS:
+                continue
+            names = self._imports(path)
+            self.assertNotIn("jarvis.zentra_evidence", names, path)
+            self.assertFalse(
+                any(n == "jarvis" for n in names) and "zentra_evidence" in path.read_text(encoding="utf-8"),
+                path,
+            )
+
+    def test_orchestrator_module_never_imports_zentra_evidence_either(self):
+        """Round-2 independent review, P2: the narrow-seam check above
+        only scanned jarvis/*.py. This closes the same gap explicitly for
+        orchestrator/*.py -- in particular orchestrator/jarvis_conversation.py,
+        the actual live conversational dispatch path -- rather than
+        relying only on jarvis.zentra_evidence's inclusion in
+        KNOWLEDGE_MODULES (checked generically by
+        test_orchestrator_never_imports_jarvis_knowledge above) to make
+        this explicit and independently re-derivable."""
+        for path in (ROOT / "orchestrator").glob("*.py"):
+            names = self._imports(path)
+            self.assertNotIn("jarvis.zentra_evidence", names, path)
+
+    def test_read_blob_is_called_only_from_the_sole_zentra_policy_reader(self):
+        """Round-2 independent review, P2: jarvis.control_plane_server
+        legitimately holds a live RepositoryFreshnessResolver instance
+        (server.zentra_resolver, for jarvis.mission_context.draft_briefing()'s
+        freshness re-checks) -- nothing about that import alone prevents
+        conversation-reachable code from also calling its read_blob()
+        method directly. This asserts the literal call-site text appears
+        nowhere except read_blob()'s own definition (repository_freshness.py)
+        and its sole caller (zentra_evidence.py)."""
+        allowed = {"repository_freshness.py", "zentra_evidence.py"}
+        for path in list((ROOT / "jarvis").glob("*.py")) + list((ROOT / "orchestrator").glob("*.py")):
+            if path.name in allowed:
+                continue
+            self.assertNotIn(".read_blob(", path.read_text(encoding="utf-8"), path)
+
+    def test_control_plane_server_never_imports_zentra_evidence(self):
+        # The single most important assertion for "conversación no puede
+        # ampliar la allow-list": the live HTTP/conversational surface
+        # has zero import path to the policy loader or read_blob(), not
+        # merely "doesn't currently call it".
+        path = ROOT / "jarvis" / "control_plane_server.py"
+        names = set(self._imports(path))
+        self.assertNotIn("jarvis.zentra_evidence", names)
 
     def test_build_mission_definition_signature_has_no_free_text_slot(self):
         import inspect

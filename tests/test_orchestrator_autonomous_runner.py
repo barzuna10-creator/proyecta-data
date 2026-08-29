@@ -316,6 +316,61 @@ class PruebaPipelineCompletoConPersistenciaReal(AutonomousRunnerRealPersistenceT
         # ids -- the second call never reused anything from the first.
         self.assertEqual(len({e["invocation_id"] for e in ledger}), 4)
 
+    def test_attempt_1_completed_con_evidencia_rechazada_se_recupera_solo_tras_disposicion(self):
+        """Regression for real dispatch 6: Emma returned
+        PASS_WITH_NON_BLOCKING_FINDINGS with a P2, so the provider result was
+        completed but canonical evidence validation rejected it."""
+        mid = self._mission_authorized()
+        first = {
+            "codex": _FakeAdapter([_emilio_completed_template(attempt=0)]),
+            "claude": _FakeAdapter([
+                _emma_completed_template(attempt=0, verdict="CHANGES_REQUIRED")
+            ]),
+        }
+        self.assertEqual(run_mission(mid, first, max_total_attempts=2).state, "CORRECTING")
+
+        p2 = [{"id": "f6", "severity": "P2", "summary": "real mismatch",
+               "file": "src/App.tsx", "line_range": "1-2", "category": "correctness"}]
+        invalid_review = _emma_completed_template(
+            attempt=1, verdict="PASS_WITH_NON_BLOCKING_FINDINGS"
+        )
+        invalid_review["evidence"]["findings"] = p2
+        second = {
+            "codex": _FakeAdapter([_emilio_completed_template(attempt=1)]),
+            "claude": _FakeAdapter([invalid_review]),
+        }
+        with self.assertRaises(chugel.MissionValidationFailed):
+            run_mission(
+                mid, second, max_total_attempts=4,
+                max_builder_attempts=2, max_reviewer_attempts=2,
+            )
+
+        stranded = chugel.get_mission(mid)
+        self.assertEqual(stranded["state"], "REVIEWING")
+        self.assertEqual(len(stranded["reviewer_evidence"]), 1)
+        rejected = stranded["dispatch_ledger"][-1]
+        self.assertEqual(rejected["role"], "emma")
+        self.assertEqual(rejected["attempt"], 1)
+        self.assertEqual(rejected["status"], "FINALIZED")
+        self.assertEqual(rejected["result_classification"], "completed")
+        self.assertEqual(rejected["evidence_disposition"], "rejected")
+
+        third = {
+            "codex": _FakeAdapter([]),
+            "claude": _FakeAdapter([_emma_completed_template(attempt=1, verdict="PASS")]),
+        }
+        result = run_mission(
+            mid, third, max_total_attempts=5,
+            max_builder_attempts=2, max_reviewer_attempts=3,
+        )
+        self.assertEqual(result.status, "AUTHORIZATION_REQUIRED")
+        final = chugel.get_mission(mid)
+        self.assertEqual(final["state"], "PUBLISH_AWAITING_AUTHORIZATION")
+        self.assertEqual(len(final["dispatch_ledger"]), 5)
+        retry = final["dispatch_ledger"][-1]
+        self.assertNotEqual(retry["invocation_id"], rejected["invocation_id"])
+        self.assertEqual(retry["attempt"], 1)
+
 
 # --- restart / crash semantics: zero automatic redispatch -----------------
 
@@ -503,6 +558,44 @@ class PruebaPresupuestosYDeadline(AutonomousRunnerRealPersistenceTestCase):
         result = run_mission(mid, adapters, deadline=0.0)
         self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
         self.assertIn("deadline", result.reason)
+
+    def test_presupuesto_de_reviewer_se_agota_cuando_claude_esta_caido_y_el_guard_bloquea_codex(self):
+        """Emilio construyó con codex (real, un solo dispatch). Claude
+        falla realmente en el primer intento de Emma; el segundo intento,
+        vía el failover ya configurado, sería enrutado al mismo proveedor
+        que el builder -- el guard de independencia lo intercepta antes
+        de invocar el adapter de codex. Ambos intentos cuentan para el
+        presupuesto durable de reviewer_attempts exactamente igual que
+        cualquier otro intento real -- nunca una aprobación silenciosa
+        con el mismo proveedor, nunca un loop infinito."""
+        mid = self._mission_building()
+        # codex_builder's own template list has exactly one entry, for
+        # Emilio's real dispatch -- if the guard ever failed to intercept
+        # Emma's failover and let a second, real codex call through, this
+        # same object would raise IndexError on an empty pop(0), failing
+        # the test loudly rather than silently succeeding.
+        codex_builder = _FakeAdapter([_emilio_completed_template(attempt=0)])
+        claude_down = _FakeAdapter([_failed_template("claude")])
+
+        result = run_mission(
+            mid,
+            {"codex": codex_builder, "claude": claude_down},
+            max_total_attempts=4, max_builder_attempts=2, max_reviewer_attempts=2,
+        )
+
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertIn("reviewer attempt budget exhausted", result.reason)
+        self.assertEqual(len(codex_builder.calls), 1)
+        self.assertEqual(len(claude_down.calls), 1)
+        self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [])
+
+        ledger = chugel.get_mission(mid)["dispatch_ledger"]
+        emma_entries = [e for e in ledger if e["role"] == "emma"]
+        self.assertEqual(len(emma_entries), 2)
+        self.assertEqual(emma_entries[0]["provider"], "claude")
+        self.assertEqual(emma_entries[0]["result_classification"], "failed")
+        self.assertEqual(emma_entries[1]["provider"], "codex")
+        self.assertEqual(emma_entries[1]["result_classification"], "unavailable")
 
     def test_limites_invalidos_son_rechazados_antes_de_cualquier_llamada(self):
         # False is falsy-zero (bool is an int subclass) and is correctly

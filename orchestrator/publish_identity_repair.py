@@ -35,13 +35,15 @@ class PublishIdentityRepairError(Exception):
     pass
 
 
-def _durable_reviewed_commit_sha(record: dict) -> str | None:
+def durable_reviewed_artifact(record: dict) -> dict | None:
     """The one, already-existing, write-time-enforced source of "what was
-    actually built and confirmed-reviewed". Returns None when no PASS
-    verdict exists yet, or when the matching builder attempt's artifact
-    is patch-mode (no commit_sha exists at all for that shape of
-    evidence) -- both are legitimate "cannot repair" outcomes, not
-    errors."""
+    actually built and confirmed-reviewed" -- the full artifact dict
+    (mode/commit_sha/patch_path/patch_sha256/patch_byte_size) for the
+    attempt whose reviewer_evidence carries the literal verdict "PASS".
+    Returns None when no PASS verdict exists yet. Shared with
+    orchestrator/publish_commit_materializer.py, which needs the whole
+    artifact (including patch-mode identity), not just a commit_sha --
+    this is the single place that lookup is implemented."""
     reviewer_entries = record.get("reviewer_evidence") or []
     passed = next((e for e in reviewer_entries if e.get("verdict") == "PASS"), None)
     if passed is None:
@@ -50,8 +52,16 @@ def _durable_reviewed_commit_sha(record: dict) -> str | None:
     builder = next((e for e in builder_entries if e.get("attempt") == passed.get("attempt")), None)
     if builder is None:
         return None
-    artifact = builder.get("artifact") or {}
-    if artifact.get("mode") != "commit":
+    return builder.get("artifact") or None
+
+
+def _durable_reviewed_commit_sha(record: dict) -> str | None:
+    """Returns None when no PASS verdict exists yet, or when the matching
+    builder attempt's artifact is patch-mode (no commit_sha exists at
+    all for that shape of evidence) -- both are legitimate "cannot
+    repair" outcomes, not errors."""
+    artifact = durable_reviewed_artifact(record)
+    if artifact is None or artifact.get("mode") != "commit":
         return None
     return artifact.get("commit_sha")
 

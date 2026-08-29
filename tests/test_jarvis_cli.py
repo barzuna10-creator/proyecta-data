@@ -8,7 +8,7 @@ from pathlib import Path
 
 from jarvis.knowledge import EmmaKnowledgeReview, build_candidate_envelope
 from jarvis.knowledge_authorization import parse_knowledge_authorization, render_knowledge_authorization
-from jarvis.knowledge_storage import FileKnowledgeStore
+from jarvis.knowledge_storage import FileKnowledgeStore, KnowledgeNotFound
 from tests.test_jarvis_knowledge import CID, candidate
 
 from jarvis.cli import main
@@ -117,6 +117,94 @@ class JarvisCliTests(unittest.TestCase):
     def test_knowledge_search_requires_exact_flags_no_free_text(self):
         with self.assertRaises(SystemExit):
             main(["knowledge", "search", "find me stuff about auth"], output=io.StringIO())
+
+
+def _run_git(*args, cwd):
+    subprocess.run(args, cwd=str(cwd), check=True, capture_output=True)
+
+
+class ProposeSourceTests(unittest.TestCase):
+    """End-to-end: real scratch git repo, real jarvis.zentra_evidence
+    read (git show <sha>:<path>), real FileKnowledgeStore.save_candidate()
+    -- only jarvis.cli.load_policy() is mocked, to point the CLI at a
+    synthetic allow-list/commit instead of the real bundled one, keeping
+    this test hermetic."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temporary.name) / "scratch-repo"
+        self.repo.mkdir()
+        _run_git("git", "init", "-q", "-b", "main", cwd=self.repo)
+        _run_git("git", "config", "user.email", "scratch@example.invalid", cwd=self.repo)
+        _run_git("git", "config", "user.name", "scratch", cwd=self.repo)
+        (self.repo / "AGENTS.md").write_text("Zentra is a construction-cost platform.", encoding="utf-8")
+        _run_git("git", "add", "AGENTS.md", cwd=self.repo)
+        _run_git("git", "commit", "-q", "-m", "seed", cwd=self.repo)
+        self.sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.repo), check=True, capture_output=True, text=True
+        ).stdout.strip()
+        self.store_root = Path(self.temporary.name) / "knowledge"
+
+        from jarvis.zentra_evidence import ZentraSource, ZentraSourcesPolicy
+        self.policy = ZentraSourcesPolicy(
+            owner="barzuna10-creator", name="proyecta-data", authorized_ref="refs/heads/main",
+            authorized_commit_sha=self.sha,
+            sources=(ZentraSource("AGENTS.md", "canonical", "repository_file"),),
+        )
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _propose(self, extra_args=()):
+        output, error = io.StringIO(), io.StringIO()
+        with mock.patch("jarvis.cli.load_policy", return_value=self.policy):
+            code = main([
+                "knowledge", "propose-source",
+                "--store-root", str(self.store_root),
+                "--repository-root", str(self.repo),
+                "--candidate-id", CID,
+                "--evidence-id", "agents_overview",
+                "--path", "AGENTS.md",
+                "--claim", "AGENTS.md describes Zentra as a construction-cost platform.",
+                "--product-area", "zentra",
+                *extra_args,
+            ], output=output, error=error)
+        return code, output.getvalue(), error.getvalue()
+
+    def test_creates_an_awaiting_review_candidate_with_real_provenance(self):
+        code, out, err = self._propose()
+        self.assertEqual(0, code, err)
+        payload = json.loads(out)
+        self.assertEqual(CID, payload["candidate_id"])
+        self.assertEqual(1, payload["revision"])
+        self.assertEqual("canonical", payload["tier"])
+        self.assertEqual(self.sha, payload["commit_sha"])
+        self.assertEqual(64, len(payload["content_digest"]))
+
+        store = FileKnowledgeStore(self.store_root)
+        self.assertEqual("draft", store.get_candidate_status(CID))
+        envelope = store.get_latest_candidate(CID)
+        self.assertEqual("canonical", envelope.content.tier)
+        self.assertEqual(self.sha, envelope.content.repository_binding.expected_commit_sha)
+        self.assertEqual(1, len(envelope.content.research_evidence))
+        self.assertEqual("FACT", envelope.content.research_evidence[0].label)
+        self.assertEqual(self.sha, envelope.content.research_evidence[0].sources[0].commit_sha)
+
+    def test_a_path_off_the_allowlist_is_a_clean_error_not_a_crash(self):
+        code, out, err = self._propose(["--path", "some/other/file.md"])
+        self.assertEqual(2, code)
+        self.assertEqual("", out)
+        self.assertEqual("ERROR ZENTRA_SOURCE_NOT_ALLOWED\n", err)
+
+    def test_it_never_advances_past_draft_status_on_its_own(self):
+        # propose-source only ever calls save_candidate() -- it must never
+        # itself call transition_candidate(), save_review(), save_authorization(),
+        # or promote(). Verified by construction: status stays "draft".
+        self._propose()
+        store = FileKnowledgeStore(self.store_root)
+        self.assertEqual("draft", store.get_candidate_status(CID))
+        with self.assertRaises(KnowledgeNotFound):
+            store.get_latest_entry(CID)
 
 
 class JarvisCliFailureIntegrationTests(ChugelTestCase):

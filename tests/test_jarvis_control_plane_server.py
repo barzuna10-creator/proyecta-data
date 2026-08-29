@@ -1,0 +1,656 @@
+"""jarvis/control_plane_server.py -- a real ThreadingHTTPServer bound to
+an ephemeral loopback port, driven with real HTTP requests (urllib) over
+the actual socket. No mocking of the HTTP layer itself."""
+
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+import tempfile
+import unittest
+import urllib.error
+import urllib.request
+
+import orchestrator.chugel as chugel
+
+from jarvis.control_plane_server import ControlPlaneConfig, build_server
+from tests.test_orchestrator_autonomous_runner import _create_intake_mission
+
+_TOKEN = "t" * 40
+
+
+class ControlPlaneServerTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_missions_dir = chugel._MISSIONS_DIR
+        chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+        config = ControlPlaneConfig(
+            host="127.0.0.1", port=0, token=_TOKEN,
+            store_root=str(Path(self._tmpdir.name) / "jarvis"),
+        )
+        self.server = build_server(config)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+        chugel._MISSIONS_DIR = self._original_missions_dir
+        self._tmpdir.cleanup()
+
+    def _request(self, method, path, body=None, token=_TOKEN):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+class AuthenticationTests(ControlPlaneServerTestCase):
+    def test_missing_token_is_rejected(self):
+        status, _ = self._request("GET", "/v1/command-center/projection", token=None)
+        self.assertEqual(401, status)
+
+    def test_wrong_token_is_rejected(self):
+        status, _ = self._request("GET", "/v1/command-center/projection", token="w" * 40)
+        self.assertEqual(401, status)
+
+    def test_correct_token_reads_projection(self):
+        status, body = self._request("GET", "/v1/command-center/projection")
+        self.assertEqual(200, status)
+        self.assertIn("gates", body)
+        self.assertIn("missions", body)
+
+
+class ProposalFlowTests(ControlPlaneServerTestCase):
+    def test_proposal_produces_a_draft_gate_the_server_identifies(self):
+        proposal_id = "223e4567-e89b-42d3-a456-426614174001"
+        status, body = self._request("POST", "/v1/proposals", {"objective": "Ship the thing", "proposalId": proposal_id})
+        self.assertEqual(201, status)
+        self.assertTrue(body["accepted"])
+        gate = body["gate"]
+        self.assertEqual("draft", gate["kind"])
+        self.assertEqual("pending", gate["state"])
+        self.assertNotEqual(proposal_id, gate["id"])  # server minted its own draft_id
+
+        status, projection = self._request("GET", "/v1/command-center/projection")
+        gate_ids = [g["id"] for g in projection["gates"]]
+        self.assertIn(gate["id"], gate_ids)
+
+    def test_crash_between_record_proposal_and_save_draft_completes_on_retry(self):
+        """Emma P1: simulates the exact crash point directly against the
+        server's own store (bypassing HTTP for the setup step only) --
+        record_proposal() durably succeeded, save_draft() never ran. The
+        retry over real HTTP must complete idempotently against the same
+        draft_id, and the draft must exist exactly once afterward."""
+        import hashlib
+        import json as jsonlib
+
+        proposal_id = "223e4567-e89b-42d3-a456-426614174001"
+        objective = "Ship the thing"
+        content_digest = hashlib.sha256(
+            jsonlib.dumps(objective, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        ).hexdigest()
+        draft_id = "323e4567-e89b-42d3-a456-426614174321"
+
+        store = self.server.store
+        store.record_proposal(proposal_id, content_digest, draft_id)  # simulated crash point
+        with self.assertRaises(Exception):
+            store.get_latest_draft(draft_id)  # confirms the draft truly was never saved
+
+        status, body = self._request("POST", "/v1/proposals", {"objective": objective, "proposalId": proposal_id})
+        self.assertEqual(201, status)
+        self.assertEqual(draft_id, body["gate"]["id"])  # same draft_id, never a second one
+        envelope = store.get_latest_draft(draft_id)
+        self.assertEqual(1, envelope.draft.revision)
+
+        # a second retry after the draft already exists is still a clean no-op
+        status2, body2 = self._request("POST", "/v1/proposals", {"objective": objective, "proposalId": proposal_id})
+        self.assertEqual(201, status2)
+        self.assertEqual(draft_id, body2["gate"]["id"])
+        self.assertEqual((1,), store.list_draft_revisions(draft_id))  # exactly one revision, ever
+
+    def test_same_proposal_same_objective_is_idempotent(self):
+        proposal_id = "223e4567-e89b-42d3-a456-426614174001"
+        _, first = self._request("POST", "/v1/proposals", {"objective": "Ship the thing", "proposalId": proposal_id})
+        _, second = self._request("POST", "/v1/proposals", {"objective": "Ship the thing", "proposalId": proposal_id})
+        self.assertEqual(first["gate"]["id"], second["gate"]["id"])
+
+    def test_same_proposal_different_objective_is_409(self):
+        proposal_id = "223e4567-e89b-42d3-a456-426614174001"
+        self._request("POST", "/v1/proposals", {"objective": "Ship the thing", "proposalId": proposal_id})
+        status, _ = self._request("POST", "/v1/proposals", {"objective": "Ship a DIFFERENT thing", "proposalId": proposal_id})
+        self.assertEqual(409, status)
+
+    def test_rejects_non_uuid_proposal_id(self):
+        status, _ = self._request("POST", "/v1/proposals", {"objective": "Ship the thing", "proposalId": "not-a-uuid"})
+        self.assertEqual(400, status)
+
+
+class DraftAuthorizationFlowTests(ControlPlaneServerTestCase):
+    def _propose(self, objective="Ship the thing", proposal_id="223e4567-e89b-42d3-a456-426614174001"):
+        _, body = self._request("POST", "/v1/proposals", {"objective": objective, "proposalId": proposal_id})
+        return body["gate"]
+
+    def test_authorization_without_digest_is_rejected(self):
+        gate = self._propose()
+        status, body = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+            "gateId": gate["id"], "missionId": gate["missionId"], "expectedRevision": gate["revision"],
+            "action": "authorize", "confirmation": "I authorize this action now",
+        })
+        self.assertEqual(400, status)
+        self.assertEqual(0, len(chugel.list_missions()))
+
+    def test_authorization_wrong_digest_is_409_fail_closed(self):
+        gate = self._propose()
+        status, _ = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+            "gateId": gate["id"], "missionId": gate["missionId"], "expectedRevision": gate["revision"],
+            "action": "authorize", "confirmation": "I authorize this action now", "digest": "0" * 64,
+        })
+        self.assertEqual(409, status)
+        self.assertEqual(0, len(chugel.list_missions()))
+
+    def test_authorization_wrong_confirmation_string_is_rejected(self):
+        gate = self._propose()
+        status, _ = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+            "gateId": gate["id"], "missionId": gate["missionId"], "expectedRevision": gate["revision"],
+            "action": "authorize", "confirmation": "yes please",
+        })
+        self.assertEqual(400, status)
+        self.assertEqual(0, len(chugel.list_missions()))
+
+    def test_draft_stub_has_open_questions_so_authorization_fails_closed_not_ready(self):
+        """The /v1/proposals stub is deliberately not authorization-ready
+        (placeholder scope/acceptance_criteria, non-empty open_questions)
+        -- refining it into a ready draft is out of this HTTP surface's
+        V1 scope. Confirms the real digest still gets refused correctly
+        rather than silently accepted."""
+        gate = self._propose()
+        status, body = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+            "gateId": gate["id"], "missionId": gate["missionId"], "expectedRevision": gate["revision"],
+            "action": "authorize", "confirmation": "I authorize this action now",
+            "digest": "a" * 64,  # still wrong -- but even the real digest would fail on open_questions
+        })
+        self.assertEqual(409, status)
+        self.assertEqual(0, len(chugel.list_missions()))
+
+    def test_ready_draft_authorized_end_to_end_creates_a_mission(self):
+        """A real, authorization-ready draft (seeded directly into the
+        store, since /v1/proposals only ever produces a not-ready stub)
+        authorized over real HTTP with its real digest -- exactly the
+        full path a genuinely refined draft would take."""
+        import dataclasses
+        from jarvis.drafts import build_draft_envelope
+        from jarvis.control_plane_server import FileJarvisStore
+        from tests.test_jarvis_drafts import valid_draft
+
+        draft_id = "323e4567-e89b-42d3-a456-426614174321"
+        ready = dataclasses.replace(valid_draft(), draft_id=draft_id)
+        envelope = build_draft_envelope(ready)
+        store = FileJarvisStore(self.server.store.root)
+        store.save_draft(envelope)
+
+        status, body = self._request("POST", f"/v1/gates/{draft_id}/authorize", {
+            "gateId": draft_id, "missionId": f"draft:{draft_id}", "expectedRevision": "1",
+            "action": "authorize", "confirmation": "I authorize this action now",
+            "digest": envelope.digest,
+        })
+        self.assertEqual(200, status)
+        self.assertEqual("draft", body["kind"])
+        self.assertEqual("authorized", body["state"])
+        self.assertEqual(1, len(chugel.list_missions()))
+        record = chugel.get_mission(body["missionId"])
+        self.assertEqual(ready.mission_definition.outcome, record["mission_definition_history"][0]["outcome"])
+
+        # retry with the exact same request -- idempotent, no second mission
+        status2, body2 = self._request("POST", f"/v1/gates/{draft_id}/authorize", {
+            "gateId": draft_id, "missionId": f"draft:{draft_id}", "expectedRevision": "1",
+            "action": "authorize", "confirmation": "I authorize this action now",
+            "digest": envelope.digest,
+        })
+        self.assertEqual(200, status2)
+        self.assertEqual(body["missionId"], body2["missionId"])
+        self.assertEqual(1, len(chugel.list_missions()))
+
+
+class RealGateFlowTests(ControlPlaneServerTestCase):
+    def test_scope_authorization_delegates_unchanged_to_mission_write(self):
+        mission = _create_intake_mission("algo")
+        mid = mission["mission_id"]
+        chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="scope ready")
+
+        _, projection = self._request("GET", "/v1/command-center/projection")
+        gate = next(g for g in projection["gates"] if g["missionId"] == mid)
+        self.assertEqual("scope", gate["kind"])
+
+        status, body = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+            "gateId": gate["id"], "missionId": mid, "expectedRevision": gate["revision"],
+            "action": "authorize", "confirmation": "I authorize this action now",
+        })
+        self.assertEqual(200, status)
+        self.assertEqual("authorized", body["state"])
+        self.assertEqual("scope", body["kind"])
+        self.assertEqual(mid, body["missionId"])
+        record = chugel.get_mission(mid)
+        self.assertEqual("approved", record["human_gates"]["scope_authorization"]["status"])
+
+    def test_scope_authorization_uses_the_current_mission_definition_version_not_hardcoded_one(self):
+        """Emma P2: a mission whose definition was re-planned to version 2
+        while scope_authorization was still pending -- authorizing it
+        through Control Plane must record approved_for.mission_definition_
+        version == 2, or Chugel's own STALE_APPROVAL check would reject
+        (or a hardcoded wrong version would silently under/over-approve)."""
+        mission = _create_intake_mission("algo")
+        mid = mission["mission_id"]
+        chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="scope ready")
+
+        proposal = {
+            "proposal_id": "223e4567-e89b-42d3-a456-426614174777",
+            "proposed_at": "2026-08-29T12:00:00Z", "proposed_by": "david",
+            "label": "FACT", "rationale": "need more scope",
+            "diff_against_current_scope": {"added": ["extra thing"], "removed": []},
+            "status": "pending_human_decision",
+            "decided_by": None, "decided_at": None, "resulting_mission_definition_version": None,
+        }
+        chugel.propose_scope_change(mid, proposal)
+        chugel.decide_scope_change(mid, proposal["proposal_id"], {
+            "status": "accepted", "decided_by": "jose", "decided_at": "2026-08-29T12:05:00Z",
+            "mission_definition_entry": {
+                "outcome": "revised outcome", "scope": ["revised scope"], "non_goals": [],
+                "acceptance_criteria": ["revised acceptance"],
+                "authorized_by": "jose", "authorized_at": "2026-08-29T12:05:00Z",
+                "authorization_decision_ref": "replan-1",
+            },
+        })
+        self.assertEqual(2, len(chugel.get_mission(mid)["mission_definition_history"]))
+
+        _, projection = self._request("GET", "/v1/command-center/projection")
+        gate = next(g for g in projection["gates"] if g["missionId"] == mid)
+
+        status, body = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+            "gateId": gate["id"], "missionId": mid, "expectedRevision": gate["revision"],
+            "action": "authorize", "confirmation": "I authorize this action now",
+        })
+        self.assertEqual(200, status)
+        record = chugel.get_mission(mid)
+        self.assertEqual("approved", record["human_gates"]["scope_authorization"]["status"])
+        self.assertEqual(2, record["human_gates"]["scope_authorization"]["approved_for"]["mission_definition_version"])
+
+    def test_stale_expected_revision_is_409(self):
+        mission = _create_intake_mission("algo")
+        mid = mission["mission_id"]
+        chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="scope ready")
+        _, projection = self._request("GET", "/v1/command-center/projection")
+        gate = next(g for g in projection["gates"] if g["missionId"] == mid)
+
+        status, _ = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+            "gateId": gate["id"], "missionId": mid, "expectedRevision": "stale-revision-value",
+            "action": "authorize", "confirmation": "I authorize this action now",
+        })
+        self.assertEqual(409, status)
+
+
+class ConversationFlowTests(ControlPlaneServerTestCase):
+    """/v1/conversation -- Jarvis's own dispatch is always mocked here
+    (real subscription-CLI behavior is covered independently in
+    tests/test_orchestrator_jarvis_conversation.py's fake-executable-CLI
+    suite); these tests are about the HTTP/draft-persistence wiring."""
+
+    def _patch_converse(self, reply="ok", suggestion=None):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        return mock.patch(
+            "jarvis.control_plane_server.jarvis_conversation.converse",
+            return_value=ConversationTurnResult(reply=reply, suggestion=suggestion),
+        )
+
+    def test_first_turn_with_no_suggestion_produces_a_reply_and_no_draft(self):
+        with self._patch_converse(reply="Tell me more.", suggestion=None):
+            status, body = self._request("POST", "/v1/conversation", {"message": "I want to ship something"})
+        self.assertEqual(200, status)
+        self.assertEqual("Tell me more.", body["reply"])
+        self.assertIsNone(body["gate"])
+        self.assertIsNone(body["draftId"])
+
+    def test_first_turn_with_a_suggestion_creates_exactly_one_draft(self):
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        suggestion = DraftFieldSuggestion(
+            outcome="Ship the thing", scope=("do the thing",), non_goals=(),
+            acceptance_criteria=("it works",), open_questions=(),
+        )
+        with self._patch_converse(reply="Drafted it.", suggestion=suggestion):
+            status, body = self._request("POST", "/v1/conversation", {"message": "Ship the thing, done when it works"})
+        self.assertEqual(200, status)
+        self.assertIsNotNone(body["gate"])
+        self.assertEqual("draft", body["gate"]["kind"])
+        draft_id = body["draftId"]
+        self.assertEqual(draft_id, body["gate"]["id"])
+
+        store = self.server.store
+        envelope = store.get_latest_draft(draft_id)
+        self.assertEqual("Ship the thing", envelope.draft.mission_definition.outcome)
+        self.assertEqual(1, envelope.draft.revision)
+        self.assertEqual((), envelope.draft.open_questions)  # model said it's ready
+
+    def test_second_turn_revises_the_same_draft_never_creates_a_second_one(self):
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        first = DraftFieldSuggestion(
+            outcome=None, scope=("do the thing",), non_goals=None,
+            acceptance_criteria=None, open_questions=("What does done look like?",),
+        )
+        with self._patch_converse(reply="What does done look like?", suggestion=first):
+            _, body1 = self._request("POST", "/v1/conversation", {"message": "I want to do the thing"})
+        draft_id = body1["draftId"]
+
+        second = DraftFieldSuggestion(
+            outcome="Ship the thing", scope=None, non_goals=None,
+            acceptance_criteria=("it works",), open_questions=(),
+        )
+        with self._patch_converse(reply="Ready to authorize.", suggestion=second):
+            status2, body2 = self._request("POST", "/v1/conversation", {
+                "message": "It works end to end", "draftId": draft_id,
+                "history": [{"role": "user", "text": "I want to do the thing"}, {"role": "jarvis", "text": "What does done look like?"}],
+            })
+        self.assertEqual(200, status2)
+        self.assertEqual(draft_id, body2["draftId"])  # same draft, not a new one
+
+        store = self.server.store
+        self.assertEqual((1, 2), store.list_draft_revisions(draft_id))
+        latest = store.get_latest_draft(draft_id)
+        self.assertEqual("Ship the thing", latest.draft.mission_definition.outcome)
+        self.assertEqual(("do the thing",), latest.draft.mission_definition.scope)  # carried forward, not lost
+        self.assertEqual((), latest.draft.open_questions)
+
+    def test_unknown_draft_id_is_404(self):
+        with self._patch_converse(reply="ok", suggestion=None):
+            status, _ = self._request("POST", "/v1/conversation", {
+                "message": "continue", "draftId": "999e4567-e89b-42d3-a456-426614174999",
+            })
+        self.assertEqual(404, status)
+
+    def test_missing_message_is_400(self):
+        status, _ = self._request("POST", "/v1/conversation", {"draftId": None})
+        self.assertEqual(400, status)
+
+    def test_subscription_auth_required_maps_to_503(self):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import SubscriptionAuthRequired
+        with mock.patch(
+            "jarvis.control_plane_server.jarvis_conversation.converse",
+            side_effect=SubscriptionAuthRequired("not logged in"),
+        ):
+            status, body = self._request("POST", "/v1/conversation", {"message": "hi"})
+        self.assertEqual(503, status)
+        self.assertIn("error", body)
+
+    def test_never_writes_decided_by_or_touches_any_mission(self):
+        """The conversational layer must never produce Chugel authority --
+        confirmed here by the strongest available check: zero missions
+        exist after a full conversation that reaches open_questions=()."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        ready = DraftFieldSuggestion(
+            outcome="Ship it", scope=("do it",), non_goals=(),
+            acceptance_criteria=("works",), open_questions=(),
+        )
+        with self._patch_converse(reply="Ready.", suggestion=ready):
+            self._request("POST", "/v1/conversation", {"message": "ship it, done when it works"})
+        self.assertEqual(0, len(chugel.list_missions()))
+
+    def test_concurrent_revision_during_dispatch_is_not_lost(self):
+        """P0-1 regression: _handle_conversation() must base its merge on
+        the draft state read *inside* exclusive_entity_lock, not on the
+        envelope captured before the (potentially slow) converse() call.
+        Here converse()'s mock simulates a second, concurrent request
+        completing and saving revision 2 while the first request's own
+        dispatch is still 'in flight' -- this request's own merge must
+        build on that revision 2, not silently clobber it back to a
+        revision built from the stale revision-1 envelope it read before
+        dispatch started."""
+        from orchestrator.jarvis_conversation import ConversationTurnResult, DraftFieldSuggestion
+        from jarvis.drafts import build_draft_envelope, revise_mission_draft
+        from jarvis.models import DraftChanges, MissionDefinitionDraft
+        from jarvis.control_plane_server import _advanced_timestamp
+        import unittest.mock as mock
+
+        first = DraftFieldSuggestion(
+            outcome=None, scope=("do the thing",), non_goals=None,
+            acceptance_criteria=None, open_questions=("What does done look like?",),
+        )
+        with self._patch_converse(reply="What does done look like?", suggestion=first):
+            _, body1 = self._request("POST", "/v1/conversation", {"message": "I want to do the thing"})
+        draft_id = body1["draftId"]
+
+        store = self.server.store
+
+        def _simulate_concurrent_revision_then_return(*args, **kwargs):
+            # Stands in for a second, concurrent /v1/conversation request
+            # that finishes (dispatch + save) entirely while this
+            # request's own converse() call is still pending.
+            envelope = store.get_latest_draft(draft_id)
+            revised = revise_mission_draft(
+                envelope.draft, updated_at=_advanced_timestamp(envelope.draft.updated_at),
+                changes=DraftChanges(
+                    mission_definition=MissionDefinitionDraft(
+                        outcome=envelope.draft.mission_definition.outcome,
+                        scope=envelope.draft.mission_definition.scope,
+                        non_goals=("concurrently added non-goal",),
+                        acceptance_criteria=envelope.draft.mission_definition.acceptance_criteria,
+                    ),
+                    open_questions=envelope.draft.open_questions,
+                ),
+            )
+            store.save_draft(build_draft_envelope(revised))
+            second = DraftFieldSuggestion(
+                outcome="Ship the thing", scope=None, non_goals=None,
+                acceptance_criteria=("it works",), open_questions=(),
+            )
+            return ConversationTurnResult(reply="Ready to authorize.", suggestion=second)
+
+        with mock.patch(
+            "jarvis.control_plane_server.jarvis_conversation.converse",
+            side_effect=_simulate_concurrent_revision_then_return,
+        ):
+            status2, body2 = self._request("POST", "/v1/conversation", {
+                "message": "It works end to end", "draftId": draft_id,
+            })
+        self.assertEqual(200, status2)
+
+        latest = store.get_latest_draft(draft_id)
+        # Revision 3: built on top of the concurrently-saved revision 2,
+        # not a revision 2 that overwrites/loses it.
+        self.assertEqual(3, latest.draft.revision)
+        self.assertEqual("Ship the thing", latest.draft.mission_definition.outcome)
+        self.assertEqual(("do the thing",), latest.draft.mission_definition.scope)
+        # The field the "concurrent" request set must survive this
+        # request's own merge -- proof the merge based itself on the
+        # freshly re-read (revision 2) draft, not the stale pre-dispatch one.
+        self.assertEqual(("concurrently added non-goal",), latest.draft.mission_definition.non_goals)
+
+    def test_open_questions_only_suggestion_on_a_brand_new_conversation_creates_no_draft(self):
+        """P2 regression (round-2 review, escalated from round-1 P3-1):
+        a live dispatch was observed to produce a suggestion with every
+        field None except open_questions=() -- on a brand-new
+        conversation (no existing draft), naively treating open_questions
+        as sufficient signal would create a draft filled entirely with
+        placeholder outcome/scope/acceptance_criteria while marking it
+        open_questions=() ('ready'), which is never a real proposal."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        only_open_questions = DraftFieldSuggestion(
+            outcome=None, scope=None, non_goals=None, acceptance_criteria=None, open_questions=(),
+        )
+        with self._patch_converse(reply="Sounds good.", suggestion=only_open_questions):
+            status, body = self._request("POST", "/v1/conversation", {"message": "ok"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["gate"])
+        self.assertIsNone(body["draftId"])
+
+    def test_open_questions_only_suggestion_still_revises_an_existing_draft(self):
+        """The same shape (only open_questions provided) IS meaningful
+        when revising a draft that already has real prior content -- it
+        legitimately marks that existing content as now ready."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        first = DraftFieldSuggestion(
+            outcome="Ship the thing", scope=("do the thing",), non_goals=(),
+            acceptance_criteria=("it works",), open_questions=("Anything else?",),
+        )
+        with self._patch_converse(reply="Anything else?", suggestion=first):
+            _, body1 = self._request("POST", "/v1/conversation", {"message": "ship the thing, done when it works"})
+        draft_id = body1["draftId"]
+
+        only_open_questions = DraftFieldSuggestion(
+            outcome=None, scope=None, non_goals=None, acceptance_criteria=None, open_questions=(),
+        )
+        with self._patch_converse(reply="Ready to authorize.", suggestion=only_open_questions):
+            status2, body2 = self._request("POST", "/v1/conversation", {
+                "message": "nope, that's everything", "draftId": draft_id,
+            })
+        self.assertEqual(200, status2)
+        self.assertEqual(draft_id, body2["draftId"])
+        latest = self.server.store.get_latest_draft(draft_id)
+        self.assertEqual((), latest.draft.open_questions)  # now marked ready
+        self.assertEqual("Ship the thing", latest.draft.mission_definition.outcome)  # real content preserved, not clobbered by placeholders
+
+    def test_an_entirely_empty_suggestion_object_creates_no_draft(self):
+        """A suggestion object with every field null means the same thing
+        as suggestion: null -- regression test for the exact gap Emma's
+        review found: without this, a model emitting {} instead of the
+        literal null would spuriously create a placeholder-only draft."""
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        empty = DraftFieldSuggestion(
+            outcome=None, scope=None, non_goals=None, acceptance_criteria=None, open_questions=None,
+        )
+        with self._patch_converse(reply="Still listening.", suggestion=empty):
+            status, body = self._request("POST", "/v1/conversation", {"message": "hmm"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["gate"])
+        self.assertIsNone(body["draftId"])
+
+    def test_not_configured_knowledge_store_passes_empty_citations(self):
+        # The default ControlPlaneServerTestCase server never sets
+        # knowledge_store_root/zentra_repository_root -- Mission 005's
+        # explicit "unset = exactly pre-Mission-005 behavior" contract.
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        converse = mock.Mock(return_value=ConversationTurnResult(reply="ok", suggestion=None))
+        with mock.patch("jarvis.control_plane_server.jarvis_conversation.converse", converse):
+            self._request("POST", "/v1/conversation", {"message": "hi"})
+        self.assertEqual((), converse.call_args.kwargs["trusted_citations"])
+
+
+class ConversationKnowledgeCitationTests(unittest.TestCase):
+    """Mission 005's Capa 2 wiring: a real, promoted, canonical
+    KnowledgeEntry reaches converse() as a trusted_citations entry, and
+    the fixed, non-caller-controlled product_areas=("zentra",) is what
+    /v1/conversation always searches with."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_missions_dir = chugel._MISSIONS_DIR
+        chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+
+        import subprocess
+
+        self.repo = Path(self._tmpdir.name) / "zentra-repo"
+        self.repo.mkdir()
+        for args in (
+            ("git", "init", "-q", "-b", "main"), ("git", "config", "user.email", "x@example.invalid"),
+            ("git", "config", "user.name", "x"),
+        ):
+            subprocess.run(args, cwd=str(self.repo), check=True, capture_output=True)
+        (self.repo / "f.txt").write_text("1", encoding="utf-8")
+        subprocess.run(("git", "add", "f.txt"), cwd=str(self.repo), check=True, capture_output=True)
+        subprocess.run(("git", "commit", "-q", "-m", "seed"), cwd=str(self.repo), check=True, capture_output=True)
+
+        from jarvis.knowledge import EmmaKnowledgeReview, KnowledgeApplicability, build_candidate_envelope
+        from jarvis.knowledge_authorization import parse_knowledge_authorization, render_knowledge_authorization
+        from jarvis.knowledge_storage import FileKnowledgeStore
+        from tests.test_jarvis_knowledge import candidate
+
+        knowledge_root = Path(self._tmpdir.name) / "knowledge"
+        store = FileKnowledgeStore(knowledge_root)
+        cid = "123e4567-e89b-42d3-a456-426614174111"
+        content = candidate(
+            candidate_id=cid, claim="Zentra is a construction-cost intelligence platform.",
+            applicability=KnowledgeApplicability(("zentra",)), tier="canonical",
+        )
+        envelope = build_candidate_envelope(content)
+        store.save_candidate(envelope)
+        store.transition_candidate(cid, "awaiting_emma_review")
+        store.transition_candidate(cid, "awaiting_human_authorization")
+        review = EmmaKnowledgeReview(cid, 1, envelope.content_digest, "PASS", "2026-08-26T00:00:01Z")
+        authorization = parse_knowledge_authorization(render_knowledge_authorization(envelope))
+        store.save_review(review)
+        store.save_authorization(authorization)
+        store.promote(cid, review, authorization)
+
+        from jarvis.control_plane_server import ControlPlaneConfig, build_server
+        config = ControlPlaneConfig(
+            host="127.0.0.1", port=0, token=_TOKEN, store_root=str(Path(self._tmpdir.name) / "jarvis"),
+            knowledge_store_root=str(knowledge_root), zentra_repository_root=str(self.repo),
+        )
+        self.server = build_server(config)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+        chugel._MISSIONS_DIR = self._original_missions_dir
+        self._tmpdir.cleanup()
+
+    def _request(self, method, path, body=None, token=_TOKEN):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def test_a_real_promoted_canonical_entry_reaches_converse_as_a_citation(self):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        converse = mock.Mock(return_value=ConversationTurnResult(reply="ok", suggestion=None))
+        with mock.patch("jarvis.control_plane_server.jarvis_conversation.converse", converse):
+            status, _ = self._request("POST", "/v1/conversation", {"message": "what is zentra"})
+        self.assertEqual(200, status)
+        citations = converse.call_args.kwargs["trusted_citations"]
+        self.assertEqual(1, len(citations))
+        self.assertEqual("Zentra is a construction-cost intelligence platform.", citations[0]["claim"])
+        self.assertEqual("canonical", citations[0]["tier"])
+        self.assertEqual("FACT", citations[0]["label"])
+
+    def test_the_fixed_zentra_product_area_is_always_used_not_caller_supplied(self):
+        # /v1/conversation's request body has no field for product_areas
+        # at all -- proves the search area is fixed server-side, never
+        # something a client could widen or redirect.
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        converse = mock.Mock(return_value=ConversationTurnResult(reply="ok", suggestion=None))
+        with mock.patch("jarvis.control_plane_server.jarvis_conversation.converse", converse):
+            self._request("POST", "/v1/conversation", {
+                "message": "hi", "product_areas": ["totally-different-area"],
+            })
+        citations = converse.call_args.kwargs["trusted_citations"]
+        self.assertEqual(1, len(citations))  # still matched -- the extra body field was ignored
+
+
+if __name__ == "__main__":
+    unittest.main()

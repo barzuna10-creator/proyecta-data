@@ -317,7 +317,7 @@ class FileKnowledgeStore:
                 if target.revision != content.expected_target_revision: raise KnowledgeTargetRevisionChanged("target revision changed")
                 if target.status != content.expected_current_status: raise KnowledgeTargetStateChanged("target status changed")
             self._validate_transition_evidence(envelope, target)
-            entry = KnowledgeEntry("1.0", target_id, 1 if target is None else target.revision + 1, content.created_at, content.proposed_entry_status, content.label, content.claim, content.applicability, content.repository_binding, content.research_evidence, content.based_on, content.contradicts, content.supersedes, content.candidate_id, content.revision, envelope.content_digest)  # type: ignore[arg-type]
+            entry = KnowledgeEntry("1.0", target_id, 1 if target is None else target.revision + 1, content.created_at, content.proposed_entry_status, content.label, content.claim, content.applicability, content.repository_binding, content.research_evidence, content.based_on, content.contradicts, content.supersedes, content.candidate_id, content.revision, envelope.content_digest, tier=content.tier)  # type: ignore[arg-type]
             return self._commit_promotion(envelope, entry)
 
     def _commit_promotion(self, envelope: KnowledgeCandidateEnvelope, entry: KnowledgeEntry) -> KnowledgeEntry:

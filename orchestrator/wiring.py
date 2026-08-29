@@ -49,6 +49,7 @@ they are made structurally unreachable from this dispatch path.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 
 from orchestrator.adapters.claude_cli_adapter import ClaudeCliAdapter
@@ -61,6 +62,7 @@ from orchestrator.agent_invocation import (
     build_emma_invocation_request,
     consume_emilio_result,
     consume_emma_result,
+    get_builder_provider,
     mark_invocation_dispatched,
     record_invocation_result,
     require_eligible_invocation,
@@ -117,6 +119,42 @@ class UnapprovedAdapterType(WiringError):
     `adapter.invoke()` ever run -- no durable IN_FLIGHT marking, no
     provider spend, no evidence. Like `UnknownAdapterSelected`, this is a
     caller-configuration error, never a provider-side outcome."""
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _provider_independence_unavailable_result(
+    request: AgentInvocationRequest, provider: str
+) -> AgentInvocationResult:
+    """Synthetic, never-invoked result standing in for a genuine adapter
+    response, used only when routing would send Emma to the exact same
+    provider builder_evidence[attempt] already recorded for Emilio.
+    outcome="unavailable" is deliberately the same classification an
+    adapter itself reports when it cannot dispatch at all -- it is
+    already a member of DISPATCH_RETRYABLE_CLASSIFICATIONS, so this
+    reuses the existing retry path in chugel.reserve_dispatch() without
+    any change there. fresh_context_attested is set True (not a claim
+    about a model that never ran -- consume_emma_result() asserts this
+    field is literally True for every result shape, completed or not,
+    before it even reaches the outcome branch)."""
+    return AgentInvocationResult(
+        invocation_id=request.invocation_id,
+        outcome="unavailable",
+        provider=provider,
+        model=None,
+        responded_at=_now(),
+        fresh_context_attested=True,
+        provider_session_id=None,
+        provider_conversation_id=None,
+        evidence=None,
+        error_detail=(
+            f"reviewer provider {provider!r} matches the builder provider "
+            f"already recorded for attempt {request.attempt} -- independent "
+            "review is unavailable from this provider for this attempt"
+        ),
+    )
 
 
 def to_attempt_record(result: AgentInvocationResult) -> AttemptRecord:
@@ -195,6 +233,26 @@ def _select_and_dispatch(
             f"{tuple(cls.__name__ for cls in _SUBSCRIPTION_ONLY_ADAPTER_TYPES)} -- "
             "refusing to dispatch through a non-subscription-CLI adapter"
         )
+
+    # Emma-only provider-independence guard: a failover that would land
+    # Emma on the exact same provider builder_evidence[attempt] already
+    # recorded for Emilio can never produce a publishable approval --
+    # refuse before ever invoking it, and record the outcome as
+    # "unavailable" (already retryable) rather than let it complete as
+    # if it were a real, independent review. Emilio has no independence
+    # requirement of his own, so this never applies to his role.
+    if agent_role == "emma":
+        builder_provider = get_builder_provider(request.mission_id, attempt)
+        if builder_provider is not None and decision.adapter_name == builder_provider:
+            mark_invocation_dispatched(
+                request.mission_id, request.invocation_id, provider=decision.adapter_name
+            )
+            result = _provider_independence_unavailable_result(request, decision.adapter_name)
+            record_invocation_result(
+                request.mission_id, request.invocation_id, outcome=result.outcome
+            )
+            return decision, result
+
     mark_invocation_dispatched(
         request.mission_id, request.invocation_id, provider=decision.adapter_name
     )

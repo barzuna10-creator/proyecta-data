@@ -76,6 +76,24 @@ def create_mission(intent_text: str, mission_definition: dict, decision: dict, *
     return chugel.create_mission(intent_text, mission_definition, mission_id=mission_id)
 
 
+def create_mission_if_absent(
+    intent_text: str, mission_definition: dict, decision: dict, *, mission_id: str,
+) -> dict:
+    """Control Plane V1: identical to create_mission() (same attribution
+    requirement, same underlying write), except a MissionRecordAlreadyExists
+    at the given `mission_id` is treated as idempotent success -- the
+    existing record is returned, not raised -- rather than as a caller
+    error. Exists specifically so jarvis.mission_authorization_bridge,
+    which is not one of Chugel's three disclosed import seams, never needs
+    to import orchestrator.chugel itself just to catch this one exception;
+    this stays inside mission_write.py's own already-allowed write seam."""
+    _require_current_turn_attribution(decision)
+    try:
+        return chugel.create_mission(intent_text, mission_definition, mission_id=mission_id)
+    except chugel.MissionRecordAlreadyExists:
+        return chugel.get_mission(mission_id)
+
+
 def authorize_scope(mission_id: str, decision: dict) -> dict:
     return _authorize(mission_id, "scope_authorization", decision)
 

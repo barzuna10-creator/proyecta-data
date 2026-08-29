@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "repository": {
+    "owner": "barzuna10-creator",
+    "name": "proyecta-data",
+    "authorized_ref": "refs/heads/main",
+    "authorized_commit_sha": "8b416a74c305617efa02b4c13aea9d550e35cc8b"
+  },
+  "sources": [
+    {"path": "AGENTS.md", "tier": "canonical", "kind": "repository_file"},
+    {"path": "docs/zentra/MASTER_ROADMAP.md", "tier": "canonical", "kind": "product_document"},
+    {"path": "orchestrator/CHUGEL_V1.md", "tier": "canonical", "kind": "repository_file"},
+    {"path": "agents/jarvis/CONTRACT.md", "tier": "canonical", "kind": "repository_file"},
+    {"path": "agents/jarvis/PRINCIPLES.md", "tier": "canonical", "kind": "repository_file"},
+    {"path": "DEPLOYMENT.md", "tier": "canonical", "kind": "repository_file"},
+    {"path": ".github/workflows/backend-ci.yml", "tier": "canonical", "kind": "repository_file"},
+    {"path": "docs/zentra/HANDOFF_MISSION_001.md", "tier": "complementary", "kind": "product_document"},
+    {"path": "docs/zentra/HANDOFF_MISSION_002.md", "tier": "complementary", "kind": "product_document"},
+    {"path": "docs/zentra/HANDOFF_MISSION_002_CORRECCION.md", "tier": "complementary", "kind": "product_document"}
+  ]
+}

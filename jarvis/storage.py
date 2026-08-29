@@ -51,6 +51,49 @@ class AuthorizationIntentAlreadyRecorded(JarvisStorageError):
     pass
 
 
+class ProposalContentMismatch(JarvisStorageError):
+    """The same proposal_id was submitted before with different content.
+
+    proposal_id is only ever an idempotency key over a request, never an
+    identity -- fail closed rather than silently accept a second, different
+    payload under the same key, and never overwrite the first."""
+    pass
+
+
+class AuthorizationEffectMismatch(JarvisStorageError):
+    """The same authorization intent_id already has a durably recorded
+    effect (mission_id) that disagrees with what the caller is about to
+    record -- refuse to trust either value rather than pick one."""
+    pass
+
+
+class _ProposalAlreadyRecorded(JarvisStorageError):
+    """Internal-only duplicate-create signal, caught within the same
+    method that raises it -- never escapes record_proposal()."""
+    pass
+
+
+class _AuthorizationEffectAlreadyRecorded(JarvisStorageError):
+    """Internal-only duplicate-create signal, caught within the same
+    method that raises it -- never escapes record_authorization_effect()."""
+    pass
+
+
+def authorization_intent_id(intent: AuthorizationIntent) -> str:
+    """The deterministic identity of one authorization intent -- a pure
+    function of draft_id/revision/digest_algorithm/digest, nothing else.
+    Shared by record_authorization_intent() (below) and
+    jarvis.mission_authorization_bridge, which needs to compute this same
+    id before it knows whether record_authorization_intent() will report
+    it as new or already-recorded."""
+    if intent.digest_algorithm != "sha256" or _DIGEST.fullmatch(intent.digest) is None:
+        raise ValueError("authorization intent must carry a lowercase SHA-256 digest")
+    _validate_draft_id(intent.draft_id)
+    _validate_revision(intent.revision)
+    identity = f"{intent.draft_id}:{intent.revision}:{intent.digest_algorithm}:{intent.digest}"
+    return hashlib.sha256(identity.encode("ascii")).hexdigest()
+
+
 class JarvisStore(Protocol):
     def save_draft(self, envelope: DraftEnvelope) -> None: ...
     def get_draft(self, draft_id: str, revision: int) -> DraftEnvelope: ...
@@ -97,10 +140,16 @@ class FileJarvisStore:
         self.root = supplied.resolve()
         self._drafts = self.root / "drafts"
         self._intents = self.root / "authorization-intents"
-        for directory in (self._drafts, self._intents):
+        self._proposals = self.root / "proposals"
+        self._effects = self.root / "authorization-effects"
+        self._authorized = self.root / "authorized-drafts"
+        for directory in (self._drafts, self._intents, self._proposals, self._effects, self._authorized):
             if directory.exists() and directory.is_symlink():
                 raise StoragePathUnsafe(f"storage directory must not be a symlink: {directory}")
-            directory.mkdir(mode=0o700)
+            # exist_ok=True: FileJarvisStore must be re-openable against an
+            # already-populated root -- this is exactly what happens on
+            # every Control Plane server restart, not just first creation.
+            directory.mkdir(mode=0o700, exist_ok=True)
             _validate_and_chmod_directory(directory)
 
     def _draft_directory(self, draft_id: str, *, create: bool) -> Path:
@@ -180,14 +229,7 @@ class FileJarvisStore:
         return self.get_draft(draft_id, revisions[-1])
 
     def record_authorization_intent(self, intent: AuthorizationIntent) -> str:
-        _validate_draft_id(intent.draft_id)
-        _validate_revision(intent.revision)
-        if intent.digest_algorithm != "sha256" or _DIGEST.fullmatch(intent.digest) is None:
-            raise ValueError("authorization intent must carry a lowercase SHA-256 digest")
-        identity = (
-            f"{intent.draft_id}:{intent.revision}:{intent.digest_algorithm}:{intent.digest}"
-        )
-        intent_id = hashlib.sha256(identity.encode("ascii")).hexdigest()
+        intent_id = authorization_intent_id(intent)
         payload = {
             "authorization_intent_id": intent_id,
             "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -206,3 +248,118 @@ class FileJarvisStore:
             duplicate_error=AuthorizationIntentAlreadyRecorded,
         )
         return intent_id
+
+    def record_proposal(self, proposal_id: str, content_digest: str, draft_id: str) -> str:
+        """proposal_id is a durable idempotency key over a request, never
+        an identity: the caller-supplied value is only ever compared
+        against what -- if anything -- was already recorded for it.
+
+        Same proposal_id + same content_digest, any number of times,
+        any number of process restarts in between: returns the same
+        draft_id every time, writes nothing new after the first call.
+        Same proposal_id + a different content_digest: raises
+        ProposalContentMismatch, never overwrites the first record --
+        the caller (jarvis.control_plane_server) turns this into a 409,
+        and no draft is created or mutated as a result of the mismatched
+        call."""
+        _validate_draft_id(proposal_id)
+        _validate_draft_id(draft_id)
+        if _DIGEST.fullmatch(content_digest) is None:
+            raise ValueError("content_digest must be a lowercase SHA-256 hex digest")
+        payload = {
+            "proposal_id": proposal_id,
+            "content_digest": content_digest,
+            "draft_id": draft_id,
+            "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        rendered = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        path = self._proposals / f"{proposal_id}.json"
+        try:
+            self._atomic_create(path, rendered, duplicate_error=_ProposalAlreadyRecorded)
+        except _ProposalAlreadyRecorded:
+            existing = self._read_json(path)
+            if existing.get("content_digest") != content_digest:
+                raise ProposalContentMismatch(proposal_id) from None
+            return existing["draft_id"]
+        return draft_id
+
+    def get_proposal(self, proposal_id: str) -> dict | None:
+        _validate_draft_id(proposal_id)
+        path = self._proposals / f"{proposal_id}.json"
+        try:
+            return self._read_json(path)
+        except DraftNotFound:
+            return None
+
+    def record_authorization_effect(self, intent_id: str, mission_id: str) -> str:
+        """intent_id -> mission_id, recorded exactly once per intent_id,
+        ever. The presence of this record -- not any in-memory state -- is
+        what jarvis.mission_authorization_bridge trusts to know a draft
+        authorization has already produced a Mission Record, including
+        across a crash between chugel.create_mission() succeeding and this
+        call ever being reached."""
+        if _DIGEST.fullmatch(intent_id) is None:
+            raise ValueError("intent_id must be a lowercase SHA-256 hex digest")
+        _validate_draft_id(mission_id)
+        payload = {
+            "authorization_intent_id": intent_id,
+            "mission_id": mission_id,
+            "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        rendered = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        path = self._effects / f"{intent_id}.json"
+        try:
+            self._atomic_create(path, rendered, duplicate_error=_AuthorizationEffectAlreadyRecorded)
+        except _AuthorizationEffectAlreadyRecorded:
+            existing = self._read_json(path)
+            if existing.get("mission_id") != mission_id:
+                raise AuthorizationEffectMismatch(intent_id) from None
+            return existing["mission_id"]
+        return mission_id
+
+    def get_authorization_effect(self, intent_id: str) -> str | None:
+        if _DIGEST.fullmatch(intent_id) is None:
+            raise ValueError("intent_id must be a lowercase SHA-256 hex digest")
+        path = self._effects / f"{intent_id}.json"
+        try:
+            value = self._read_json(path)
+        except DraftNotFound:
+            return None
+        return value["mission_id"]
+
+    def mark_draft_authorized(self, draft_id: str) -> None:
+        """Idempotent: recorded at most once per draft_id, safe to call
+        again on a retry. Used only to keep already-authorized drafts out
+        of the projection's pending-gates list -- never consulted for any
+        authorization decision itself (that is exclusively
+        get_authorization_effect(), keyed by intent_id)."""
+        _validate_draft_id(draft_id)
+        payload = {
+            "draft_id": draft_id,
+            "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        rendered = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        try:
+            self._atomic_create(self._authorized / f"{draft_id}.json", rendered, duplicate_error=DraftAlreadyExists)
+        except DraftAlreadyExists:
+            pass
+
+    def list_draft_ids(self) -> tuple[str, ...]:
+        drafts = []
+        for path in self._drafts.iterdir():
+            if path.is_symlink():
+                raise StoragePathUnsafe(f"refusing symlink in drafts root: {path}")
+            if path.is_dir() and _DRAFT_ID.fullmatch(path.name):
+                drafts.append(path.name)
+        return tuple(sorted(drafts))
+
+    def list_pending_draft_ids(self) -> tuple[str, ...]:
+        authorized = set()
+        for path in self._authorized.iterdir():
+            if path.is_symlink():
+                raise StoragePathUnsafe(f"refusing symlink in authorized-drafts root: {path}")
+            if path.is_file():
+                match = re.fullmatch(r"([0-9a-f-]{36})\.json", path.name)
+                if match:
+                    authorized.add(match.group(1))
+        return tuple(draft_id for draft_id in self.list_draft_ids() if draft_id not in authorized)

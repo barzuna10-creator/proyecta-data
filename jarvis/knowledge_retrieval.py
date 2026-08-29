@@ -41,6 +41,13 @@ def _label_priority(label: str) -> int:
     return {"INTENT": 0, "FACT": 1}.get(label, 2)
 
 
+def _tier_priority(tier: str | None) -> int:
+    # A missing/unknown tier (legacy content persisted before the field
+    # existed) ranks LAST, below both canonical and complementary -- it
+    # must never win an implicit authority upgrade just by being present.
+    return {"canonical": 0, "complementary": 1}.get(tier, 2)
+
+
 def _eligible(entry: KnowledgeEntry, *, product_areas: tuple[str, ...], resolver: RepositoryFreshnessResolver) -> tuple[bool, tuple[str, ...]]:
     """Return (eligible, match_reasons). Never raises: every failure mode
     is caught here and folded into an ineligible result."""
@@ -55,6 +62,7 @@ def _eligible(entry: KnowledgeEntry, *, product_areas: tuple[str, ...], resolver
 
     reasons = [f"PRODUCT_AREA_MATCH:{area}" for area in matched_areas]
     reasons.append("LABEL_INTENT" if entry.label == "INTENT" else "LABEL_FACT")
+    reasons.append({"canonical": "TIER_CANONICAL", "complementary": "TIER_COMPLEMENTARY"}.get(entry.tier, "TIER_UNKNOWN_LEGACY"))
 
     if entry.repository_binding is not None:
         try:
@@ -94,7 +102,11 @@ def search(
     def sort_key(item: tuple[KnowledgeEntry, tuple[str, ...]]):
         entry, _ = item
         match_count = len(set(entry.applicability.product_areas) & set(product_areas))
-        return (-match_count, _label_priority(entry.label), entry.knowledge_id, -entry.revision)
+        # tier ranks immediately after product-area match count and
+        # before label: a complementary (or unclassified-legacy) entry
+        # can never outrank a canonical one at equal area match, no
+        # matter its label or recency.
+        return (-match_count, _tier_priority(entry.tier), _label_priority(entry.label), entry.knowledge_id, -entry.revision)
 
     eligible.sort(key=sort_key)
 

@@ -372,7 +372,14 @@ class PruebaEscrituraDeEvidencia(WiringTestCase):
                 self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [], msg=bad_outcome)
 
     def test_emma_mismo_provider_sin_identidad_no_completada_sigue_reintentable(self):
+        """Independiente de la propiedad de independencia de proveedor
+        (probada aparte, PruebaIndependenciaDeProveedorParaEmma abajo):
+        esta prueba usa deliberadamente un proveedor de Emma distinto al
+        del builder, para aislar la propiedad que sí le compete -- un
+        outcome real no-completado del adapter nunca escribe evidencia y
+        el mismo (role, attempt) sigue siendo reintentable."""
         for provider in ("claude", "codex"):
+            emma_provider = "codex" if provider == "claude" else "claude"
             for bad_outcome in ("failed", "timeout", "unavailable", "invalid_output"):
                 with self.subTest(provider=provider, outcome=bad_outcome):
                     mid = self._mission_ready_for_emilio()
@@ -385,23 +392,22 @@ class PruebaEscrituraDeEvidencia(WiringTestCase):
                     chugel.transition(mid, "AWAITING_REVIEW", actor="chugel", reason="checks complete")
                     chugel.transition(mid, "REVIEWING", actor="chugel", reason="review starts")
                     templates = [_result_fields(
-                        provider=provider, outcome=bad_outcome, evidence=None,
+                        provider=emma_provider, outcome=bad_outcome, evidence=None,
                         provider_session_id=None, provider_conversation_id=None,
                         error_detail="provider did not complete",
                     )] * 2
                     stub = _StubAdapter(templates)
                     config = router.ProviderConfig(roles={
                         "emma": router.RoleProviderPolicy(
-                            primary=provider,
-                            fallback=("codex" if provider == "claude" else "claude"),
+                            primary=emma_provider, fallback=provider,
                         ),
                     })
 
                     first = wiring.run_emma_attempt(
-                        mid, 0, adapters={provider: stub}, config=config,
+                        mid, 0, adapters={emma_provider: stub}, config=config,
                     )
                     second = wiring.run_emma_attempt(
-                        mid, 0, adapters={provider: stub}, config=config,
+                        mid, 0, adapters={emma_provider: stub}, config=config,
                     )
 
                     self.assertIsNone(first.updated_mission)
@@ -485,6 +491,13 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
         chugel.transition(mid, "REVIEWING", actor="chugel", reason="review starts")
 
     def test_restart_resume_usa_identidad_persistida_y_detecta_reuso(self):
+        """El proveedor de Emma se elige distinto al del builder (codex)
+        a propósito, para que esta prueba aísle la detección de reuso de
+        identidad -- una propiedad distinta de la independencia de
+        proveedor, que tiene su propia prueba dedicada
+        (PruebaIndependenciaDeProveedorParaEmma, abajo). La comparación de
+        _check_persisted_builder_independence() es por valor literal, no
+        depende de que los proveedores coincidan."""
         mid = self._mission_ready_for_emilio()
         self._ejecutar_emilio_y_abrir_revision(
             mid, conversation_id="codex-thread-real", provider="codex",
@@ -493,12 +506,11 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
         self.assertEqual(reloaded["builder_evidence"][0]["provider_conversation_id"],
                          "codex-thread-real")
         emma_stub = _StubAdapter([_result_fields(
-            provider="codex", provider_conversation_id="codex-thread-real",
+            provider="claude", provider_conversation_id="codex-thread-real",
             evidence=_reviewer_evidence(0),
         )])
         with self.assertRaises(ai.StaleSessionReused):
-            wiring.run_emma_attempt(mid, 0, adapters={"codex": emma_stub},
-                                    config=_EMMA_CODEX_CONFIG)
+            wiring.run_emma_attempt(mid, 0, adapters={"claude": emma_stub})
 
     def test_mismo_session_id_es_rechazado(self):
         mid = self._mission_ready_for_emilio()
@@ -506,11 +518,12 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
             mid, session_id="claude-session-SAME", provider="claude",
         )
         emma_stub = _StubAdapter([_result_fields(
-            provider="claude", provider_session_id="claude-session-SAME",
+            provider="codex", provider_session_id="claude-session-SAME",
             evidence=_reviewer_evidence(0),
         )])
         with self.assertRaises(ai.StaleSessionReused):
-            wiring.run_emma_attempt(mid, 0, adapters={"claude": emma_stub})
+            wiring.run_emma_attempt(mid, 0, adapters={"codex": emma_stub},
+                                    config=_EMMA_CODEX_CONFIG)
 
     def test_identidad_distinta_es_aceptada(self):
         mid = self._mission_ready_for_emilio()
@@ -518,10 +531,11 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
             mid, session_id="claude-session-builder", provider="claude",
         )
         emma_stub = _StubAdapter([_result_fields(
-            provider="claude", provider_session_id="claude-session-reviewer",
+            provider="codex", provider_session_id="claude-session-reviewer",
             evidence=_reviewer_evidence(0),
         )])
-        outcome = wiring.run_emma_attempt(mid, 0, adapters={"claude": emma_stub})
+        outcome = wiring.run_emma_attempt(mid, 0, adapters={"codex": emma_stub},
+                                          config=_EMMA_CODEX_CONFIG)
         self.assertIsNotNone(outcome.updated_mission)
 
     def test_builder_historico_sin_identidad_no_despacha(self):
@@ -554,11 +568,10 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
             target, conversation_id="target-thread", provider="codex",
         )
         emma_stub = _StubAdapter([_result_fields(
-            provider="codex", provider_conversation_id="other-thread",
+            provider="claude", provider_conversation_id="other-thread",
             evidence=_reviewer_evidence(0),
         )])
-        outcome = wiring.run_emma_attempt(target, 0, adapters={"codex": emma_stub},
-                                          config=_EMMA_CODEX_CONFIG)
+        outcome = wiring.run_emma_attempt(target, 0, adapters={"claude": emma_stub})
         self.assertIsNotNone(outcome.updated_mission)
 
     def test_otro_attempt_no_participa_en_la_comparacion(self):
@@ -587,11 +600,10 @@ class PruebaFrescuraDeEmmaViaWiring(WiringTestCase):
         chugel.transition(mid, "REVIEWING", actor="chugel", reason="review starts")
 
         reviewer1 = _StubAdapter([_result_fields(
-            provider="codex", provider_conversation_id="attempt-zero-thread",
+            provider="claude", provider_conversation_id="attempt-zero-thread",
             evidence=_reviewer_evidence(1),
         )])
-        outcome = wiring.run_emma_attempt(mid, 1, adapters={"codex": reviewer1},
-                                          config=_EMMA_CODEX_CONFIG)
+        outcome = wiring.run_emma_attempt(mid, 1, adapters={"claude": reviewer1})
         self.assertIsNotNone(outcome.updated_mission)
 
 
@@ -625,6 +637,115 @@ class PruebaSinEfectosSecundariosNoAutorizados(WiringTestCase):
             self.assertNotIn("decide_gate", func.__code__.co_names)
             self.assertNotIn("transition", func.__code__.co_names)
         self.assertNotIn("chugel", dir(wiring))
+
+
+# --- Emma nunca puede revisar con el mismo proveedor que el builder ------
+
+class PruebaIndependenciaDeProveedorParaEmma(WiringTestCase):
+    """Un failover que enrutaría a Emma al mismo proveedor que ya usó
+    Emilio para este intento nunca se invoca -- se intercepta en
+    wiring._select_and_dispatch() antes de tocar el adapter, y se
+    registra como "unavailable" (clasificación ya retryable), nunca
+    como una revisión completada. Reproduce exactamente el incidente
+    real: builder=codex, Claude falla, el router intentaría failover a
+    codex."""
+
+    def test_regresion_incidente_real_failover_al_mismo_proveedor_del_builder(self):
+        mid = self._mission_ready_for_emma()  # builder_evidence.provider == "codex"
+        claude_stub = _StubAdapter([_result_fields(
+            provider="claude", outcome="failed", evidence=None, error_detail="down",
+        )])
+        first = wiring.run_emma_attempt(mid, 0, adapters={"claude": claude_stub})
+        self.assertEqual(first.attempt_record.outcome, "failed")
+
+        codex_stub = _StubAdapter([])  # nunca debe invocarse
+        second = wiring.run_emma_attempt(
+            mid, 0, adapters={"codex": codex_stub},
+            prior_attempts=(first.attempt_record,),
+        )
+        self.assertEqual(second.routing_decision.adapter_name, "codex")
+        self.assertEqual(second.routing_decision.reason, "failover_after_failed")
+        self.assertEqual(len(codex_stub.calls), 0)
+        self.assertEqual(second.result.outcome, "unavailable")
+        self.assertIsNone(second.updated_mission)
+        self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [])
+
+    def test_recuperacion_del_slot_tras_unavailable_por_mismo_proveedor(self):
+        """El slot de revisión (mission_id, attempt) no queda consumido
+        permanentemente por el "unavailable" del guard -- una llamada
+        posterior, una vez Claude vuelve a estar disponible, sí completa
+        la revisión real."""
+        mid = self._mission_ready_for_emma()
+        claude_failed = _StubAdapter([_result_fields(
+            provider="claude", outcome="failed", evidence=None, error_detail="down",
+        )])
+        first = wiring.run_emma_attempt(mid, 0, adapters={"claude": claude_failed})
+        codex_blocked = _StubAdapter([])
+        second = wiring.run_emma_attempt(
+            mid, 0, adapters={"codex": codex_blocked},
+            prior_attempts=(first.attempt_record,),
+        )
+        self.assertEqual(second.result.outcome, "unavailable")
+
+        claude_healthy = _StubAdapter([_result_fields(provider="claude", evidence=_reviewer_evidence(0))])
+        third = wiring.run_emma_attempt(mid, 0, adapters={"claude": claude_healthy})
+        self.assertIsNotNone(third.updated_mission)
+        self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"][0]["verdict"], "PASS")
+
+    def test_emilio_no_es_afectado_por_el_guard_de_independencia(self):
+        """El guard está condicionado estrictamente a agent_role == 'emma'
+        -- el propio failover de Emilio (sin requisito de independencia,
+        agents/emilio/CONTRACT.md sección 17) sigue funcionando idéntico."""
+        mid = self._mission_ready_for_emilio()
+        codex_stub = _StubAdapter([_result_fields(outcome="unavailable", error_detail="down")])
+        first = wiring.run_emilio_attempt(mid, 0, adapters={"codex": codex_stub})
+        self.assertEqual(first.attempt_record.outcome, "unavailable")
+
+        claude_stub = _StubAdapter([_result_fields(provider="claude", evidence=_builder_evidence(0))])
+        second = wiring.run_emilio_attempt(
+            mid, 0, adapters={"claude": claude_stub}, prior_attempts=(first.attempt_record,),
+        )
+        self.assertEqual(second.routing_decision.adapter_name, "claude")
+        self.assertIsNotNone(second.updated_mission)
+
+    def test_ledger_y_restart_safety_tras_el_guard(self):
+        mid = self._mission_ready_for_emma()
+        claude_failed = _StubAdapter([_result_fields(
+            provider="claude", outcome="failed", evidence=None, error_detail="down",
+        )])
+        first = wiring.run_emma_attempt(mid, 0, adapters={"claude": claude_failed})
+        codex_blocked = _StubAdapter([])
+        wiring.run_emma_attempt(
+            mid, 0, adapters={"codex": codex_blocked}, prior_attempts=(first.attempt_record,),
+        )
+
+        ledger = chugel.get_mission(mid)["dispatch_ledger"]
+        emma_entries = [e for e in ledger if e["role"] == "emma"]
+        self.assertEqual(len(emma_entries), 2)
+        self.assertEqual(emma_entries[0]["provider"], "claude")
+        self.assertEqual(emma_entries[0]["result_classification"], "failed")
+        self.assertEqual(emma_entries[0]["status"], "FINALIZED")
+        self.assertEqual(emma_entries[1]["provider"], "codex")
+        self.assertEqual(emma_entries[1]["result_classification"], "unavailable")
+        self.assertEqual(emma_entries[1]["status"], "FINALIZED")
+
+        # "Restart": una lectura fresca del Mission Record, sin estado en
+        # memoria del proceso anterior, se comporta igual que si el
+        # proceso siguiera vivo -- una nueva llamada para el mismo slot
+        # con Claude sano completa normalmente.
+        claude_healthy = _StubAdapter([_result_fields(provider="claude", evidence=_reviewer_evidence(0))])
+        third = wiring.run_emma_attempt(mid, 0, adapters={"claude": claude_healthy})
+        self.assertIsNotNone(third.updated_mission)
+
+    def test_wiring_usa_el_boundary_existente_no_importa_chugel_directamente(self):
+        """A nivel de bytecode: el nuevo guard llega al dato que necesita
+        (el proveedor del builder) exclusivamente a través del wrapper
+        existente en agent_invocation.py -- nunca importando chugel
+        directamente en wiring.py (mismo invariante ya establecido para
+        mark_invocation_dispatched()/record_invocation_result())."""
+        self.assertNotIn("chugel", dir(wiring))
+        self.assertIn("get_builder_provider", dir(wiring))
+        self.assertIn("get_builder_provider", wiring._select_and_dispatch.__code__.co_names)
 
 
 # --- sin reintento/failover autónomo tras un fallo ------------------------

@@ -140,6 +140,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -175,10 +176,63 @@ _ALLOWED_TOOLS = {
     "emma": ["Read", "Glob", "Grep"],
 }
 
+_REVIEWER_VERDICT_SEVERITY_MISMATCH = "REVIEWER_VERDICT_SEVERITY_MISMATCH"
+_PROHIBITED_CLAUDE_ENVIRONMENT_NAMES = frozenset({
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+})
+_PROHIBITED_CLAUDE_ENVIRONMENT_PREFIXES = (
+    "ANTHROPIC_",
+    "AWS_",
+    "BEDROCK_",
+    "GOOGLE_",
+    "VERTEX_",
+)
+_EMMA_VERDICT_GRAMMAR = """Mandatory reviewer verdict grammar:
+- If any finding has severity P0, verdict MUST be BLOCKED.
+- If any finding has severity P1 or P2 (and none is P0), verdict MUST be CHANGES_REQUIRED.
+- PASS_WITH_NON_BLOCKING_FINDINGS is allowed only when every finding has severity P3.
+- PASS is allowed only when findings is empty.
+These rules are mandatory. Do not soften, relabel, or omit a finding to obtain a different verdict."""
+
 
 class ClaudeCliAdapterError(Exception):
     """Pre-invocation fail-closed refusal specific to the subscription-CLI
     path -- never raised for a provider-side outcome."""
+
+
+def _reviewer_verdict_severity_mismatch(evidence: dict) -> bool:
+    """Mirror Chugel's fail-closed verdict/severity invariant pre-persistence."""
+    findings = evidence.get("findings")
+    if not isinstance(findings, list):
+        return True
+    if any(not isinstance(finding, dict) for finding in findings):
+        return True
+    severities = {finding.get("severity") for finding in findings}
+    if not severities.issubset({"P0", "P1", "P2", "P3"}):
+        return True
+    if "P0" in severities:
+        expected = "BLOCKED"
+    elif severities.intersection({"P1", "P2"}):
+        expected = "CHANGES_REQUIRED"
+    elif findings:
+        expected = "PASS_WITH_NON_BLOCKING_FINDINGS"
+    else:
+        expected = "PASS"
+    return evidence.get("verdict") != expected
+
+
+def _trusted_prompt(request: AgentInvocationRequest) -> str:
+    """Serialize the allow-listed task with only fixed reviewer policy added."""
+    if request.agent_role == "emma":
+        prompt = dict(request.task)
+        prompt["_zentra_reviewer_verdict_grammar"] = _EMMA_VERDICT_GRAMMAR
+        return json.dumps(prompt)
+    return json.dumps(request.task)
 
 
 def _refs_in(node: object) -> set[str]:
@@ -295,6 +349,16 @@ def _discover_claude_cli(explicit_path: str | None) -> str:
     raise ClaudeCliAdapterError("claude CLI executable could not be located on PATH")
 
 
+def _subscription_environment() -> dict[str, str]:
+    """Keep the local Claude profile while removing external auth/routing."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _PROHIBITED_CLAUDE_ENVIRONMENT_NAMES
+        and not name.startswith(_PROHIBITED_CLAUDE_ENVIRONMENT_PREFIXES)
+    }
+
+
 def _verify_claude_subscription_login(cli_path: str) -> None:
     """Fail closed unless `claude auth status` -- the CLI's own official,
     documented status command -- confirms an active claude.ai subscription
@@ -307,6 +371,7 @@ def _verify_claude_subscription_login(cli_path: str) -> None:
         result = subprocess.run(
             [cli_path, "auth", "status"],
             capture_output=True, text=True, timeout=15,
+            env=_subscription_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ClaudeCliAdapterError(f"could not query claude auth status: {exc!r}") from exc
@@ -502,7 +567,7 @@ class ClaudeCliAdapter:
         _verify_claude_subscription_login(self._cli_path)
 
         try:
-            prompt = json.dumps(request.task)
+            prompt = _trusted_prompt(request)
             tools = _ALLOWED_TOOLS[request.agent_role]
             schema = _load_evidence_schema(request.agent_role)
 
@@ -522,6 +587,7 @@ class ClaudeCliAdapter:
                     command,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     cwd=str(worktree), close_fds=True, start_new_session=True,
+                    env=_subscription_environment(),
                 )
                 stdout, stderr = process.communicate(prompt.encode("utf-8"), timeout=self._timeout_seconds)
             except subprocess.TimeoutExpired:
@@ -542,6 +608,8 @@ class ClaudeCliAdapter:
             evidence = _extract_structured_result(raw_stdout)
             if evidence is None:
                 return _result(request, "invalid_output", "claude -p output did not match any recognized structured-result shape")
+            if request.agent_role == "emma" and _reviewer_verdict_severity_mismatch(evidence):
+                return _result(request, "invalid_output", _REVIEWER_VERDICT_SEVERITY_MISMATCH)
 
             # Corrective cycle #5: `artifact` is never taken from the
             # model (stripped from the schema in _load_evidence_schema()
