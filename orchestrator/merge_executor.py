@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from orchestrator import chugel
 from orchestrator import publish_identity_repair
+from orchestrator.gh_check_status import normalize_check_entry
 
 _TIMEOUT_SECONDS = 30.0
 _MAX_OUTPUT_BYTES = 65536
@@ -73,11 +74,17 @@ def _origin_main_sha(*, git_executable: str, repository_root: str) -> str | None
 
 
 def _ci_conclusion(pr_view: dict) -> str | None:
+    """Single-shot pre-merge gate -- only success vs. not-success matters
+    here (never cancelled/timed_out as distinct outcomes, unlike
+    publish_executor.py's bounded poller). Per-entry normalization
+    (CheckRun vs. StatusContext, fail-closed on anything unrecognized) is
+    shared with orchestrator/publish_executor.py via
+    orchestrator/gh_check_status.py."""
     checks = pr_view.get("statusCheckRollup") or []
     if not checks:
         return None
-    statuses = [c.get("conclusion") or c.get("status") for c in checks]
-    if any(s in (None, "IN_PROGRESS", "QUEUED", "PENDING") for s in statuses):
+    statuses = [normalize_check_entry(c) for c in checks]
+    if any(s == "PENDING" for s in statuses):
         return None
     if all(s in ("SUCCESS", "NEUTRAL", "SKIPPED") for s in statuses):
         return "success"

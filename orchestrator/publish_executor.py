@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 
 from orchestrator import chugel
+from orchestrator.gh_check_status import normalize_check_entry
 
 _TIMEOUT_SECONDS = 30.0
 _MAX_OUTPUT_BYTES = 65536
@@ -124,12 +125,17 @@ def _pr_view(pr_number: int, *, gh_executable: str, repository_root: str) -> dic
 def _ci_conclusion(pr_view: dict) -> str | None:
     """Reduce statusCheckRollup entries to a single terminal conclusion,
     or None while still pending. Any non-success terminal state on any
-    check is treated as failure -- fail closed rather than average."""
+    check is treated as failure -- fail closed rather than average.
+    Per-entry normalization (CheckRun vs. StatusContext, fail-closed on
+    anything unrecognized) is shared with orchestrator/merge_executor.py
+    via orchestrator/gh_check_status.py -- only this reduction, which
+    needs the cancelled/timed_out distinction merge_executor's single-shot
+    gate does not, is specific to this module."""
     checks = pr_view.get("statusCheckRollup") or []
     if not checks:
         return None
-    statuses = [c.get("conclusion") or c.get("status") for c in checks]
-    if any(s in (None, "IN_PROGRESS", "QUEUED", "PENDING") for s in statuses):
+    statuses = [normalize_check_entry(c) for c in checks]
+    if any(s == "PENDING" for s in statuses):
         return None
     if all(s in ("SUCCESS", "NEUTRAL", "SKIPPED") for s in statuses):
         return "success"

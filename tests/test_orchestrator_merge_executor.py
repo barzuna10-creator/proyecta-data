@@ -76,7 +76,7 @@ class GatingChecksTests(MergeExecutorTestCase):
     def _view(self, **overrides):
         base = {"state": "OPEN", "headRefOid": _HEAD_SHA, "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN", "mergeCommit": None,
-                "statusCheckRollup": [{"conclusion": "SUCCESS"}]}
+                "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
         base.update(overrides)
         return base
 
@@ -89,10 +89,65 @@ class GatingChecksTests(MergeExecutorTestCase):
 
     def test_ci_not_success_blocks(self):
         mid = self._mission_merging()
-        view = self._view(statusCheckRollup=[{"conclusion": "FAILURE"}])
+        view = self._view(statusCheckRollup=[{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}])
         with mock.patch.object(merge_executor, "_run", return_value=_json_result(view)):
             result = merge_executor.run(mid, repository_root="/tmp/repo")
         self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+
+    def test_real_pr5_payload_is_recognized_as_success_and_does_not_block(self):
+        """The exact live payload captured from `gh pr view 5 --json
+        statusCheckRollup` on barzuna10-creator/Proyecta -- a StatusContext
+        ("Vercel", state=SUCCESS) mixed with a CheckRun (status=COMPLETED,
+        conclusion=SUCCESS). Before the shared normalizer, this StatusContext
+        entry had no `conclusion`/`status` field, so _ci_conclusion() treated
+        it as not-success and this gate would have blocked a genuinely green
+        merge on the very first (only) check -- worse than publish_executor's
+        version, which at least polls before giving up."""
+        mid = self._mission_merging()
+        view = self._view(statusCheckRollup=[
+            {
+                "__typename": "StatusContext",
+                "context": "Vercel",
+                "startedAt": "2026-08-29T03:55:09Z",
+                "state": "SUCCESS",
+                "targetUrl": "https://vercel.com/proyecta3/proyecta/GyyiseRmzmab56hSGiBsWRVi8B7Z",
+            },
+            {
+                "__typename": "CheckRun",
+                "completedAt": "2026-08-29T04:33:55Z",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://vercel.com/github",
+                "name": "Vercel Preview Comments",
+                "startedAt": "2026-08-29T04:33:55Z",
+                "status": "COMPLETED",
+                "workflowName": "",
+            },
+        ])
+        post_merge_view = self._view(state="MERGED", mergeCommit={"oid": "d" * 40})
+        calls = [_json_result(view), _ok_result(stdout=(b"b" * 40)), _ok_result(), _json_result(post_merge_view)]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "COMPLETED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "MERGED")
+
+    def test_status_context_error_blocks(self):
+        mid = self._mission_merging()
+        view = self._view(statusCheckRollup=[
+            {"__typename": "StatusContext", "context": "Vercel", "state": "ERROR"},
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ])
+        with mock.patch.object(merge_executor, "_run", return_value=_json_result(view)):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
+
+    def test_unrecognized_check_typename_blocks_fail_closed(self):
+        mid = self._mission_merging()
+        view = self._view(statusCheckRollup=[{"__typename": "SomeFutureNodeType", "state": "SUCCESS"}])
+        with mock.patch.object(merge_executor, "_run", return_value=_json_result(view)):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
 
     def test_not_clean_blocks(self):
         mid = self._mission_merging()
@@ -129,7 +184,7 @@ class CheckBeforeMergeTests(MergeExecutorTestCase):
         mid = self._mission_merging()
         view = {"state": "MERGED", "headRefOid": _HEAD_SHA, "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN", "mergeCommit": {"oid": "d" * 40},
-                "statusCheckRollup": [{"conclusion": "SUCCESS"}]}
+                "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
         with mock.patch.object(merge_executor, "_run", return_value=_json_result(view)) as run_mock:
             result = merge_executor.run(mid, repository_root="/tmp/repo")
         self.assertEqual(result.status, "COMPLETED")
@@ -141,7 +196,7 @@ class CheckBeforeMergeTests(MergeExecutorTestCase):
         mid = self._mission_merging()
         view = {"state": "CLOSED", "headRefOid": _HEAD_SHA, "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN", "mergeCommit": None,
-                "statusCheckRollup": [{"conclusion": "SUCCESS"}]}
+                "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
         with mock.patch.object(merge_executor, "_run", return_value=_json_result(view)) as run_mock:
             result = merge_executor.run(mid, repository_root="/tmp/repo")
         self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
@@ -155,7 +210,7 @@ class MergeStrategyTests(MergeExecutorTestCase):
         mid = self._mission_merging()
         view = {"state": "OPEN", "headRefOid": _HEAD_SHA, "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN", "mergeCommit": None,
-                "statusCheckRollup": [{"conclusion": "SUCCESS"}]}
+                "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
         post_view = {**view, "state": "MERGED", "mergeCommit": {"oid": "d" * 40}}
         calls = [_json_result(view), _ok_result(stdout=b"b" * 40), _ok_result(), _json_result(post_view)]
         with mock.patch.object(merge_executor, "_run", side_effect=calls) as run_mock:

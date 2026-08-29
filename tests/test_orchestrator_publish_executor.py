@@ -70,7 +70,7 @@ class CheckBeforeCreateTests(PublishExecutorTestCase):
             _json_result([{"number": 7, "url": "https://example.invalid/pr/7", "state": "OPEN"}]),  # gh pr list (post-create lookup)
             _json_result({"state": "OPEN", "headRefOid": "a" * 40, "mergeable": "MERGEABLE",
                           "mergeStateStatus": "CLEAN", "statusCheckRollup": [
-                              {"conclusion": "SUCCESS"}]}),  # gh pr view (CI poll)
+                              {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}),  # gh pr view (CI poll)
         ]
         with mock.patch.object(publish_commit_materializer, "_run", return_value=_ok_result()), \
              mock.patch.object(publish_executor, "_run", side_effect=calls):
@@ -93,7 +93,8 @@ class CheckBeforeCreateTests(PublishExecutorTestCase):
             _ok_result(),  # git push
             _json_result([{"number": 9, "url": "https://example.invalid/pr/9", "state": "OPEN"}]),
             _json_result({"state": "OPEN", "headRefOid": "a" * 40, "mergeable": "MERGEABLE",
-                          "mergeStateStatus": "CLEAN", "statusCheckRollup": [{"conclusion": "SUCCESS"}]}),
+                          "mergeStateStatus": "CLEAN", "statusCheckRollup": [
+                              {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}),
         ]
         with mock.patch.object(publish_commit_materializer, "_run", return_value=_ok_result()), \
              mock.patch.object(publish_executor, "_run", side_effect=calls) as run_mock:
@@ -128,7 +129,8 @@ class CiTimeoutTests(PublishExecutorTestCase):
     def test_pending_forever_reaches_bounded_timeout_and_blocks(self):
         mid = self._mission_publish_awaiting_authorization()
         pending_view = _json_result({"state": "OPEN", "headRefOid": "a" * 40, "mergeable": "MERGEABLE",
-                                      "mergeStateStatus": "CLEAN", "statusCheckRollup": [{"conclusion": None, "status": "IN_PROGRESS"}]})
+                                      "mergeStateStatus": "CLEAN", "statusCheckRollup": [
+                                          {"__typename": "CheckRun", "conclusion": None, "status": "IN_PROGRESS"}]})
 
         created = {"done": False}
 
