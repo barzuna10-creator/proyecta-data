@@ -187,6 +187,30 @@ def _persisted_builder_identity(mission_id: str, attempt: int) -> dict:
     return copy.deepcopy(entry)
 
 
+def get_builder_provider(mission_id: str, attempt: int) -> str | None:
+    """Read-only: the provider name builder_evidence[attempt] recorded for
+    Emilio's matching attempt, or None if no such entry exists yet.
+
+    Thin wrapper so wiring.py never imports chugel directly (same reason
+    as mark_invocation_dispatched()/record_invocation_result() below) --
+    used by wiring.py's Emma-only provider-independence guard to refuse
+    routing Emma to the exact same provider Emilio already used for this
+    attempt, even as a configured failover target. A fresh read every
+    call, matching this module's existing restart-safety discipline (see
+    consume_emma_result()'s own docstring)."""
+    record = chugel.get_mission(mission_id)
+    entries = record.get("builder_evidence") or []
+    entry = next(
+        (item for item in entries
+         if isinstance(item, dict) and type(item.get("attempt")) is int
+         and item.get("attempt") == attempt),
+        None,
+    )
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("provider")
+
+
 def require_eligible_invocation(mission_id: str, *, role: str, attempt: int) -> str:
     """Fail closed before provider dispatch for state, attempt, and
     duplicate evidence -- AND durably reserve the dispatch, atomically, in

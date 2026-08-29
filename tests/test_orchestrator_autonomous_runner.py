@@ -559,6 +559,44 @@ class PruebaPresupuestosYDeadline(AutonomousRunnerRealPersistenceTestCase):
         self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
         self.assertIn("deadline", result.reason)
 
+    def test_presupuesto_de_reviewer_se_agota_cuando_claude_esta_caido_y_el_guard_bloquea_codex(self):
+        """Emilio construyó con codex (real, un solo dispatch). Claude
+        falla realmente en el primer intento de Emma; el segundo intento,
+        vía el failover ya configurado, sería enrutado al mismo proveedor
+        que el builder -- el guard de independencia lo intercepta antes
+        de invocar el adapter de codex. Ambos intentos cuentan para el
+        presupuesto durable de reviewer_attempts exactamente igual que
+        cualquier otro intento real -- nunca una aprobación silenciosa
+        con el mismo proveedor, nunca un loop infinito."""
+        mid = self._mission_building()
+        # codex_builder's own template list has exactly one entry, for
+        # Emilio's real dispatch -- if the guard ever failed to intercept
+        # Emma's failover and let a second, real codex call through, this
+        # same object would raise IndexError on an empty pop(0), failing
+        # the test loudly rather than silently succeeding.
+        codex_builder = _FakeAdapter([_emilio_completed_template(attempt=0)])
+        claude_down = _FakeAdapter([_failed_template("claude")])
+
+        result = run_mission(
+            mid,
+            {"codex": codex_builder, "claude": claude_down},
+            max_total_attempts=4, max_builder_attempts=2, max_reviewer_attempts=2,
+        )
+
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertIn("reviewer attempt budget exhausted", result.reason)
+        self.assertEqual(len(codex_builder.calls), 1)
+        self.assertEqual(len(claude_down.calls), 1)
+        self.assertEqual(chugel.get_mission(mid)["reviewer_evidence"], [])
+
+        ledger = chugel.get_mission(mid)["dispatch_ledger"]
+        emma_entries = [e for e in ledger if e["role"] == "emma"]
+        self.assertEqual(len(emma_entries), 2)
+        self.assertEqual(emma_entries[0]["provider"], "claude")
+        self.assertEqual(emma_entries[0]["result_classification"], "failed")
+        self.assertEqual(emma_entries[1]["provider"], "codex")
+        self.assertEqual(emma_entries[1]["result_classification"], "unavailable")
+
     def test_limites_invalidos_son_rechazados_antes_de_cualquier_llamada(self):
         # False is falsy-zero (bool is an int subclass) and is correctly
         # caught by the same `<= 0` check as an explicit 0 -- True is a
