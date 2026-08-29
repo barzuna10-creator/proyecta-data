@@ -23,7 +23,14 @@ ALLOWED_CHUGEL_CALLS = {"list_missions", "get_mission"}
 WRITE_CHUGEL_MODULE = "mission_write.py"
 ALLOWED_WRITE_CHUGEL_CALLS = {"get_mission", "create_mission", "decide_gate", "transition"}
 COORDINATOR_CHUGEL_MODULE = "mission_coordinator.py"
-ALLOWED_COORDINATOR_CHUGEL_CALLS = {"get_mission"}
+# Mission 006: "transition" was added deliberately -- advance() is now the
+# sole place the mechanical INTAKE -> SCOPE_AWAITING_AUTHORIZATION edge is
+# ever produced (see mission_coordinator.py's own module docstring and its
+# _SYSTEM_ACTOR constant). Still never "decide_gate"/"create_mission": this
+# module still relays only real, already-materialized decisions/records it
+# never fabricates itself for anything other than that one fixed, schema-
+# enum, non-human actor and fixed reason string.
+ALLOWED_COORDINATOR_CHUGEL_CALLS = {"get_mission", "transition"}
 KNOWLEDGE_MODULES = {
     "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",
     "jarvis.learning_projection", "jarvis.knowledge_retrieval", "jarvis.repository_freshness",
@@ -239,13 +246,27 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
     # --- Mission 004 additions ---------------------------------------
 
     def _imports(self, path: Path) -> list[str]:
+        """Round-3 independent review, P3: `from pkg import submodule` (the
+        idiom mission_supervisor.py itself uses for
+        `from jarvis import mission_coordinator`) previously only ever
+        contributed the bare package name ("jarvis") here -- neither
+        "jarvis.mission_coordinator" nor "mission_coordinator" -- so a
+        caller checking either of those forms alone had a blind spot for
+        exactly this idiom. Now contributes all three forms for every
+        ImportFrom alias: the bare module, "module.alias", and the bare
+        alias name -- callers can match whichever shape their own
+        forbidden-name set uses."""
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         names: list[str] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
-                names.append(node.module or "")
+                module = node.module or ""
+                names.append(module)
+                for alias in node.names:
+                    names.append(f"{module}.{alias.name}" if module else alias.name)
+                    names.append(alias.name)
         return names
 
     def test_only_mission_coordinator_imports_the_autonomous_pipeline(self):
@@ -346,6 +367,50 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
             "non_goals": "tuple[str, ...]",
             "acceptance_criteria": "tuple[str, ...]",
         })
+
+    # --- Mission 006 additions ----------------------------------------
+
+    def test_only_mission_supervisor_imports_mission_coordinator(self):
+        """jarvis.mission_coordinator.advance() is the only thing that can
+        actually drive a mission forward -- structurally enforced the same
+        way as the Mission 004 autonomous-pipeline check above: exactly one
+        production module may import it at all."""
+        for path in (ROOT / "jarvis").glob("*.py"):
+            if path.name == "mission_supervisor.py":
+                continue
+            names = set(self._imports(path))
+            # Catches every import spelling _imports() now recognizes:
+            # "import jarvis.mission_coordinator", "import mission_coordinator",
+            # "from jarvis.mission_coordinator import X", and
+            # "from jarvis import mission_coordinator" (mission_supervisor.py's
+            # own idiom -- this is exactly the spelling round 3's independent
+            # review found this check previously missed).
+            forbidden = {"jarvis.mission_coordinator", "mission_coordinator"}
+            self.assertTrue(forbidden.isdisjoint(names), (path, forbidden & names))
+
+    def test_handle_conversation_never_references_the_supervisor_or_notify(self):
+        """The critical Mission 006 boundary, checked statically against
+        _handle_conversation()'s own function body (not the whole module):
+        POST /v1/conversation must be structurally incapable of waking the
+        supervisor. Conversing can create/revise a draft, never start
+        execution -- only a materialized human-authorization consequence
+        (the draft-authorization and real-gate branches of
+        _handle_authorize(), covered behaviorally below) may ever call
+        notify()."""
+        source = (ROOT / "jarvis" / "control_plane_server.py").read_text(encoding="utf-8")
+        tree = ast.parse(source, filename="control_plane_server.py")
+        [handle_conversation] = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_handle_conversation"
+        ]
+        body_source = ast.get_source_segment(source, handle_conversation)
+        self.assertNotIn("supervisor", body_source)
+        self.assertNotIn("notify", body_source)
+        self.assertNotIn("mission_coordinator", body_source)
+        # And the signature itself carries no way to reach one -- not just
+        # that the body happens not to mention it today.
+        param_names = {arg.arg for arg in handle_conversation.args.args + handle_conversation.args.kwonlyargs}
+        self.assertNotIn("supervisor", param_names)
 
 
 if __name__ == "__main__":

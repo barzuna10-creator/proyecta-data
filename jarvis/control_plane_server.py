@@ -23,12 +23,25 @@ enforced by tests/test_jarvis_foundation_boundaries.py) -- every Chugel
 effect is obtained exclusively through mission_query/mission_write/
 mission_authorization_bridge.
 
-No mission_coordinator.advance() anywhere in this module: V1 only relays
-reads (mission_query) and explicit human gate authorizations
-(mission_write / mission_authorization_bridge). Dispatching Emilio/Emma,
-running publish_executor/merge_executor, remains an out-of-band, human-
-supervised action -- exactly as it has been for every mission run this
-far in Mission 004."""
+This module never calls mission_coordinator.advance() itself, and never
+imports jarvis.mission_coordinator: it only relays reads (mission_query),
+explicit human gate authorizations (mission_write /
+mission_authorization_bridge), and -- Mission 006 -- a bare notify() to
+jarvis.mission_supervisor.MissionSupervisor, from exactly the two places
+above where a real human authorization decision has just been durably
+recorded (the draft-authorization branch, and the real scope/publish/merge
+gate branch). notify() carries no payload and makes no decision of its
+own; the supervisor re-derives whatever is actually eligible from Chugel's
+own state on its own background worker thread. In particular,
+_handle_conversation() -- which can create or revise a draft, but never
+authorizes anything -- has no access to the supervisor at all: it is not
+passed one, and POST /v1/conversation's dispatch does not construct one
+for it (see tests/test_jarvis_control_plane_server.py's boundary
+coverage). Dispatching Emilio/Emma, running publish_executor/merge_executor,
+therefore only ever happens as the automatic, in-process consequence of a
+real, already-materialized human authorization -- never of conversation
+alone, and never automatically retried around a gate/BLOCKED/terminal
+state (jarvis/mission_supervisor.py's own state classification)."""
 
 from __future__ import annotations
 
@@ -44,6 +57,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from orchestrator import jarvis_conversation
+from orchestrator.cli_provider_adapters import build_cli_subscription_adapters
 from orchestrator.validator import HUMAN_DECIDER
 
 from jarvis import mission_query, mission_write
@@ -56,6 +70,7 @@ from jarvis.mission_authorization_bridge import (
     DraftAuthorizationRefused,
 )
 from jarvis.mission_context import draft_briefing
+from jarvis.mission_supervisor import MissionSupervisor
 from jarvis.models import AuthorizationIntent, DraftChanges, MissionDefinitionDraft, MissionDraft
 from jarvis.repository_freshness import RepositoryFreshnessResolver
 from jarvis.storage import (
@@ -111,6 +126,8 @@ class ControlPlaneConfig:
     def __init__(
         self, *, host: str, port: int, token: str, store_root: str,
         knowledge_store_root: str | None = None, zentra_repository_root: str | None = None,
+        mission_repository_root: str | None = None, mission_branch: str | None = None,
+        mission_pr_title: str | None = None, git_executable: str = "git", gh_executable: str = "gh",
     ):
         if host not in _LOOPBACK_HOSTS:
             raise ValueError("Control Plane must bind to a loopback host")
@@ -130,6 +147,20 @@ class ControlPlaneConfig:
         # never inferred from another setting.
         self.knowledge_store_root = Path(knowledge_store_root) if knowledge_store_root else None
         self.zentra_repository_root = Path(zentra_repository_root) if zentra_repository_root else None
+        # Mission 006: the single repository this V1, single-active-mission
+        # supervisor drives publish_executor/merge_executor against, once a
+        # mission reaches PUBLISHING/MERGING via a real human authorization.
+        # Optional and independently defaulted -- unset means the
+        # supervisor still performs the INTAKE mechanical transition and
+        # everything up to (and reporting) a gate correctly; it would only
+        # fail, per-mission, if a real PUBLISHING/MERGING step were ever
+        # reached without these configured, exactly like calling
+        # mission_coordinator.advance() with a fake repository always has.
+        self.mission_repository_root = mission_repository_root
+        self.mission_branch = mission_branch
+        self.mission_pr_title = mission_pr_title
+        self.git_executable = git_executable
+        self.gh_executable = gh_executable
 
 
 def load_config(env: dict | None = None) -> ControlPlaneConfig:
@@ -150,6 +181,11 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
         host=host, port=port, token=token, store_root=store_root,
         knowledge_store_root=env.get("CONTROL_PLANE_KNOWLEDGE_STORE_ROOT") or None,
         zentra_repository_root=env.get("CONTROL_PLANE_ZENTRA_REPOSITORY_ROOT") or None,
+        mission_repository_root=env.get("CONTROL_PLANE_MISSION_REPOSITORY_ROOT") or None,
+        mission_branch=env.get("CONTROL_PLANE_MISSION_BRANCH") or None,
+        mission_pr_title=env.get("CONTROL_PLANE_MISSION_PR_TITLE") or None,
+        git_executable=env.get("CONTROL_PLANE_GIT_EXECUTABLE") or "git",
+        gh_executable=env.get("CONTROL_PLANE_GH_EXECUTABLE") or "gh",
     )
 
 
@@ -475,7 +511,7 @@ def _handle_proposals(store: FileJarvisStore, body: dict) -> dict:
     return {"accepted": True, "gate": _draft_gate_projection(draft_id, envelope)}
 
 
-def _handle_authorize(store: FileJarvisStore, gate_id: str, body: dict) -> dict:
+def _handle_authorize(store: FileJarvisStore, supervisor: MissionSupervisor, gate_id: str, body: dict) -> dict:
     mission_id = body.get("missionId")
     expected_revision = body.get("expectedRevision")
     action = body.get("action")
@@ -508,6 +544,14 @@ def _handle_authorize(store: FileJarvisStore, gate_id: str, body: dict) -> dict:
             raise _ApiError(409, "; ".join(reason.code for reason in exc.reasons)) from exc
         except (DraftAuthorizationAttributionError, DraftAuthorizationDivergenceError) as exc:
             raise _ApiError(409, str(exc)) from exc
+        # Mission 006: the one and only place a mission's very first wake
+        # can originate -- a real, materialized human authorization just
+        # created this Mission Record (at INTAKE). notify() itself is
+        # inert if nothing is eligible; here it always is, since
+        # close_draft_authorization() never progresses the mission itself
+        # (module docstring, and mission_coordinator's own Mission 006
+        # docstring) -- the supervisor's INTAKE branch is what moves it on.
+        supervisor.notify()
         now = _now()
         return {
             "id": gate_id, "missionId": result.mission_id, "kind": "draft", "state": "authorized",
@@ -551,6 +595,12 @@ def _handle_authorize(store: FileJarvisStore, gate_id: str, body: dict) -> dict:
         _AUTHORIZE_BY_KIND[kind](mission_id, decision)
     except mission_write.GateNotYetEligible as exc:
         raise _ApiError(409, str(exc)) from exc
+    # Mission 006: a real scope/publish/merge authorization just
+    # materialized -- the sole consequence of this branch (beyond the
+    # gate decision mission_write itself already recorded) is telling the
+    # supervisor there may be eligible work again; it re-derives what, if
+    # anything, from Chugel itself on its own worker thread.
+    supervisor.notify()
     now = _now()
     return {
         "id": gate_id, "missionId": mission_id, "kind": kind, "state": "authorized",
@@ -573,6 +623,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _zentra_resolver(self) -> RepositoryFreshnessResolver | None:
         return self.server.zentra_resolver  # type: ignore[attr-defined]
+
+    def _supervisor(self) -> MissionSupervisor:
+        return self.server.supervisor  # type: ignore[attr-defined]
 
     def _authenticated(self) -> bool:
         header = self.headers.get("Authorization", "")
@@ -631,7 +684,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if _UUID.fullmatch(gate_id) is None:
                     raise _ApiError(400, "gate id must be a canonical UUID")
                 body = self._read_json_body()
-                self._write_json(200, _handle_authorize(self._store(), gate_id, body))
+                self._write_json(200, _handle_authorize(self._store(), self._supervisor(), gate_id, body))
                 return
         except _ApiError as exc:
             self._write_json(exc.status, {"error": exc.message})
@@ -667,12 +720,43 @@ def build_server(config: ControlPlaneConfig) -> ThreadingHTTPServer:
     server.zentra_resolver = (  # type: ignore[attr-defined]
         RepositoryFreshnessResolver(config.zentra_repository_root) if config.zentra_repository_root else None
     )
+    # Mission 006: constructed once per server, never per-request, exactly
+    # like store/knowledge_store/zentra_resolver above. The INTAKE
+    # mechanical transition (mission_coordinator's own Mission 006 branch)
+    # needs no adapter at all, so the supervisor is always constructed --
+    # but real subscription-CLI adapters (never the API-key-backed ones --
+    # see orchestrator/wiring.py's own enforcement of this, unchanged
+    # here) are only ever wired in when an operator has explicitly set
+    # CONTROL_PLANE_MISSION_REPOSITORY_ROOT, the same opt-in signal that
+    # makes a real PUBLISHING/MERGING step possible at all. Unset (every
+    # existing test's ControlPlaneConfig, and any deployment that has not
+    # opted in): adapters={}, so a mission that ever reaches AUTHORIZED
+    # fails closed with a recorded, caught WiringError (see
+    # jarvis/mission_supervisor.py's _drain_pass()) instead of silently
+    # attempting a real CLI dispatch -- this is what previously kept
+    # every existing control-plane test free of any real Emilio/Emma
+    # invocation, and must stay true now that notify() is wired in.
+    real_adapters = config.mission_repository_root is not None
+    server.supervisor = MissionSupervisor(  # type: ignore[attr-defined]
+        adapters=build_cli_subscription_adapters() if real_adapters else {},
+        advance_kwargs=dict(
+            repository_root=config.mission_repository_root or str(Path.cwd()),
+            branch=config.mission_branch or "overnight/mission",
+            pr_title=config.mission_pr_title or "Mission",
+            git_executable=config.git_executable,
+            gh_executable=config.gh_executable,
+        ),
+    )
     return server
 
 
 def main() -> None:
     config = load_config()
     server = build_server(config)
+    # One-shot, non-recurring (see MissionSupervisor.recover_on_startup()'s
+    # own docstring) -- exactly once per process start, here and nowhere
+    # else in this module.
+    server.supervisor.recover_on_startup()  # type: ignore[attr-defined]
     print(f"Jarvis Control Plane listening on http://{config.host}:{config.port}")
     server.serve_forever()
 

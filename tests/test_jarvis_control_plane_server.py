@@ -38,6 +38,16 @@ class ControlPlaneServerTestCase(unittest.TestCase):
         self.server.shutdown()
         self.thread.join(timeout=5)
         self.server.server_close()
+        # Round-1 independent review, P3: a real-gate authorization
+        # started a real supervisor worker thread (notify() is no longer
+        # a no-op once wired). Join it before restoring chugel._MISSIONS_DIR
+        # / deleting the tempdir out from under it -- it already fails
+        # closed on a stale/missing directory (mission_supervisor.py's own
+        # try/except), but there is no reason to race it at all when a
+        # bounded join is this cheap.
+        worker = getattr(self.server.supervisor, "_worker", None)
+        if worker is not None:
+            worker.join(timeout=5)
         chugel._MISSIONS_DIR = self._original_missions_dir
         self._tmpdir.cleanup()
 
@@ -607,6 +617,16 @@ class ConversationKnowledgeCitationTests(unittest.TestCase):
         self.server.shutdown()
         self.thread.join(timeout=5)
         self.server.server_close()
+        # Round-1 independent review, P3: a real-gate authorization
+        # started a real supervisor worker thread (notify() is no longer
+        # a no-op once wired). Join it before restoring chugel._MISSIONS_DIR
+        # / deleting the tempdir out from under it -- it already fails
+        # closed on a stale/missing directory (mission_supervisor.py's own
+        # try/except), but there is no reason to race it at all when a
+        # bounded join is this cheap.
+        worker = getattr(self.server.supervisor, "_worker", None)
+        if worker is not None:
+            worker.join(timeout=5)
         chugel._MISSIONS_DIR = self._original_missions_dir
         self._tmpdir.cleanup()
 
@@ -650,6 +670,72 @@ class ConversationKnowledgeCitationTests(unittest.TestCase):
             })
         citations = converse.call_args.kwargs["trusted_citations"]
         self.assertEqual(1, len(citations))  # still matched -- the extra body field was ignored
+
+
+class SupervisorWakeBoundaryTests(ControlPlaneServerTestCase):
+    """Mission 006's critical boundary, behaviorally: POST /v1/conversation
+    can never wake the supervisor, no matter what it does to a draft --
+    only a materialized human authorization (draft authorization, or a
+    real scope/publish/merge gate authorization) may ever call notify()."""
+
+    def _propose(self, objective="Ship the thing", proposal_id="223e4567-e89b-42d3-a456-426614174001"):
+        _, body = self._request("POST", "/v1/proposals", {"objective": objective, "proposalId": proposal_id})
+        return body["gate"]
+
+    def test_conversation_never_calls_notify_even_when_it_creates_a_draft(self):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult, DraftFieldSuggestion
+        suggestion = DraftFieldSuggestion(
+            outcome="Ship the thing", scope=["do it"], non_goals=None,
+            acceptance_criteria=["it ships"], open_questions=None,
+        )
+        converse = mock.Mock(return_value=ConversationTurnResult(reply="ok", suggestion=suggestion))
+        with mock.patch("jarvis.control_plane_server.jarvis_conversation.converse", converse), \
+             mock.patch.object(self.server.supervisor, "notify") as notify:
+            status, body = self._request("POST", "/v1/conversation", {"message": "let's ship the thing"})
+        self.assertEqual(200, status)
+        self.assertIsNotNone(body["gate"])  # a draft really was created by this turn
+        notify.assert_not_called()
+
+    def test_draft_authorization_calls_notify(self):
+        import dataclasses
+        from jarvis.drafts import build_draft_envelope
+        from jarvis.control_plane_server import FileJarvisStore
+        from tests.test_jarvis_drafts import valid_draft
+        import unittest.mock as mock
+
+        draft_id = "423e4567-e89b-42d3-a456-426614174322"
+        ready = dataclasses.replace(valid_draft(), draft_id=draft_id)
+        envelope = build_draft_envelope(ready)
+        store = FileJarvisStore(self.server.store.root)
+        store.save_draft(envelope)
+
+        with mock.patch.object(self.server.supervisor, "notify") as notify:
+            status, _ = self._request("POST", f"/v1/gates/{draft_id}/authorize", {
+                "gateId": draft_id, "missionId": f"draft:{draft_id}", "expectedRevision": "1",
+                "action": "authorize", "confirmation": "I authorize this action now",
+                "digest": envelope.digest,
+            })
+        self.assertEqual(200, status)
+        notify.assert_called_once()
+
+    def test_real_gate_authorization_calls_notify(self):
+        import unittest.mock as mock
+
+        mission = _create_intake_mission("algo")
+        mid = mission["mission_id"]
+        chugel.transition(mid, "SCOPE_AWAITING_AUTHORIZATION", actor="jose", reason="scope ready")
+
+        _, projection = self._request("GET", "/v1/command-center/projection")
+        gate = next(g for g in projection["gates"] if g["missionId"] == mid)
+
+        with mock.patch.object(self.server.supervisor, "notify") as notify:
+            status, _ = self._request("POST", f"/v1/gates/{gate['id']}/authorize", {
+                "gateId": gate["id"], "missionId": mid, "expectedRevision": gate["revision"],
+                "action": "authorize", "confirmation": "I authorize this action now",
+            })
+        self.assertEqual(200, status)
+        notify.assert_called_once()
 
 
 if __name__ == "__main__":
