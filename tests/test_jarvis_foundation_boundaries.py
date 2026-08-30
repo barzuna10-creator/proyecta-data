@@ -409,6 +409,32 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
         param_names = {arg.arg for arg in handle_conversation.args.args + handle_conversation.args.kwonlyargs}
         self.assertNotIn("supervisor", param_names)
 
+    def test_health_route_never_touches_store_supervisor_config_or_chugel(self):
+        """Jarvis God Mode M0: GET /v1/health is dispatched before
+        _authenticated() (the only route in _dispatch() that is), so it
+        must be structurally incapable of reaching anything a real
+        authenticated caller could -- checked here against the exact
+        source slice between the health-route check and the
+        _authenticated() call, i.e. everything that runs on every
+        request regardless of auth."""
+        source = (ROOT / "jarvis" / "control_plane_server.py").read_text(encoding="utf-8")
+        tree = ast.parse(source, filename="control_plane_server.py")
+        [handler_class] = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "_Handler"
+        ]
+        [dispatch] = [
+            node for node in handler_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_dispatch"
+        ]
+        body_source = ast.get_source_segment(source, dispatch)
+        pre_auth_source = body_source.split("if not self._authenticated():", 1)[0]
+        self.assertIn("/v1/health", pre_auth_source)
+        for forbidden in ("self._store", "self._supervisor", "self._config",
+                           "self._knowledge_store", "self._zentra_resolver",
+                           "self._trusted_context_builder", "mission_coordinator", "chugel"):
+            self.assertNotIn(forbidden, pre_auth_source)
+
 
 if __name__ == "__main__":
     unittest.main()

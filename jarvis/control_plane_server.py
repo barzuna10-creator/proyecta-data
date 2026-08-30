@@ -263,6 +263,26 @@ def _merged_definition_and_open_questions(
     return definition, open_questions
 
 
+# Jarvis God Mode M0 -- the single, fixed, non-LLM authority table for
+# whether a conversational turn's classification permits a MissionDraft
+# write. Deliberately a plain frozenset literal, not derived from prompt
+# text, model confidence, or anything orchestrator.jarvis_conversation
+# returns beyond the turn_kind string itself: the model classifies:
+# this module alone decides what that classification is allowed to do.
+# Approved by Jose (M0 Implementation Readiness Review): exactly
+# PROPOSAL and OBJECTIVE may create/revise a draft; every other value --
+# including AUTHORIZATION_ATTEMPT, which is purely informational and
+# never a real authorization no matter how it is phrased -- may not.
+# AMBIGUOUS (orchestrator.jarvis_conversation's own fail-closed default
+# for anything absent/unknown/malformed) is deliberately absent from
+# this set, never added as a fallback permission.
+_DRAFT_PERMITTING_TURN_KINDS = frozenset({"PROPOSAL", "OBJECTIVE"})
+
+
+def _turn_kind_permits_draft(turn_kind: str) -> bool:
+    return turn_kind in _DRAFT_PERMITTING_TURN_KINDS
+
+
 def _handle_conversation(
     store: FileJarvisStore, body: dict, *,
     knowledge_store: FileKnowledgeStore | None = None,
@@ -347,6 +367,25 @@ def _handle_conversation(
 
     gate = None
     suggestion = turn.suggestion
+    # Jarvis God Mode M0 -- turn_kind_permits is a NEW, additional gate
+    # layered in front of (never instead of) the pre-existing field-content
+    # heuristic below. Before M0, "did the model fill in some fields?"
+    # was the only guard, and a RECOMMENDATION or ANALYSIS_REQUEST turn
+    # could satisfy it just as easily as a genuine PROPOSAL/OBJECTIVE --
+    # the exact gap the M0 Implementation Readiness Review traced as the
+    # root cause of an unwanted Human Gate appearing from a purely
+    # informational turn. turn_kind_permits closes that gap. The
+    # field-content heuristic itself is kept unchanged and ANDed with it,
+    # not replaced -- removing it would reopen the placeholder-only-draft
+    # bug an earlier independent review already found and fixed (see
+    # test_an_entirely_empty_suggestion_object_creates_no_draft): a
+    # PROPOSAL/OBJECTIVE turn whose suggestion is null, {}, or otherwise
+    # carries no real content must still create no draft. A Human Gate
+    # now requires BOTH "the turn was the kind of turn that may propose a
+    # draft" AND "the model actually proposed something" -- strictly more
+    # restrictive than either check alone, per the review's own invariant
+    # that this gate may only ever narrow, never widen, when it can write.
+    turn_kind_permits = _turn_kind_permits_draft(turn.turn_kind)
     # A suggestion object where every field is empty in the same sense
     # _merged_definition_and_open_questions() itself treats as "this
     # field contributes nothing" means the same thing as suggestion:
@@ -377,7 +416,7 @@ def _handle_conversation(
         suggestion is not None and suggestion.open_questions is not None
         and current_envelope is not None
     )
-    has_proposal = has_real_content or has_open_questions_signal
+    has_proposal = turn_kind_permits and (has_real_content or has_open_questions_signal)
     if has_proposal:
         from jarvis._safe_io import exclusive_entity_lock
         lock_id = draft_id or str(uuid.uuid4())
@@ -682,6 +721,23 @@ class _Handler(BaseHTTPRequestHandler):
         return value
 
     def _dispatch(self, method: str) -> None:
+        # Jarvis God Mode M0 -- GET /v1/health is the ONLY route ever
+        # dispatched before _authenticated(), and deliberately the only
+        # route in this entire handler with no dependency on _config(),
+        # _store(), _supervisor(), or any other server-constructed
+        # object: it exists solely so a launchd-driven external process
+        # supervisor (which has no bearer token and no reason to be
+        # handed one) can ask "is the Control Plane's own HTTP process
+        # alive?" without that question ever touching Chugel, the
+        # store, adapters, or any business/mission state. Approved scope
+        # (M0 Implementation Readiness Review): HTTP status plus a bare
+        # liveness indicator only -- never missions, drafts, agents,
+        # tokens/secrets, configuration, filesystem paths, Git state,
+        # business data, or trusted context. Do not add fields here
+        # without re-checking that boundary.
+        if method == "GET" and self.path == "/v1/health":
+            self._write_json(200, {"status": "ok"})
+            return
         if not self._authenticated():
             self._write_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return

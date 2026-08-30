@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Jarvis God Mode M0 -- local macOS process supervision for the Control
+  Plane, via launchd.
+
+  Scope, exactly as approved (M0 Implementation Readiness Review):
+  LOCAL macOS ONLY, no systemd, no remote server, no managed deploy. This
+  file contains zero business logic and knows nothing about Chugel,
+  Mission Records, or any Jarvis concept beyond "run this one command,
+  keep it running." Every environment variable the Control Plane itself
+  reads (CONTROL_PLANE_TOKEN, CONTROL_PLANE_STORE_ROOT, etc. -- see
+  DEPLOYMENT.md) is supplied here exactly as launchd requires (each in
+  its own EnvironmentVariables entry) and is unrelated to anything this
+  file decides on its own.
+
+  Install as a LaunchAgent (runs as the logged-in user, not root -- the
+  Control Plane binds to loopback and never needs elevated privileges):
+
+    cp ops/jarvis-control-plane.plist ~/Library/LaunchAgents/
+    # Edit the placeholder paths and CONTROL_PLANE_TOKEN below first --
+    # see DEPLOYMENT.md's "Jarvis Control Plane (macOS/launchd)" section.
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/jarvis-control-plane.plist
+
+  Verify launchd is actually supervising it:
+
+    launchctl list | grep com.zentra.jarvis.control-plane
+
+  Uninstall:
+
+    launchctl bootout gui/$(id -u)/com.zentra.jarvis.control-plane
+    rm ~/Library/LaunchAgents/jarvis-control-plane.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zentra.jarvis.control-plane</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>jarvis.control_plane_server</string>
+    </array>
+
+    <!-- REQUIRED: replace with the real, absolute path to the
+         proyecta-data checkout this should run from. PYTHONPATH is set
+         to the same path so `python -m jarvis.control_plane_server`
+         resolves the jarvis/orchestrator packages exactly as it does
+         when run manually from a shell in that directory today. -->
+    <key>WorkingDirectory</key>
+    <string>/REPLACE/WITH/ABSOLUTE/PATH/TO/proyecta-data</string>
+
+    <!-- KeepAlive + RunAtLoad together are the entire M0 supervision
+         contract: if the process exits for any reason (crash, kill -9,
+         OOM), launchd restarts it; if the Mac reboots, launchd starts it
+         at login. Neither branch is conditional -- always restart,
+         mirroring the same "no crash-loop backoff yet" limitation
+         disclosed as an open risk in the M0 Implementation Readiness
+         Review (section 10), not something this file tries to solve. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/REPLACE/WITH/ABSOLUTE/PATH/TO/proyecta-data</string>
+        <!-- REQUIRED: at least 32 characters, per
+             ControlPlaneConfig.__init__'s own validation. Generate one
+             locally (e.g. `openssl rand -hex 32`) -- never commit a real
+             value into this file or into version control. -->
+        <key>CONTROL_PLANE_TOKEN</key>
+        <string>REPLACE_WITH_A_REAL_SECRET_AT_LEAST_32_CHARACTERS</string>
+        <key>CONTROL_PLANE_STORE_ROOT</key>
+        <string>/REPLACE/WITH/ABSOLUTE/PATH/TO/A/LOCAL/JARVIS/STORE/DIRECTORY</string>
+        <!-- CONTROL_PLANE_HOST/PORT are optional -- load_config() already
+             defaults to 127.0.0.1:4318 loopback-only if unset, and
+             ControlPlaneConfig itself hard-refuses any non-loopback host.
+             Every other optional variable documented in DEPLOYMENT.md
+             (knowledge/Zentra/mission-repository roots) may be added
+             here the same way, one <key>/<string> pair per variable,
+             exactly as an operator running the command by hand would
+             export them -- omitted here entirely means "unset", the
+             exact same behavior as running the command manually with
+             nothing exported. -->
+    </dict>
+
+    <!-- Never overwritten between restarts -- launchd appends. Rotate/
+         truncate manually if these grow large; this file makes no
+         attempt at log rotation. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/jarvis-control-plane.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/jarvis-control-plane.err.log</string>
+</dict>
+</plist>
