@@ -55,9 +55,18 @@ def _init_repo(repo: Path) -> str:
 
 
 def _diff_sha256(repo: Path, base_sha: str) -> str:
-    result = subprocess.run(
-        ["git", "diff", "--binary", base_sha], cwd=repo, check=True, stdout=subprocess.PIPE,
-    )
+    """Mirrors the fixed production _diff_sha256() exactly (git add -N --
+    . / git diff --binary / git reset) -- computing the expected hash any
+    other way here would silently exclude untracked new files from the
+    fixture too, defeating the point of the regression tests below that
+    exist specifically to cover that case."""
+    subprocess.run(["git", "add", "-N", "--", "."], cwd=repo, check=True, stdout=subprocess.PIPE)
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--binary", base_sha], cwd=repo, check=True, stdout=subprocess.PIPE,
+        )
+    finally:
+        subprocess.run(["git", "reset"], cwd=repo, check=True, stdout=subprocess.PIPE)
     return hashlib.sha256(result.stdout).hexdigest()
 
 
@@ -196,6 +205,153 @@ class PublishCommitMaterializerTestCase(unittest.TestCase):
             ["git", "status", "--porcelain"], cwd=self._repo, check=True, stdout=subprocess.PIPE,
         ).stdout.decode("utf-8")
         self.assertIn("a.txt", status)  # the uncommitted drifted change is untouched
+
+    # --- corrective: untracked (brand-new) files, discovered via a real
+    # live E2E run of Mission 006's operational supervisor -----------------
+
+    def test_patch_mode_materializes_a_brand_new_untracked_file(self):
+        """Reproduces the exact E2E failure: the reviewed artifact is a
+        file that was never `git add`-ed, still untracked in the
+        worktree, at the moment materialize_reviewed_commit() runs --
+        exactly the shape of evidence Emilio's real adapters (codex_cli_
+        adapter.py / claude_cli_adapter.py) produce for a mission whose
+        change is "create a new file", and exactly what BLOCKED with
+        'live uncommitted worktree diff does not match the independently
+        reviewed patch_sha256 (... expected, got
+        e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855)'
+        (the sha256 of an empty diff) before this fix."""
+        base_sha = _init_repo(self._repo)
+        (self._repo / "brand_new.md").write_text("# New\n\nNever tracked before this mission.\n")
+        expected_hash = _diff_sha256(self._repo, base_sha)
+        self.assertNotEqual(  # sanity: the fixture itself must not be the empty-diff hash
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", expected_hash,
+        )
+
+        artifact = {"mode": "patch", "commit_sha": None,
+                    "patch_path": "/unused/artifact.patch",
+                    "patch_sha256": expected_hash, "patch_byte_size": 42}
+        mid = self._mission_with_pass_verdict(artifact, base_sha)
+
+        materialize_reviewed_commit(mid, str(self._repo), base_sha)  # must NOT raise
+
+        head_sha = _head(self._repo)
+        self.assertNotEqual(head_sha, base_sha)
+        log = subprocess.run(
+            ["git", "log", "--oneline", f"{base_sha}..HEAD"], cwd=self._repo,
+            check=True, stdout=subprocess.PIPE,
+        ).stdout.decode("utf-8").strip().splitlines()
+        self.assertEqual(len(log), 1)
+        show = subprocess.run(
+            ["git", "show", "--stat", "--oneline", "HEAD"], cwd=self._repo,
+            check=True, stdout=subprocess.PIPE,
+        ).stdout.decode("utf-8")
+        self.assertIn("brand_new.md", show)
+        self.assertEqual(_diff_sha256(self._repo, base_sha), expected_hash)
+
+    def test_patch_mode_materializes_a_new_file_larger_than_the_output_cap(self):
+        """Round-1 independent review, P2: the round-1 fix still capped
+        _run()'s stdout/stderr at _MAX_OUTPUT_BYTES (64KB) -- a limit the
+        adapters' own patch_sha256 computation never applies -- so any
+        genuinely correct, reviewed artifact whose diff happened to
+        exceed that cap would still BLOCKED, just with a different error
+        ('produced unexpectedly large output') instead of a hash
+        mismatch. This test writes a new, untracked file whose diff
+        content is unambiguously over 64KB and confirms materialization
+        still succeeds. Against the round-1 (pre-round-2) code, this
+        fails with exactly that 'produced unexpectedly large output'
+        MaterializeCommitError."""
+        base_sha = _init_repo(self._repo)
+        large_content = "".join(f"line {i:06d} of a large new file\n" for i in range(3000))
+        self.assertGreater(len(large_content.encode("utf-8")), 65536)  # sanity: genuinely over the old cap
+        (self._repo / "large_new_file.md").write_text(large_content)
+        expected_hash = _diff_sha256(self._repo, base_sha)
+
+        artifact = {"mode": "patch", "commit_sha": None,
+                    "patch_path": "/unused/artifact.patch",
+                    "patch_sha256": expected_hash, "patch_byte_size": len(large_content)}
+        mid = self._mission_with_pass_verdict(artifact, base_sha)
+
+        materialize_reviewed_commit(mid, str(self._repo), base_sha)  # must NOT raise
+
+        head_sha = _head(self._repo)
+        self.assertNotEqual(head_sha, base_sha)
+        show = subprocess.run(
+            ["git", "show", "--stat", "--oneline", "HEAD"], cwd=self._repo,
+            check=True, stdout=subprocess.PIPE,
+        ).stdout.decode("utf-8")
+        self.assertIn("large_new_file.md", show)
+        self.assertEqual(_diff_sha256(self._repo, base_sha), expected_hash)
+
+    def test_patch_mode_materializes_a_deleted_tracked_file(self):
+        base_sha = _init_repo(self._repo)
+        (self._repo / "a.txt").unlink()
+        expected_hash = _diff_sha256(self._repo, base_sha)
+
+        artifact = {"mode": "patch", "commit_sha": None,
+                    "patch_path": "/unused/artifact.patch",
+                    "patch_sha256": expected_hash, "patch_byte_size": 42}
+        mid = self._mission_with_pass_verdict(artifact, base_sha)
+
+        materialize_reviewed_commit(mid, str(self._repo), base_sha)
+
+        self.assertFalse((self._repo / "a.txt").exists())
+        self.assertEqual(_diff_sha256(self._repo, base_sha), expected_hash)
+
+    def test_patch_mode_materializes_a_mix_of_new_modified_and_deleted_files(self):
+        base_sha = _init_repo(self._repo)
+        (self._repo / "a.txt").write_text("modified\n")            # modified, tracked
+        (self._repo / "brand_new.md").write_text("new file\n")     # new, untracked
+        (self._repo / "b.txt").write_text("will be deleted\n")
+        _git(self._repo, "add", "-A")
+        _git(self._repo, "commit", "-q", "-m", "seed b.txt")
+        base_sha = _head(self._repo)  # new base: a.txt, b.txt tracked
+        (self._repo / "a.txt").write_text("modified again\n")
+        (self._repo / "b.txt").unlink()
+        (self._repo / "c_new.md").write_text("another new file\n")
+        expected_hash = _diff_sha256(self._repo, base_sha)
+
+        artifact = {"mode": "patch", "commit_sha": None,
+                    "patch_path": "/unused/artifact.patch",
+                    "patch_sha256": expected_hash, "patch_byte_size": 42}
+        mid = self._mission_with_pass_verdict(artifact, base_sha)
+
+        materialize_reviewed_commit(mid, str(self._repo), base_sha)
+
+        show = subprocess.run(
+            ["git", "show", "--stat", "--oneline", "HEAD"], cwd=self._repo,
+            check=True, stdout=subprocess.PIPE,
+        ).stdout.decode("utf-8")
+        self.assertIn("a.txt", show)
+        self.assertIn("b.txt", show)
+        self.assertIn("c_new.md", show)
+        self.assertFalse((self._repo / "b.txt").exists())
+        self.assertEqual(_diff_sha256(self._repo, base_sha), expected_hash)
+
+    def test_patch_mode_rejects_a_different_new_file_than_the_one_reviewed(self):
+        """Fail-closed is not weakened by this fix: an artifact hash that
+        does NOT match what is actually untracked in the worktree must
+        still be refused, exactly like the pre-existing tracked-file drift
+        test above -- this is the same guarantee, exercised specifically
+        against the new code path (git add -N) this fix introduces."""
+        base_sha = _init_repo(self._repo)
+        (self._repo / "reviewed.md").write_text("what Emma actually reviewed\n")
+        reviewed_hash = _diff_sha256(self._repo, base_sha)
+
+        # Simulate drift: the live worktree now has a DIFFERENT untracked
+        # file instead of (or in addition to) the reviewed one.
+        (self._repo / "reviewed.md").unlink()
+        (self._repo / "not_reviewed.md").write_text("something else entirely\n")
+
+        artifact = {"mode": "patch", "commit_sha": None,
+                    "patch_path": "/unused/artifact.patch",
+                    "patch_sha256": reviewed_hash, "patch_byte_size": 42}
+        mid = self._mission_with_pass_verdict(artifact, base_sha)
+
+        with self.assertRaises(MaterializeCommitError):
+            materialize_reviewed_commit(mid, str(self._repo), base_sha)
+
+        self.assertEqual(_head(self._repo), base_sha)  # nothing was committed
+        self.assertTrue((self._repo / "not_reviewed.md").exists())  # untouched, uncommitted
 
     def test_patch_mode_is_idempotent_on_restart(self):
         base_sha = _init_repo(self._repo)
