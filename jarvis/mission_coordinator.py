@@ -97,6 +97,138 @@ _GATE_CONSUMED_REASON = (
     "no new evidence, decided_by, or approved_for written here"
 )
 
+# Jarvis God Mode M1 -- Corrective Round 1 (closing Emma's P1/P2 on the
+# original workspace guard). The lifecycle-traced, deterministic unit of
+# ownership over the one repository_root every mission currently shares
+# (until M2 builds real per-mission isolation):
+#
+# ACQUISITION happens exactly once, at the AUTHORIZED -> BUILDING edge
+# inside autonomous_runner.run_mission() -- the first moment any real
+# subprocess dispatch (Emilio/Emma), `git push`/`gh pr create`, CI poll,
+# or `git`/`gh` merge ever touches the shared tree. Before that
+# (INTAKE, SCOPE_AWAITING_AUTHORIZATION, AUTHORIZED itself) a mission
+# owns nothing.
+#
+# RETENTION is CONTINUOUS from that acquisition through every state
+# where real, unmerged work still exists in that tree -- this is the
+# fix: the original guard incorrectly treated PUBLISH_AWAITING_AUTHORIZATION
+# and MERGE_AWAITING_AUTHORIZATION as if they were like the
+# SCOPE_AWAITING_AUTHORIZATION gate (untouched tree) -- they are not. A
+# mission sitting at either of those two gates has already built,
+# reviewed, and (for the merge gate) published real changes into the
+# shared tree; the human gate pending there is a decision ABOUT that
+# work, not a reason to consider the tree free. This table -- verified
+# exhaustively against orchestrator/schemas/mission_record.schema.json's
+# own 22-state enum and orchestrator/validator.py's real TRANSITIONS
+# table, not guessed -- is every state where that is true:
+_REPOSITORY_ROOT_OWNING_STATES = frozenset({
+    "BUILDING", "VERIFYING", "AWAITING_REVIEW", "REVIEWING", "CHANGES_REQUIRED", "CORRECTING",
+    "PUBLISH_AWAITING_AUTHORIZATION", "PUBLISHING", "CI_PENDING",
+    "MERGE_AWAITING_AUTHORIZATION", "MERGING",
+})
+# Deliberately EXCLUDED from the table above, with a reason each:
+#   - SCOPE_AWAITING_AUTHORIZATION: pre-acquisition -- a mission waiting
+#     on ITS FIRST gate has never touched repository_root. Blocking
+#     another mission because of a gate no one has acted on yet is
+#     exactly the "misión esperando un gate humano... bloquea otra
+#     innecesariamente" failure mode this guard exists to avoid.
+#   - AUTHORIZED: the acquisition instant itself, not yet real work.
+#     Excluding it is not a convenience -- including it creates a real
+#     deadlock: two simultaneously-AUTHORIZED missions would each see
+#     the OTHER as owning and both refuse to ever start, forever
+#     (neither one's state would ever change to break the symmetry).
+#     Excluding it breaks that symmetry: the first AUTHORIZED mission
+#     this module actually advances finds the table empty (the second
+#     is only AUTHORIZED, not a member) and is the one that gets to
+#     acquire -- becoming BUILDING (a member) before the second is ever
+#     checked.
+#   - Every terminal state (MERGED, FAILED, CANCELLED, ROLLED_BACK,
+#     DEPLOY_PENDING, VERIFYING_PRODUCTION, COMPLETED): release -- no
+#     automatic action is ever taken from any of them again.
+#   - BLOCKED is deliberately NOT in this table -- see
+#     _mission_owns_repository_root()'s own docstring for why a fixed
+#     current-state table alone cannot classify it correctly.
+
+
+def _mission_owns_repository_root(mission_id: str, state: str) -> bool:
+    """True if `state` alone already proves ownership (member of
+    _REPOSITORY_ROOT_OWNING_STATES); for BLOCKED specifically, the
+    current state alone is genuinely ambiguous and must not be
+    classified either way by a fixed table -- orchestrator/validator.py's
+    real TRANSITIONS set structurally allows BOTH ("SCOPE_AWAITING_AUTHORIZATION",
+    "BLOCKED") and ("INTAKE", "BLOCKED") (pre-acquisition; owns nothing)
+    AND every owning state transitioning to BLOCKED (post-acquisition;
+    still owns real, unresolved work in the tree) -- confirmed by reading
+    that table directly, not assumed. Resolved deterministically from
+    canonical persisted state, never a new lock or field: a mission's own
+    state_history (chugel.get_mission(), already one of this module's
+    disclosed Chugel calls) durably records every transition it has ever
+    made. If any prior transition ever landed on an owning state, this
+    mission has never released it -- BLOCKED only ever *pauses* automatic
+    progress (advance()'s own `if state == "BLOCKED":` branch takes no
+    action), it never releases whatever the mission already holds. If no
+    such transition exists, this mission never acquired anything and
+    BLOCKED here is exactly the pre-acquisition case. Fails closed on any
+    read failure: unable to confirm the record no longer holds a real
+    claim is treated as still holding one, never the reverse -- the
+    opposite direction (treating an unreadable record as free) is what
+    could let a second mission start real work over an unresolved one."""
+    if state in _REPOSITORY_ROOT_OWNING_STATES:
+        return True
+    if state != "BLOCKED":
+        return False
+    try:
+        record = chugel.get_mission(mission_id)
+    except Exception:  # noqa: BLE001 -- fail-closed: cannot confirm release, so not released.
+        return True
+    history = record.get("state_history") or []
+    return any(entry.get("to_state") in _REPOSITORY_ROOT_OWNING_STATES for entry in history)
+
+
+def _mission_occupying_repository_root(mission_id: str) -> str | None:
+    """Read-only, via the same disclosed chugel.list_missions()/
+    get_mission() seams this module already uses nowhere else directly
+    (both are among Chugel's three disclosed import seams -- see module
+    docstring) -- no second state engine, no new persisted concept:
+    ownership is entirely re-derived, every call, from the same
+    canonical Mission Record state (current state, and -- only for the
+    ambiguous BLOCKED case -- state_history) everything else in this
+    module already reads. A fixed frozenset membership test plus one
+    bounded history scan, nothing else -- no model output, no free-text
+    interpretation, no judgment call.
+
+    Jarvis God Mode M1 Final Hardening Round (closing Emma's P3, round 3
+    of independent review): an unreadable listing (corrupt/invalid/unsafe)
+    is treated as OWNING, never skipped. The approved invariant is
+    unconditional -- "si el sistema no puede determinar con certeza que
+    repository_root está libre, NO puede permitir adquisición" -- and an
+    unreadable record is exactly that: undetermined, not confirmed free.
+    A prior version of this function skipped unreadable listings,
+    reasoning only about whether a corrupt record could itself newly
+    ACQUIRE ownership going forward (it cannot, since every dispatch
+    branch in this module starts with a successful chugel.get_mission()
+    read) -- but that reasoning never addressed a mission that was
+    already a real, legitimate owner (mid-BUILDING, say, with genuine
+    uncommitted changes in the shared tree) whose record then becomes
+    unreadable for any reason before release. Silently skipping such a
+    listing let a second mission acquire over it -- a real fail-open gap,
+    now closed: this function can no longer be fooled by a record it
+    cannot read into believing repository_root is free.
+
+    Returns the other mission_id if repository_root is owned (or its
+    status cannot be confirmed), None only when every other listing is
+    both readable and confirmed non-owning. `mission_id` itself is
+    always excluded -- this checks for a DIFFERENT mission, never treats
+    a mission's own current state as contention with itself."""
+    for listing in chugel.list_missions():
+        if listing["mission_id"] == mission_id:
+            continue
+        if not listing["readable"]:
+            return listing["mission_id"]
+        if _mission_owns_repository_root(listing["mission_id"], listing["state"]):
+            return listing["mission_id"]
+    return None
+
 
 def _consume_gate_if_decided(mission_id: str, state: str) -> bool:
     """Mission 006 (gate-consumption follow-up): reads ONLY
@@ -141,7 +273,7 @@ def _last_transition_reason(record: dict) -> str:
 
 @dataclass(frozen=True)
 class CoordinatorReport:
-    status: str  # "GATE_REQUIRED" | "BLOCKED" | "HUMAN_ACTION_REQUIRED" | "TERMINAL_FAILURE" | "MERGED"
+    status: str  # "GATE_REQUIRED" | "BLOCKED" | "HUMAN_ACTION_REQUIRED" | "TERMINAL_FAILURE" | "MERGED" | "WORKSPACE_OCCUPIED"
     state: str
     gate_name: str | None = None
     reason: str = ""
@@ -189,6 +321,18 @@ def advance(
 
     if state in ("AUTHORIZED", "BUILDING", "VERIFYING", "AWAITING_REVIEW", "REVIEWING",
                  "CHANGES_REQUIRED", "CORRECTING"):
+        # Jarvis God Mode M1 workspace guard: real dispatch below touches
+        # the one repository_root every mission currently shares (see
+        # _REPOSITORY_ROOT_OWNING_STATES's own docstring). Checked
+        # here, before autonomous_runner.run_mission() ever runs -- never
+        # after -- so a second mission is never even offered a dispatch
+        # attempt while another one is confirmed already using it.
+        occupant = _mission_occupying_repository_root(mission_id)
+        if occupant is not None:
+            return CoordinatorReport(
+                "WORKSPACE_OCCUPIED", state,
+                reason=f"repository_root is occupied by mission {occupant}",
+            )
         try:
             result = autonomous_runner.run_mission(
                 mission_id, adapters, deadline=build_review_deadline,
@@ -218,6 +362,19 @@ def advance(
         return CoordinatorReport("GATE_REQUIRED", state, "publish_authorization")
 
     if state in ("PUBLISHING", "CI_PENDING"):
+        # Same workspace guard as above -- publish_executor.run() below
+        # does real `git push`/`gh pr create`/CI polling against
+        # repository_root. A mission already IN this branch (state ==
+        # PUBLISHING/CI_PENDING) is itself excluded by
+        # _mission_occupying_repository_root()'s own mission_id check,
+        # so this is a genuine check for a DIFFERENT occupant, not a
+        # mission blocking its own continued progress.
+        occupant = _mission_occupying_repository_root(mission_id)
+        if occupant is not None:
+            return CoordinatorReport(
+                "WORKSPACE_OCCUPIED", state,
+                reason=f"repository_root is occupied by mission {occupant}",
+            )
         result = publish_executor.run(
             mission_id, repository_root=repository_root, branch=branch, pr_title=pr_title,
             git_executable=git_executable, gh_executable=gh_executable,
@@ -247,6 +404,14 @@ def advance(
         return CoordinatorReport("GATE_REQUIRED", record["state"], "merge_authorization")
 
     if state == "MERGING":
+        # Same workspace guard -- merge_executor.run() below does a real
+        # `git`/`gh` merge against repository_root.
+        occupant = _mission_occupying_repository_root(mission_id)
+        if occupant is not None:
+            return CoordinatorReport(
+                "WORKSPACE_OCCUPIED", state,
+                reason=f"repository_root is occupied by mission {occupant}",
+            )
         result = merge_executor.run(
             mission_id, repository_root=repository_root,
             git_executable=git_executable, gh_executable=gh_executable,

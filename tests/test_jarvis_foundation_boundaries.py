@@ -30,7 +30,13 @@ COORDINATOR_CHUGEL_MODULE = "mission_coordinator.py"
 # module still relays only real, already-materialized decisions/records it
 # never fabricates itself for anything other than that one fixed, schema-
 # enum, non-human actor and fixed reason string.
-ALLOWED_COORDINATOR_CHUGEL_CALLS = {"get_mission", "transition"}
+# Jarvis God Mode M1 -- "list_missions" added: the workspace guard
+# (_mission_occupying_repository_root(), decision #4) reads it, read-only,
+# to determine whether another mission already occupies repository_root
+# before real dispatch/publish/merge work against it -- never writes
+# anything, same read-only nature list_missions() already has everywhere
+# else it is used (jarvis.mission_query's own exact-two-calls contract).
+ALLOWED_COORDINATOR_CHUGEL_CALLS = {"get_mission", "transition", "list_missions"}
 KNOWLEDGE_MODULES = {
     "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",
     "jarvis.learning_projection", "jarvis.knowledge_retrieval", "jarvis.repository_freshness",

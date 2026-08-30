@@ -404,5 +404,306 @@ class ExecutiveSummaryTests(CoordinatorTestCase):
         self.assertIn("PASS", summary)
 
 
+class WorkspaceGuardTests(CoordinatorTestCase):
+    """Jarvis God Mode M1 decision #4 (approved): until M2 builds real
+    per-mission workspace isolation, advance() must never let a second
+    mission start real dispatch/publish/merge work against the one
+    repository_root every mission currently shares while another mission
+    is confirmed already using it -- but must NEVER block a mission
+    only because ANOTHER mission is merely waiting on a human gate (that
+    mission has not touched repository_root and might not for a long
+    time), and must never deadlock two missions that both just got
+    authorized at the same moment."""
+
+    def _mission_publish_awaiting(self):
+        mid = self._mission_authorized()
+        self.adapters.update({
+            "codex": _FakeAdapter([_emilio_completed_template(attempt=0)]),
+            "claude": _FakeAdapter([_emma_completed_template(attempt=0, verdict="PASS")]),
+        })
+        run_mission(mid, self.adapters, max_total_attempts=4)
+        self.assertEqual("PUBLISH_AWAITING_AUTHORIZATION", chugel.get_mission(mid)["state"])
+        self.adapters.clear()
+        return mid
+
+    def _mission_publishing(self):
+        mid = self._mission_publish_awaiting()
+        chugel.decide_gate(mid, "publish_authorization", _publish_gate_approval())
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="publish gate approved")
+        return mid
+
+    def _mission_merging(self):
+        mid = self._mission_publishing()
+        chugel.record_publish_pr(mid, "https://example.invalid/pr/1", 1)
+        chugel.transition(mid, "CI_PENDING", actor="chugel", reason="x")
+        chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="x")
+        with mock.patch("orchestrator.publish_identity_repair._live_pr_head_sha", return_value=_HEAD_SHA):
+            chugel.get_mission(mid)  # no-op read, keeps parity with other helpers' shape
+        chugel.record_publish_commit(mid, _HEAD_SHA)
+        chugel.decide_gate(mid, "merge_authorization", {
+            "status": "approved", "requested_at": "2026-08-19T12:40:00Z",
+            "decided_at": "2026-08-19T12:40:00Z", "decided_by": "jose",
+            "decision_ref": "ref-merge-1", "approved_for": {"head_sha": _HEAD_SHA},
+        })
+        chugel.transition(mid, "MERGING", actor="chugel", reason="merge gate approved")
+        return mid
+
+    def test_building_mission_blocks_a_second_authorized_mission_from_starting(self):
+        occupant = self._mission_authorized()
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        second = self._mission_authorized()
+        report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+        # No side effect: the parked mission's own state is untouched.
+        self.assertEqual("AUTHORIZED", chugel.get_mission(second)["state"])
+
+    def test_publishing_mission_blocks_a_second_authorized_mission_from_starting(self):
+        occupant = self._mission_publishing()
+        second = self._mission_authorized()
+        report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+
+    def test_merging_mission_blocks_a_second_authorized_mission_from_starting(self):
+        occupant = self._mission_merging()
+        second = self._mission_authorized()
+        report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+
+    def _advance_with_stubbed_dispatch(self, mid):
+        """Stubs autonomous_runner.run_mission() itself -- these tests
+        exist to prove the workspace GUARD did or did not block dispatch
+        from being attempted at all, never to exercise real Emilio/Emma
+        machinery (already covered elsewhere). A real call reaching the
+        stub is the positive proof the guard did not block."""
+        stub = mock.Mock(return_value=mock.Mock(status="HUMAN_ACTION_REQUIRED", state="BUILDING", reason="stub"))
+        with mock.patch("jarvis.mission_coordinator.autonomous_runner.run_mission", stub):
+            report = self._advance(mid)
+        return report, stub
+
+    def test_occupied_mission_never_blocks_itself(self):
+        """The occupant continuing its OWN advance() call must never see
+        itself as the occupant."""
+        occupant = self._mission_authorized()
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        report, stub = self._advance_with_stubbed_dispatch(occupant)
+        stub.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_a_mission_waiting_on_scope_gate_never_blocks_another_mission(self):
+        self._mission_scope_awaiting()
+        second = self._mission_authorized()
+        report, stub = self._advance_with_stubbed_dispatch(second)
+        stub.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_a_mission_waiting_on_the_publish_gate_DOES_block_another_mission(self):
+        """Corrective Round 1 (Emma P1/P2): the original guard treated
+        PUBLISH_AWAITING_AUTHORIZATION like the scope gate (untouched
+        tree) -- wrong. A mission here already built and got a PASS
+        review; real, unmerged changes already exist in the shared tree.
+        A second mission must never be allowed to start building over
+        them just because the pending decision is a human gate."""
+        occupant = self._mission_publish_awaiting()
+        second = self._mission_authorized()
+        report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+
+    def test_a_mission_waiting_on_the_merge_gate_DOES_block_another_mission(self):
+        """Same correction as the publish-gate test above, for
+        MERGE_AWAITING_AUTHORIZATION -- by this point the mission has
+        also pushed and opened a real PR."""
+        occupant = self._mission_publishing()
+        chugel.record_publish_pr(occupant, "https://example.invalid/pr/1", 1)
+        chugel.transition(occupant, "CI_PENDING", actor="chugel", reason="x")
+        chugel.transition(occupant, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="x")
+        with mock.patch("orchestrator.publish_identity_repair._live_pr_head_sha", return_value=_HEAD_SHA):
+            chugel.get_mission(occupant)
+        chugel.record_publish_commit(occupant, _HEAD_SHA)
+        second = self._mission_authorized()
+        report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+
+    def test_a_mission_blocked_from_a_pre_acquisition_state_never_blocks_another_mission(self):
+        """BLOCKED reached from SCOPE_AWAITING_AUTHORIZATION (a real,
+        validator-allowed transition -- orchestrator/validator.py's
+        TRANSITIONS includes ("SCOPE_AWAITING_AUTHORIZATION", "BLOCKED"))
+        never touched repository_root -- its state_history contains no
+        owning-state entry, so it must not block another mission."""
+        blocked = self._mission_scope_awaiting()
+        chugel.transition(blocked, "BLOCKED", actor="chugel", reason="synthetic block for test")
+        second = self._mission_authorized()
+        report, stub = self._advance_with_stubbed_dispatch(second)
+        stub.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_a_mission_blocked_from_an_owning_state_STILL_blocks_another_mission(self):
+        """The other half of the same BLOCKED ambiguity: a mission
+        blocked FROM a real owning state (here, BUILDING) has real,
+        unresolved work sitting in the tree -- BLOCKED only pauses its
+        own automatic progress, it never releases what it already
+        holds. Its state_history must still show the BUILDING entry, so
+        it must continue to block a second mission exactly as if it
+        were still BUILDING."""
+        occupant = self._mission_authorized()
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        chugel.transition(occupant, "BLOCKED", actor="chugel", reason="synthetic block mid-build for test")
+        second = self._mission_authorized()
+        report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+
+    def test_unreadable_occupant_history_fails_closed_to_still_owning(self):
+        """If the occupant's own record briefly fails to read (a narrow
+        race, or real corruption) while resolving a BLOCKED ambiguity,
+        the guard must assume the claim is NOT released -- the unsafe
+        direction would be assuming a real, unresolved claim is free."""
+        occupant = self._mission_authorized()
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        chugel.transition(occupant, "BLOCKED", actor="chugel", reason="synthetic block mid-build for test")
+        second = self._mission_authorized()
+        real_get_mission = chugel.get_mission
+
+        def _fake_get_mission(mid):
+            if mid == occupant:
+                raise RuntimeError("simulated transient read failure")
+            return real_get_mission(mid)
+
+        with mock.patch("jarvis.mission_coordinator.chugel.get_mission", side_effect=_fake_get_mission):
+            report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_the_exact_emma_reported_deadlock_sequence_no_longer_deadlocks(self):
+        """Reproduces the precise 5-step sequence from Emma's P1 finding
+        and proves it now resolves instead of deadlocking: mission A
+        reaches its publish gate (previously non-blocking -- the bug);
+        mission B is parked the entire time A is doing real work; once A
+        reaches a genuinely terminal state, B is finally free to start."""
+        a = self._mission_publish_awaiting()
+        b = self._mission_authorized()
+
+        # Step 2 (bug reproduction, now fixed): B must be parked while A
+        # sits at its publish gate with real, unmerged work in the tree.
+        report_b = self._advance(b)
+        self.assertEqual("WORKSPACE_OCCUPIED", report_b.status)
+        self.assertEqual("AUTHORIZED", chugel.get_mission(b)["state"])
+
+        # Step 3: A's publish gate is approved -- A moves into PUBLISHING,
+        # still owning; B remains parked.
+        chugel.decide_gate(a, "publish_authorization", _publish_gate_approval())
+        chugel.transition(a, "PUBLISHING", actor="chugel", reason="publish gate approved")
+        report_b = self._advance(b)
+        self.assertEqual("WORKSPACE_OCCUPIED", report_b.status)
+
+        # Step 4/5: A publishes and reaches its merge gate -- this is
+        # exactly the point Emma's trace showed the ORIGINAL guard
+        # allowing B to also reach an owning state, producing the
+        # symmetric deadlock. B must still be parked here.
+        chugel.record_publish_pr(a, "https://example.invalid/pr/1", 1)
+        chugel.transition(a, "CI_PENDING", actor="chugel", reason="x")
+        chugel.transition(a, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="x")
+        with mock.patch("orchestrator.publish_identity_repair._live_pr_head_sha", return_value=_HEAD_SHA):
+            chugel.get_mission(a)
+        chugel.record_publish_commit(a, _HEAD_SHA)
+        report_b = self._advance(b)
+        self.assertEqual("WORKSPACE_OCCUPIED", report_b.status)
+        self.assertEqual("AUTHORIZED", chugel.get_mission(b)["state"])  # never silently acquired
+
+        # A finally merges -- genuinely terminal, ownership released.
+        chugel.decide_gate(a, "merge_authorization", {
+            "status": "approved", "requested_at": "2026-08-19T12:40:00Z",
+            "decided_at": "2026-08-19T12:40:00Z", "decided_by": "jose",
+            "decision_ref": "ref-merge-1", "approved_for": {"head_sha": _HEAD_SHA},
+        })
+        chugel.transition(a, "MERGING", actor="chugel", reason="merge gate approved")
+        # Fast-forward directly to a synthetic MERGED-equivalent, same
+        # pattern as GateRoutingTests.test_merged_is_terminal above --
+        # real merge_executor.run() against a real repository_root is
+        # already covered by tests/test_orchestrator_merge_executor.py;
+        # this test's own subject is the workspace guard, not the merge
+        # executor.
+        chugel.record_merge_commit(a, _HEAD_SHA)
+        chugel.transition(a, "MERGED", actor="chugel", reason="synthetic merge completion for test")
+        self.assertEqual("MERGED", chugel.get_mission(a)["state"])
+
+        # Only now is B actually free to start real work.
+        report_b, stub = self._advance_with_stubbed_dispatch(b)
+        stub.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report_b.status)
+
+    def test_ownership_after_a_simulated_restart_is_rederived_identically(self):
+        """No new lock, no new persisted field -- ownership is a pure
+        function of chugel.get_mission()/list_missions()'s own already-
+        durable state. A 'restart' is simulated by simply calling
+        advance() again from a fresh Python-level call with no in-memory
+        state carried over (this test process never held any) -- the
+        exact same answer must come back both times."""
+        occupant = self._mission_authorized()
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        second = self._mission_authorized()
+        first_report = self._advance(second)
+        second_report = self._advance(second)  # simulates a fresh call after a crash/restart
+        self.assertEqual("WORKSPACE_OCCUPIED", first_report.status)
+        self.assertEqual(first_report.status, second_report.status)
+        self.assertEqual(first_report.reason, second_report.reason)
+
+    def test_two_freshly_authorized_missions_never_deadlock(self):
+        """The exact scenario the guard's own docstring calls out by
+        name: including AUTHORIZED in the occupying-states set would let
+        two simultaneously-AUTHORIZED missions see each other as
+        occupying and both refuse to ever start. Confirms the real fix:
+        the first one advanced is never blocked by the second (which
+        has not started anything yet either)."""
+        first = self._mission_authorized()
+        self._mission_authorized()
+        report, stub = self._advance_with_stubbed_dispatch(first)
+        stub.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_no_other_missions_never_blocks(self):
+        mid = self._mission_authorized()
+        report, stub = self._advance_with_stubbed_dispatch(mid)
+        stub.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_unreadable_occupant_listing_fails_closed_not_open(self):
+        """Jarvis God Mode M1 Final Hardening Round (Emma round-3 P3).
+
+        BEFORE this fix, _mission_occupying_repository_root() skipped any
+        listing with readable=False entirely (`continue`) -- treating a
+        mission whose own record could no longer be parsed as if it were
+        proven non-owning. That silently violated the approved invariant
+        ("si el sistema no puede determinar con certeza que
+        repository_root está libre, NO puede permitir adquisición"): an
+        unreadable record is undetermined, not confirmed free, and a
+        genuinely mid-BUILDING mission whose record became corrupt for
+        any reason would have been silently ignored, letting a second
+        mission acquire over its real, unresolved work.
+
+        AFTER this fix, an unreadable listing is treated as occupying --
+        this test proves it directly: a real mission record, written with
+        deliberately malformed JSON (mirroring
+        tests/test_orchestrator_chugel.py's own
+        test_candidato_corrupto_no_oculta_los_demas pattern -- the same,
+        already-established way this codebase constructs a genuinely
+        unreadable listing), causes a second, otherwise-eligible mission
+        to be blocked rather than silently allowed through."""
+        second = self._mission_authorized()
+        corrupt_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        (chugel._MISSIONS_DIR / f"{corrupt_id}.json").write_text("{not valid json", encoding="utf-8")
+
+        listings = {row["mission_id"]: row for row in chugel.list_missions()}
+        self.assertFalse(listings[corrupt_id]["readable"])  # precondition: genuinely unreadable
+
+        report, stub = self._advance_with_stubbed_dispatch(second)
+        stub.assert_not_called()
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(corrupt_id, report.reason)
+
+
 if __name__ == "__main__":
     unittest.main()

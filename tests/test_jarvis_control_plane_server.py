@@ -919,5 +919,178 @@ class HealthEndpointTests(ControlPlaneServerTestCase):
             self.assertNotIn(forbidden, rendered)
 
 
+class ObjectiveDecompositionFlowTests(ControlPlaneServerTestCase):
+    """Jarvis God Mode M1 -- Objective decomposition end-to-end over
+    /v1/conversation. converse() is mocked here exactly like
+    ConversationFlowTests above; real turn_kind/objective_decomposition
+    classification is covered independently in
+    tests/test_orchestrator_jarvis_conversation.py."""
+
+    def _item(self, title, outcome="Outcome", scope=("scope",), acceptance_criteria=("done",)):
+        from orchestrator.jarvis_conversation import DecompositionItemSuggestion
+        return DecompositionItemSuggestion(
+            title=title, outcome=outcome, scope=scope, non_goals=(),
+            acceptance_criteria=acceptance_criteria, open_questions=(),
+        )
+
+    def _patch_converse_with_decomposition(self, reply, turn_kind, decomposition, suggestion=None):
+        import unittest.mock as mock
+        from orchestrator.jarvis_conversation import ConversationTurnResult
+        return mock.patch(
+            "jarvis.control_plane_server.jarvis_conversation.converse",
+            return_value=ConversationTurnResult(
+                reply=reply, suggestion=suggestion, turn_kind=turn_kind,
+                objective_decomposition=decomposition,
+            ),
+        )
+
+    def test_a_valid_three_item_decomposition_creates_an_objective_and_three_drafts(self):
+        items = (self._item("Item A"), self._item("Item B"), self._item("Item C"))
+        with self._patch_converse_with_decomposition("Here's a breakdown.", "OBJECTIVE", items):
+            status, body = self._request("POST", "/v1/conversation", {"message": "improve module X"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["draftId"])
+        self.assertIsNone(body["gate"])
+        self.assertIsNotNone(body["objectiveId"])
+        self.assertEqual(3, len(body["decomposition"]))
+
+        store = self.server.store
+        self.assertEqual((body["objectiveId"],), store.list_objective_ids())
+        objective = store.get_latest_objective(body["objectiveId"]).objective
+        self.assertEqual("decomposed", objective.status)
+        self.assertEqual(3, len(objective.decomposition))
+        for entry in objective.decomposition:
+            draft = store.get_latest_draft(entry.draft_id)
+            self.assertEqual(1, draft.draft.revision)
+
+    def test_two_item_decomposition_is_below_the_fixed_minimum_and_falls_through(self):
+        items = (self._item("Only one"), self._item("Two"))[:1]  # deliberately 1, below minimum
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        suggestion = DraftFieldSuggestion(
+            outcome="A single mission instead", scope=("do it",), non_goals=(),
+            acceptance_criteria=("it works",), open_questions=(),
+        )
+        with self._patch_converse_with_decomposition(
+            "Just one mission then.", "OBJECTIVE", items, suggestion=suggestion,
+        ):
+            status, body = self._request("POST", "/v1/conversation", {"message": "improve module X"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["objectiveId"])
+        self.assertIsNone(body["decomposition"])
+        self.assertIsNotNone(body["gate"])  # fell through to the ordinary single-draft OBJECTIVE path
+        self.assertEqual((), self.server.store.list_objective_ids())
+
+    def test_five_item_decomposition_exceeds_the_fixed_maximum_and_falls_through(self):
+        items = tuple(self._item(f"Item {i}") for i in range(5))
+        from orchestrator.jarvis_conversation import DraftFieldSuggestion
+        suggestion = DraftFieldSuggestion(
+            outcome="Too many pieces, one mission instead", scope=("do it",), non_goals=(),
+            acceptance_criteria=("it works",), open_questions=(),
+        )
+        with self._patch_converse_with_decomposition(
+            "Let's keep it as one.", "OBJECTIVE", items, suggestion=suggestion,
+        ):
+            status, body = self._request("POST", "/v1/conversation", {"message": "improve module X"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["objectiveId"])
+        self.assertEqual((), self.server.store.list_objective_ids())
+        self.assertIsNotNone(body["gate"])
+
+    def test_a_placeholder_only_item_rejects_the_whole_decomposition(self):
+        from orchestrator.jarvis_conversation import DecompositionItemSuggestion, DraftFieldSuggestion
+        placeholder = DecompositionItemSuggestion(title="Just a title, nothing else")
+        items = (self._item("Real item"), placeholder, self._item("Another real item"))
+        suggestion = DraftFieldSuggestion(
+            outcome="Fallback single mission", scope=("do it",), non_goals=(),
+            acceptance_criteria=("it works",), open_questions=(),
+        )
+        with self._patch_converse_with_decomposition(
+            "Let's keep it simple.", "OBJECTIVE", items, suggestion=suggestion,
+        ):
+            status, body = self._request("POST", "/v1/conversation", {"message": "improve module X"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["objectiveId"])
+        self.assertEqual((), self.server.store.list_objective_ids())
+
+    def test_decomposition_only_applies_when_turn_kind_is_objective(self):
+        """Structural re-verification, not trust in the model having
+        followed _SYSTEM_TASK's own instruction to only ever populate
+        objective_decomposition when turn_kind is OBJECTIVE."""
+        items = (self._item("A"), self._item("B"), self._item("C"))
+        with self._patch_converse_with_decomposition("huh", "RECOMMENDATION", items):
+            status, body = self._request("POST", "/v1/conversation", {"message": "just thinking out loud"})
+        self.assertEqual(200, status)
+        self.assertIsNone(body["objectiveId"])
+        self.assertIsNone(body["gate"])
+        self.assertEqual((), self.server.store.list_objective_ids())
+
+    def test_each_decomposed_draft_is_independently_authorizable(self):
+        items = (self._item("Item A"), self._item("Item B"))
+        with self._patch_converse_with_decomposition("Here's a breakdown.", "OBJECTIVE", items):
+            _, body = self._request("POST", "/v1/conversation", {"message": "improve module X"})
+        first_draft_id = body["decomposition"][0]["id"]
+        envelope = self.server.store.get_latest_draft(first_draft_id)
+        status, authorize_body = self._request("POST", f"/v1/gates/{first_draft_id}/authorize", {
+            "gateId": first_draft_id, "missionId": f"draft:{first_draft_id}", "expectedRevision": "1",
+            "action": "authorize", "confirmation": "I authorize this action now",
+            "digest": envelope.digest,
+        })
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(chugel.list_missions()))
+        # The second draft remains completely untouched -- no mission,
+        # no authorization effect, independent of the first.
+        second_draft_id = body["decomposition"][1]["id"]
+        second_envelope = self.server.store.get_latest_draft(second_draft_id)
+        self.assertEqual(1, second_envelope.draft.revision)
+
+    def test_convergence_after_a_simulated_crash_between_phases_creates_the_missing_drafts(self):
+        """Simulates a crash between phase 1 (Objective persisted) and
+        phase 2 (drafts created) by calling the internal building blocks
+        directly, skipping convergence -- then proves an ordinary
+        projection read (GET /v1/command-center/projection, already
+        polled periodically by any real caller, no new background
+        worker) completes it."""
+        from jarvis.control_plane_server import _objective_decomposition_entries
+        from jarvis.models import Objective
+        from jarvis.objectives import build_objective_envelope
+        from jarvis.storage import DraftNotFound
+        import uuid as uuid_module
+
+        objective_id = str(uuid_module.uuid4())
+        items = (self._item("Item A"), self._item("Item B"), self._item("Item C"))
+        entries = _objective_decomposition_entries(objective_id, items)
+        now = "2026-08-30T20:00:00Z"
+        objective = Objective(
+            schema_version="1.0.0", objective_id=objective_id, revision=1,
+            created_at=now, updated_at=now, raw_intent="improve module X",
+            priority="unset", status="decomposed", decomposition=entries,
+        )
+        self.server.store.save_objective(build_objective_envelope(objective))
+        # Phase 1 only -- no draft exists yet for any entry.
+        for entry in entries:
+            with self.assertRaises(DraftNotFound):
+                self.server.store.get_latest_draft(entry.draft_id)
+
+        status, projection = self._request("GET", "/v1/command-center/projection")
+        self.assertEqual(200, status)
+        for entry in entries:
+            draft = self.server.store.get_latest_draft(entry.draft_id)  # no longer raises
+            self.assertEqual(1, draft.draft.revision)
+        objective_projection = next(o for o in projection["objectives"] if o["id"] == objective_id)
+        self.assertEqual(3, len(objective_projection["decomposition"]))
+
+    def test_convergence_is_idempotent_across_repeated_projection_reads(self):
+        items = (self._item("Item A"), self._item("Item B"))
+        with self._patch_converse_with_decomposition("Here's a breakdown.", "OBJECTIVE", items):
+            _, body = self._request("POST", "/v1/conversation", {"message": "improve module X"})
+        draft_id = body["decomposition"][0]["id"]
+        before = self.server.store.get_latest_draft(draft_id)
+        self._request("GET", "/v1/command-center/projection")
+        self._request("GET", "/v1/command-center/projection")
+        after = self.server.store.get_latest_draft(draft_id)
+        self.assertEqual(before.digest, after.digest)
+        self.assertEqual((1,), self.server.store.list_draft_revisions(draft_id))
+
+
 if __name__ == "__main__":
     unittest.main()

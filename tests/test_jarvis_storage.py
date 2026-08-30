@@ -248,5 +248,62 @@ class AuthorizationEffectTests(unittest.TestCase):
         self.store.mark_draft_authorized(DRAFT_ID)  # idempotent, no error
 
 
+class ObjectiveStorageTests(unittest.TestCase):
+    """Jarvis God Mode M1. Deliberate mirror of JarvisStorageTests above,
+    for the Objective artifact type."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "jarvis"
+        self.store = FileJarvisStore(self.root)
+        from jarvis.objectives import build_objective_envelope
+        from tests.test_jarvis_objectives import OBJECTIVE_ID, proposed_objective
+        self.OBJECTIVE_ID = OBJECTIVE_ID
+        self.build_objective_envelope = build_objective_envelope
+        self.proposed_objective = proposed_objective
+        self.envelope = build_objective_envelope(proposed_objective())
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_round_trip_and_immutable_revision(self):
+        from jarvis.storage import ObjectiveAlreadyExists
+        self.store.save_objective(self.envelope)
+        self.assertEqual(self.envelope, self.store.get_objective(self.OBJECTIVE_ID, 1))
+        with self.assertRaises(ObjectiveAlreadyExists):
+            self.store.save_objective(self.envelope)
+
+    def test_reopening_an_existing_store_root_does_not_raise(self):
+        self.store.save_objective(self.envelope)
+        reopened = FileJarvisStore(self.root)
+        self.assertEqual(self.envelope, reopened.get_objective(self.OBJECTIVE_ID, 1))
+
+    def test_multiple_revisions_and_latest(self):
+        self.store.save_objective(self.envelope)
+        second = self.build_objective_envelope(dataclasses.replace(
+            self.proposed_objective(), revision=2, updated_at="2026-08-30T20:00:01Z", status="closed",
+        ))
+        self.store.save_objective(second)
+        self.assertEqual((1, 2), self.store.list_objective_revisions(self.OBJECTIVE_ID))
+        self.assertEqual(2, self.store.get_latest_objective(self.OBJECTIVE_ID).objective.revision)
+
+    def test_unknown_objective_id_raises_not_found(self):
+        from jarvis.storage import ObjectiveNotFound
+        with self.assertRaises(ObjectiveNotFound):
+            self.store.get_latest_objective("923e4567-e89b-42d3-a456-426614174099")
+
+    def test_list_objective_ids(self):
+        self.assertEqual((), self.store.list_objective_ids())
+        self.store.save_objective(self.envelope)
+        self.assertEqual((self.OBJECTIVE_ID,), self.store.list_objective_ids())
+
+    def test_save_objective_rejects_a_tampered_digest(self):
+        from jarvis.storage import StoredArtifactCorrupt
+        import dataclasses as dc
+        tampered = dc.replace(self.envelope, digest="f" * 64)
+        with self.assertRaises(StoredArtifactCorrupt):
+            self.store.save_objective(tampered)
+
+
 if __name__ == "__main__":
     unittest.main()

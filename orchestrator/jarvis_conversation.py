@@ -83,11 +83,41 @@ _VALID_TURN_KINDS = frozenset({
 })
 
 
+# Jarvis God Mode M1 -- one proposed item of an OBJECTIVE decomposition.
+# Same optional-field contract as DraftFieldSuggestion (None = "not
+# addressed"), plus a short `title` identifying the item -- required,
+# never optional, since a decomposition item with no title at all is not
+# a usable proposal. The COUNT of items (decision #1, approved: fixed
+# 2-4, never configurable) is deliberately NOT enforced here -- this
+# module only classifies/parses what the model returned; the fixed,
+# non-LLM count check lives entirely in jarvis/control_plane_server.py,
+# the same "model classifies, code decides what is actionable" split
+# turn_kind itself already uses (see _turn_kind_permits_draft() there).
+@dataclass(frozen=True)
+class DecompositionItemSuggestion:
+    title: str
+    outcome: str | None = None
+    scope: tuple[str, ...] | None = None
+    non_goals: tuple[str, ...] | None = None
+    acceptance_criteria: tuple[str, ...] | None = None
+    open_questions: tuple[str, ...] | None = None
+
+
+# Defensive wire-format cap only -- never the real business rule (2-4,
+# enforced in jarvis/control_plane_server.py). Exists solely so a wildly
+# malformed model response cannot inflate this module's own parsed
+# result to an unbounded size; any count outside 2-4 (including this
+# cap's own range) is simply not actionable downstream, exactly like an
+# objective_decomposition of 1 or 5 items would be.
+_MAX_PARSED_DECOMPOSITION_ITEMS = 8
+
+
 @dataclass(frozen=True)
 class ConversationTurnResult:
     reply: str
     suggestion: DraftFieldSuggestion | None
     turn_kind: str = "AMBIGUOUS"
+    objective_decomposition: tuple[DecompositionItemSuggestion, ...] | None = None
 
 
 _SYSTEM_TASK = (
@@ -127,6 +157,23 @@ _SYSTEM_TASK = (
     "relevant to it; omit (null) any field the conversation has not "
     "addressed yet, so the caller never overwrites an already-good value "
     "with a guess.\n\n"
+    "4. ONLY when turn_kind is OBJECTIVE, you may ADDITIONALLY propose "
+    "objective_decomposition: a breakdown of the objective into separate, "
+    "independently workable missions, each with its own title/outcome/"
+    "scope/non_goals/acceptance_criteria/open_questions (same meaning and "
+    "same null-omission rule as the single suggestion above, field by "
+    "field). Propose objective_decomposition ONLY when you have enough "
+    "clarity to break the objective into EXACTLY 2, 3, or 4 genuinely "
+    "distinct, independently workable pieces -- never 1, never 5 or more, "
+    "and never a split that is really just one piece of work described "
+    "twice. If the objective is simple enough to stay as one mission, or "
+    "you don't yet have enough clarity to split it confidently, omit "
+    "objective_decomposition entirely (null) -- it will be treated as a "
+    "single ordinary objective, exactly like turn_kind OBJECTIVE already "
+    "works today. Never invent scope/acceptance_criteria for any item Jose "
+    "did not actually make possible to derive from what he said -- the "
+    "same rule that already governs the single suggestion above applies "
+    "per item here.\n\n"
     "The UNTRUSTED DATA bundle may include knowledge_citations -- already-"
     "authorized knowledge about Zentra (José's product), each with "
     "knowledgeId, claim, label, and tier (\"canonical\" or \"complementary\", "
@@ -178,7 +225,18 @@ _SYSTEM_TASK = (
     '    "non_goals": ["<string>", ...] or null,\n'
     '    "acceptance_criteria": ["<string>", ...] or null,\n'
     '    "open_questions": ["<string>", ...] or null\n'
-    "  }\n"
+    "  },\n"
+    '  "objective_decomposition": null or [\n'
+    "    {\n"
+    '      "title": "<short string>",\n'
+    '      "outcome": "<string or null>",\n'
+    '      "scope": ["<string>", ...] or null,\n'
+    '      "non_goals": ["<string>", ...] or null,\n'
+    '      "acceptance_criteria": ["<string>", ...] or null,\n'
+    '      "open_questions": ["<string>", ...] or null\n'
+    "    },\n"
+    "    ... (exactly 2, 3, or 4 items total when present, never fewer or more)\n"
+    "  ]\n"
     "}\n\n"
     '"open_questions" must list anything still missing or ambiguous '
     "before this draft could be authorized -- an empty array only when "
@@ -332,14 +390,56 @@ def _normalized_turn_kind(structured: dict) -> str:
     return "AMBIGUOUS"
 
 
+def _parse_decomposition_item(raw_item: object) -> DecompositionItemSuggestion:
+    if not isinstance(raw_item, dict):
+        raise JarvisConversationError("each objective_decomposition item must be an object")
+    title = raw_item.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise JarvisConversationError("objective_decomposition item.title must be a non-empty string")
+    outcome = raw_item.get("outcome")
+    if outcome is not None and not isinstance(outcome, str):
+        raise JarvisConversationError("objective_decomposition item.outcome must be a string or null")
+    return DecompositionItemSuggestion(
+        title=title,
+        outcome=outcome,
+        scope=_string_tuple_or_none(raw_item.get("scope")),
+        non_goals=_string_tuple_or_none(raw_item.get("non_goals")),
+        acceptance_criteria=_string_tuple_or_none(raw_item.get("acceptance_criteria")),
+        open_questions=_string_tuple_or_none(raw_item.get("open_questions")),
+    )
+
+
+def _parse_objective_decomposition(structured: dict) -> tuple[DecompositionItemSuggestion, ...] | None:
+    """Parses whatever the model returned -- structural validity only.
+    Deliberately does NOT enforce the 2-4 count business rule (decision
+    #1, approved): that fixed, non-LLM check lives entirely in
+    jarvis/control_plane_server.py, so this module stays a pure
+    classifier/parser, never the place authority-adjacent counting
+    decisions are made. A count outside [0, _MAX_PARSED_DECOMPOSITION_ITEMS]
+    is capped defensively -- extra items beyond the cap are dropped, never
+    causing a raise, since no count this function could see is "wrong" in
+    a way worth failing the whole turn over; only malformed individual
+    items (wrong types) raise."""
+    raw = structured.get("objective_decomposition")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise JarvisConversationError("'objective_decomposition' must be a list or null")
+    return tuple(_parse_decomposition_item(item) for item in raw[:_MAX_PARSED_DECOMPOSITION_ITEMS])
+
+
 def _parse_turn(structured: dict) -> ConversationTurnResult:
     reply = structured.get("reply")
     if not isinstance(reply, str) or not reply.strip():
         raise JarvisConversationError("model response is missing a non-empty 'reply' string")
     turn_kind = _normalized_turn_kind(structured)
+    objective_decomposition = _parse_objective_decomposition(structured)
     raw_suggestion = structured.get("suggestion")
     if raw_suggestion is None:
-        return ConversationTurnResult(reply=reply, suggestion=None, turn_kind=turn_kind)
+        return ConversationTurnResult(
+            reply=reply, suggestion=None, turn_kind=turn_kind,
+            objective_decomposition=objective_decomposition,
+        )
     if not isinstance(raw_suggestion, dict):
         raise JarvisConversationError("'suggestion' must be an object or null")
     outcome = raw_suggestion.get("outcome")
@@ -352,7 +452,10 @@ def _parse_turn(structured: dict) -> ConversationTurnResult:
         acceptance_criteria=_string_tuple_or_none(raw_suggestion.get("acceptance_criteria")),
         open_questions=_string_tuple_or_none(raw_suggestion.get("open_questions")),
     )
-    return ConversationTurnResult(reply=reply, suggestion=suggestion, turn_kind=turn_kind)
+    return ConversationTurnResult(
+        reply=reply, suggestion=suggestion, turn_kind=turn_kind,
+        objective_decomposition=objective_decomposition,
+    )
 
 
 def converse(

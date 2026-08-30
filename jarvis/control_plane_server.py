@@ -72,7 +72,11 @@ from jarvis.mission_authorization_bridge import (
 )
 from jarvis.mission_context import draft_briefing
 from jarvis.mission_supervisor import MissionSupervisor
-from jarvis.models import AuthorizationIntent, DraftChanges, MissionDefinitionDraft, MissionDraft
+from jarvis.models import (
+    AuthorizationIntent, DraftChanges, MissionDefinitionDraft, MissionDraft,
+    Objective, ObjectiveDecompositionEntry,
+)
+from jarvis.objectives import build_objective_envelope
 from jarvis.repository_freshness import RepositoryFreshnessResolver
 from jarvis.trusted_zentra_context import TrustedZentraContextBuilder
 from jarvis.zentra_evidence import load_policy
@@ -98,6 +102,19 @@ _AUTHORIZE_BY_KIND = {
 # gate can be addressed by a literal UUID over HTTP without Chugel itself
 # needing any new persisted concept of "gate id".
 _GATE_ID_NAMESPACE = uuid.UUID("0f1e2d3c-4b5a-4968-8778-899a0b1c2d3e")
+
+# Jarvis God Mode M1 -- fixed namespace for deterministically deriving
+# each decomposition item's draft_id from (objective_id, index). Never
+# random: this is what makes converging an Objective's decomposition
+# after a crash idempotent -- see _converge_objective_decomposition()'s
+# own docstring.
+_DECOMPOSITION_DRAFT_ID_NAMESPACE = uuid.UUID("7c6b5a49-3e2d-4f1a-9b8c-0d1e2f3a4b5c")
+# Decision #1 (approved, M1 decisions): fixed, hard-coded, never
+# configurable -- exactly 2-4 items or the decomposition is not acted
+# on at all (the turn falls through to the single-draft OBJECTIVE path
+# unchanged, decision #2).
+_OBJECTIVE_DECOMPOSITION_MIN_ITEMS = 2
+_OBJECTIVE_DECOMPOSITION_MAX_ITEMS = 4
 
 
 def _now() -> str:
@@ -263,6 +280,129 @@ def _merged_definition_and_open_questions(
     return definition, open_questions
 
 
+# Jarvis God Mode M1 -- Objective decomposition. Reuses the exact same
+# MissionDraft creation primitives _handle_conversation() already uses
+# for a single draft (build_draft_envelope()/store.save_draft()) N times
+# instead of once -- no new draft-authority mechanism, no second state
+# engine. The Objective itself carries zero execution state (see
+# jarvis/models.py's own Objective docstring): the only thing this
+# module ever does with one is decide whether/how many MissionDrafts to
+# converge from its own already-persisted decomposition.
+
+
+def _derived_decomposition_draft_id(objective_id: str, index: int) -> str:
+    return str(uuid.uuid5(_DECOMPOSITION_DRAFT_ID_NAMESPACE, f"{objective_id}:{index}"))
+
+
+def _decomposition_item_has_real_content(item: jarvis_conversation.DecompositionItemSuggestion) -> bool:
+    """Same discipline as has_real_content below, applied per item: a
+    decomposition item that is really just a title with nothing else is
+    not a real proposal for that piece of work."""
+    return bool(item.outcome) or bool(item.scope) or bool(item.acceptance_criteria)
+
+
+def _decomposition_is_actionable(
+    items: tuple[jarvis_conversation.DecompositionItemSuggestion, ...] | None,
+) -> bool:
+    """The fixed, non-LLM count/content check (decision #1, approved):
+    exactly 2-4 items, hard-coded here, never read from configuration or
+    from anything the model returned about its own count. A decomposition
+    outside this range, or with even one placeholder-only item, is never
+    acted on -- the turn falls through entirely to the single-draft
+    OBJECTIVE path (decision #2), unchanged from M0."""
+    return (
+        items is not None
+        and _OBJECTIVE_DECOMPOSITION_MIN_ITEMS <= len(items) <= _OBJECTIVE_DECOMPOSITION_MAX_ITEMS
+        and all(_decomposition_item_has_real_content(item) for item in items)
+    )
+
+
+def _objective_decomposition_entries(
+    objective_id: str, items: tuple[jarvis_conversation.DecompositionItemSuggestion, ...],
+) -> tuple[ObjectiveDecompositionEntry, ...]:
+    """Converts each model-proposed item into a durable
+    ObjectiveDecompositionEntry -- reusing _merged_definition_and_open_questions(None, ...)
+    per item (a brand-new draft, exactly like a fresh single-draft
+    OBJECTIVE turn), so a decomposition item with an unaddressed field
+    gets the exact same placeholder discipline a lone draft already
+    gets, never a different one."""
+    entries = []
+    for index, item in enumerate(items):
+        draft_id = _derived_decomposition_draft_id(objective_id, index)
+        suggestion = jarvis_conversation.DraftFieldSuggestion(
+            outcome=item.outcome, scope=item.scope, non_goals=item.non_goals,
+            acceptance_criteria=item.acceptance_criteria, open_questions=item.open_questions,
+        )
+        definition, open_questions = _merged_definition_and_open_questions(None, suggestion)
+        entries.append(ObjectiveDecompositionEntry(
+            draft_id=draft_id, title=item.title, rationale=(item.outcome or item.title),
+            outcome=definition.outcome, scope=definition.scope, non_goals=definition.non_goals,
+            acceptance_criteria=definition.acceptance_criteria, open_questions=open_questions,
+        ))
+    return tuple(entries)
+
+
+def _converge_objective_decomposition(store: FileJarvisStore, objective: Objective) -> tuple[dict, ...]:
+    """Phase 2 of the two-phase durable-intent-then-effect pattern (same
+    discipline jarvis.mission_authorization_bridge already uses for
+    draft-authorization -> Mission Record): `objective` (phase 1) is
+    already durably persisted by the time this runs. This function's
+    only job is to ensure every entry in its `decomposition` has a real
+    MissionDraft -- creating exactly the ones that do not exist yet,
+    never touching one that already does. Idempotent and crash-safe by
+    construction: draft_id is deterministic (uuid5 of objective_id+index,
+    never random), so calling this any number of times, from any
+    trigger -- the original decomposition turn, or a later, unrelated
+    projection read that happens to notice this objective is
+    "decomposed" -- converges to the exact same N drafts, never
+    duplicating one. Returns each entry's current draft gate projection,
+    in decomposition order."""
+    gates = []
+    for entry in objective.decomposition:
+        try:
+            envelope = store.get_latest_draft(entry.draft_id)
+        except DraftNotFound:
+            now = _now()
+            draft = MissionDraft(
+                schema_version="1.0.0", draft_id=entry.draft_id, revision=1,
+                created_at=now, updated_at=now, raw_intent=entry.rationale,
+                mission_definition=MissionDefinitionDraft(
+                    outcome=entry.outcome, scope=entry.scope, non_goals=entry.non_goals,
+                    acceptance_criteria=entry.acceptance_criteria,
+                ),
+                research_evidence=(), risks=(), open_questions=entry.open_questions,
+                repository_context=None,
+            )
+            draft_envelope = build_draft_envelope(draft)
+            try:
+                store.save_draft(draft_envelope)
+            except DraftAlreadyExists:
+                pass  # a concurrent/earlier convergence pass just completed it
+            envelope = store.get_latest_draft(entry.draft_id)
+        gates.append(_draft_gate_projection(entry.draft_id, envelope))
+    return tuple(gates)
+
+
+def _handle_objective_decomposition(
+    store: FileJarvisStore, message: str,
+    items: tuple[jarvis_conversation.DecompositionItemSuggestion, ...],
+) -> dict:
+    from jarvis._safe_io import exclusive_entity_lock
+    objective_id = str(uuid.uuid4())
+    with exclusive_entity_lock(store.root, objective_id):
+        entries = _objective_decomposition_entries(objective_id, items)
+        now = _now()
+        objective = Objective(
+            schema_version="1.0.0", objective_id=objective_id, revision=1,
+            created_at=now, updated_at=now, raw_intent=message,
+            priority="unset", status="decomposed", decomposition=entries,
+        )
+        envelope = build_objective_envelope(objective)
+        store.save_objective(envelope)  # phase 1: durable intent, before any draft exists
+        gates = _converge_objective_decomposition(store, objective)  # phase 2: converge
+    return {"objectiveId": objective_id, "decomposition": list(gates)}
+
+
 # Jarvis God Mode M0 -- the single, fixed, non-LLM authority table for
 # whether a conversational turn's classification permits a MissionDraft
 # write. Deliberately a plain frozenset literal, not derived from prompt
@@ -365,6 +505,24 @@ def _handle_conversation(
     except jarvis_conversation.JarvisConversationError as exc:
         raise _ApiError(502, f"conversational turn failed: {exc}") from exc
 
+    # Jarvis God Mode M1 -- exactly like turn_kind_permits below, this is
+    # a fixed, non-LLM check applied to what the model proposed, not a
+    # decision the model itself makes. OBJECTIVE is the only turn_kind
+    # that can even reach this branch (the model is only ever instructed
+    # to populate objective_decomposition when turn_kind is OBJECTIVE --
+    # see _SYSTEM_TASK -- but this check does not trust that instruction
+    # was followed; it re-verifies turn_kind itself here). A decomposition
+    # that is not [2,4] actionable items falls through unchanged to the
+    # single-draft path below -- decision #2 (approved): no Objective is
+    # ever created for a non-decomposed OBJECTIVE turn.
+    if turn.turn_kind == "OBJECTIVE" and _decomposition_is_actionable(turn.objective_decomposition):
+        decomposition_result = _handle_objective_decomposition(store, message, turn.objective_decomposition)
+        return {
+            "reply": turn.reply, "draftId": None, "gate": None,
+            "objectiveId": decomposition_result["objectiveId"],
+            "decomposition": decomposition_result["decomposition"],
+        }
+
     gate = None
     suggestion = turn.suggestion
     # Jarvis God Mode M0 -- turn_kind_permits is a NEW, additional gate
@@ -455,7 +613,10 @@ def _handle_conversation(
             store.save_draft(envelope)
         gate = _draft_gate_projection(envelope.draft.draft_id, envelope)
 
-    return {"reply": turn.reply, "draftId": (gate["id"] if gate else draft_id), "gate": gate}
+    return {
+        "reply": turn.reply, "draftId": (gate["id"] if gate else draft_id), "gate": gate,
+        "objectiveId": None, "decomposition": None,
+    }
 
 
 def _draft_gate_projection(draft_id: str, envelope) -> dict:
@@ -512,6 +673,34 @@ def _build_projection(store: FileJarvisStore) -> dict:
     for draft_id in store.list_pending_draft_ids():
         envelope = store.get_latest_draft(draft_id)
         gates.append(_draft_gate_projection(draft_id, envelope))
+    # Jarvis God Mode M1 -- read-only, additive. No Command Center
+    # Objectives UI is built in M1 (out of scope) -- this key exists so
+    # an Objective's existence and decomposition are genuinely
+    # observable over the same HTTP surface everything else already is,
+    # without requiring a dedicated endpoint. Also where the crash-safety
+    # convergence pass (_converge_objective_decomposition()) actually
+    # gets a chance to run again after a restart: no new background
+    # worker, no scheduler -- an ordinary projection read (already
+    # polled periodically by any real caller) is what completes any
+    # decomposition interrupted mid-convergence, deterministically and
+    # idempotently, every time this is called.
+    objectives: list[dict] = []
+    for objective_id in store.list_objective_ids():
+        envelope = store.get_latest_objective(objective_id)
+        objective = envelope.objective
+        entry_gates = (
+            _converge_objective_decomposition(store, objective) if objective.status == "decomposed" else ()
+        )
+        objectives.append({
+            "id": objective.objective_id,
+            "status": objective.status,
+            "priority": objective.priority,
+            "summary": objective.raw_intent[:240],
+            "updatedAt": objective.updated_at,
+            "decomposition": [
+                {"draftId": gate["id"], "title": entry.title} for entry, gate in zip(objective.decomposition, entry_gates)
+            ],
+        })
     now = _now()
     return {
         "sequence": int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -519,6 +708,7 @@ def _build_projection(store: FileJarvisStore) -> dict:
         "missions": missions,
         "agents": [],
         "gates": gates,
+        "objectives": objectives,
         "findings": [],
         "checks": [],
         "activity": [],
