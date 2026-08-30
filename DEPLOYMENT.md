@@ -103,6 +103,82 @@ contenedor de producción de la API instala todo eso sin necesitarlo
 pasada por ser un cambio de proceso de build, no una corrección de código;
 queda documentado para la siguiente.
 
+## Jarvis Control Plane (macOS/launchd)
+
+**Jarvis God Mode M0.** Antes de este milestone, `jarvis/control_plane_server.py`
+no tenía ninguna documentación de despliegue -- se arrancaba a mano en
+sesiones locales interactivas. Este es el primer supervisor de proceso
+real, y está deliberadamente acotado: **local macOS únicamente, vía
+`launchd`. No systemd. No servidor remoto. No deploy administrado.**
+
+El comando real (idéntico al que ya se ejecutaba a mano; nada nuevo aquí):
+
+```bash
+PYTHONPATH=. python3 -m jarvis.control_plane_server
+```
+
+### Variables de entorno
+
+Ninguna variable nueva es obligatoria más allá de las que el módulo ya
+requería antes de M0 -- `CONTROL_PLANE_TOKEN` y `CONTROL_PLANE_STORE_ROOT`.
+El resto sigue siendo opcional, con el mismo comportamiento "sin setear
+ninguna" que documenta la sección de Backend arriba.
+
+| Variable | Qué controla | Obligatoria |
+|---|---|---|
+| `CONTROL_PLANE_TOKEN` | Bearer token de autenticación (mínimo 32 caracteres) | Sí |
+| `CONTROL_PLANE_STORE_ROOT` | Raíz del store de Jarvis (drafts, etc.) | Sí |
+| `CONTROL_PLANE_HOST` | Host de bind -- debe ser loopback, se rechaza cualquier otro | No (`127.0.0.1`) |
+| `CONTROL_PLANE_PORT` | Puerto de escucha | No (`4318`) |
+| `CONTROL_PLANE_KNOWLEDGE_STORE_ROOT` | Mission 005 -- citas de conocimiento autorizado | No |
+| `CONTROL_PLANE_ZENTRA_REPOSITORY_ROOT` | Mission 005 -- resolución de freshness | No |
+| `CONTROL_PLANE_ZENTRA_BACKEND_ROOT` / `_FRONTEND_ROOT` | Trusted Zentra Context V1 | No |
+| `CONTROL_PLANE_MISSION_REPOSITORY_ROOT` | Mission 006 -- habilita adapters reales de Emilio/Emma | No |
+
+### Supervisión de proceso (launchd)
+
+`ops/jarvis-control-plane.plist` es un `LaunchAgent` (corre como el
+usuario logueado, nunca como root -- el Control Plane sólo hace bind a
+loopback). No contiene lógica de negocio ni conoce Chugel/Mission
+Records: únicamente el comando y la política de reinicio del sistema
+operativo (`KeepAlive` + `RunAtLoad`).
+
+```bash
+cp ops/jarvis-control-plane.plist ~/Library/LaunchAgents/
+# Editar el path absoluto del checkout y CONTROL_PLANE_TOKEN dentro del
+# archivo antes de instalar -- ver los comentarios del propio .plist.
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/jarvis-control-plane.plist
+```
+
+Verificar que `launchd` lo está supervisando de verdad:
+
+```bash
+launchctl list | grep com.zentra.jarvis.control-plane
+```
+
+Desinstalar:
+
+```bash
+launchctl bootout gui/$(id -u)/com.zentra.jarvis.control-plane
+rm ~/Library/LaunchAgents/jarvis-control-plane.plist
+```
+
+### Liveness
+
+`GET /v1/health` no requiere autenticación y responde únicamente
+`{"status": "ok"}` -- nunca expone misiones, drafts, agentes, tokens,
+configuración, paths del filesystem, estado de Git, datos de negocio, ni
+Trusted Zentra Context. Existe para que un supervisor externo simple
+(launchd, o cualquier chequeo manual) pueda confirmar que el proceso HTTP
+responde, sin tocar Chugel ni el store.
+
+### Riesgo abierto (no resuelto por M0)
+
+`KeepAlive` reinicia el proceso incondicionalmente ante cualquier salida,
+sin backoff -- un proceso que crashea en loop se reinicia en loop en vez
+de escalar a José. Documentado como riesgo abierto en el M0 Implementation
+Readiness Review; fuera de alcance de este milestone.
+
 ## Frontend (`proyecta-web`)
 
 ```bash

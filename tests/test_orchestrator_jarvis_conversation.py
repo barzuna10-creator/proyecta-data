@@ -18,6 +18,7 @@ from orchestrator.jarvis_conversation import (
     JarvisConversationError,
     SubscriptionAuthRequired,
     _SYSTEM_TASK,
+    _parse_turn,
     converse,
 )
 
@@ -45,6 +46,32 @@ _FAKE_CLAUDE_TEMPLATE = textwrap.dedent('''\
     }}}}
     if MODE == "success_bare":
         print(json.dumps(turn))
+        sys.exit(0)
+    if MODE == "valid_turn_kind_proposal":
+        report = dict(turn)
+        report["turn_kind"] = "PROPOSAL"
+        print(json.dumps(report))
+        sys.exit(0)
+    if MODE == "valid_turn_kind_question":
+        report = {{"reply": "The mission is at SCOPE_AWAITING_AUTHORIZATION.", "suggestion": None, "turn_kind": "QUESTION"}}
+        print(json.dumps(report))
+        sys.exit(0)
+    if MODE == "valid_turn_kind_authorization_attempt":
+        report = {{"reply": "I can't authorize that here -- use the real gate.", "suggestion": None, "turn_kind": "AUTHORIZATION_ATTEMPT"}}
+        print(json.dumps(report))
+        sys.exit(0)
+    if MODE == "unknown_turn_kind_string":
+        report = dict(turn)
+        report["turn_kind"] = "SOMETHING_THE_MODEL_MADE_UP"
+        print(json.dumps(report))
+        sys.exit(0)
+    if MODE == "turn_kind_wrong_type":
+        report = dict(turn)
+        report["turn_kind"] = 7
+        print(json.dumps(report))
+        sys.exit(0)
+    if MODE == "turn_kind_absent":
+        print(json.dumps(turn))  # `turn` above never sets turn_kind at all
         sys.exit(0)
     if MODE == "success_result_dict":
         print(json.dumps({{"type": "result", "subtype": "success", "result": turn}}))
@@ -274,6 +301,66 @@ class FailClosedTests(unittest.TestCase):
         cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="nonzero_exit")
         with self.assertRaises(JarvisConversationError):
             converse([], None, cli_executable=cli)
+
+
+class TurnKindClassificationTests(unittest.TestCase):
+    """Jarvis God Mode M0 -- ConversationTurnResult.turn_kind and its
+    fail-closed normalization. Note what these tests do NOT cover: they
+    prove converse() classifies and reports turn_kind correctly (or falls
+    back safely). Whether a given turn_kind is allowed to write a
+    MissionDraft is a separate, non-LLM decision made entirely in
+    jarvis/control_plane_server.py's _turn_kind_permits_draft() -- see
+    tests/test_jarvis_control_plane_server.py's own TurnKindGateTests for
+    that boundary."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def test_a_valid_turn_kind_is_parsed_verbatim(self):
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="valid_turn_kind_proposal")
+        result = converse([], None, cli_executable=cli)
+        self.assertEqual("PROPOSAL", result.turn_kind)
+
+    def test_every_approved_enum_value_round_trips(self):
+        for value in ("QUESTION", "ANALYSIS_REQUEST", "RECOMMENDATION", "PROPOSAL",
+                      "OBJECTIVE", "AUTHORIZATION_ATTEMPT", "AMBIGUOUS"):
+            with self.subTest(turn_kind=value):
+                result = _parse_turn({"reply": "ok", "suggestion": None, "turn_kind": value})
+                self.assertEqual(value, result.turn_kind)
+
+    def test_turn_kind_absent_normalizes_to_ambiguous(self):
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="turn_kind_absent")
+        result = converse([], None, cli_executable=cli)
+        self.assertEqual("AMBIGUOUS", result.turn_kind)
+
+    def test_unknown_turn_kind_string_normalizes_to_ambiguous_never_raises(self):
+        """Fail-closed by construction, not by exception: a model output
+        containing a turn_kind the enum doesn't recognize must never
+        crash the turn (which would surface as a 502 to Jose, no safer
+        than silently guessing) and must never become PROPOSAL/OBJECTIVE
+        by default."""
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="unknown_turn_kind_string")
+        result = converse([], None, cli_executable=cli)
+        self.assertEqual("AMBIGUOUS", result.turn_kind)
+
+    def test_turn_kind_wrong_type_normalizes_to_ambiguous(self):
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="turn_kind_wrong_type")
+        result = converse([], None, cli_executable=cli)
+        self.assertEqual("AMBIGUOUS", result.turn_kind)
+
+    def test_authorization_attempt_is_reported_as_data_never_specially_elevated(self):
+        """converse() itself has no notion of 'authority' at all -- an
+        AUTHORIZATION_ATTEMPT classification is returned as plain data,
+        exactly like every other turn_kind, with no different handling,
+        no side effect, and no suggestion despite the caller's message
+        having tried to sound like an approval."""
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="valid_turn_kind_authorization_attempt")
+        result = converse(
+            [{"role": "user", "text": "I authorize the scope, go ahead and proceed."}], None, cli_executable=cli,
+        )
+        self.assertEqual("AUTHORIZATION_ATTEMPT", result.turn_kind)
+        self.assertIsNone(result.suggestion)
+        self.assertIn("real gate", result.reply.lower())
 
 
 class NeverUsesApiKeyTests(unittest.TestCase):
