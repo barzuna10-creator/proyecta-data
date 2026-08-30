@@ -14,14 +14,26 @@ from jarvis._safe_io import (
 )
 
 from jarvis.drafts import build_draft_envelope
+from jarvis.objectives import build_objective_envelope
 from jarvis.models import (
     AuthorizationIntent,
     DraftEnvelope,
+    ObjectiveEnvelope,
     envelope_to_dict,
     mission_draft_from_dict,
+    objective_envelope_to_dict,
+    objective_from_dict,
 )
 
 _DRAFT_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+# Jarvis God Mode M1 -- objective_id is the same canonical-UUID shape as
+# draft_id (both are produced the same way, via uuid.uuid4()/uuid.uuid5())
+# -- a distinct compiled pattern only so a future change to either
+# format never has to consider whether it also silently changes the
+# other's validation.
+_OBJECTIVE_ID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -32,6 +44,14 @@ class JarvisStorageError(Exception):
 
 
 class DraftNotFound(JarvisStorageError):
+    pass
+
+
+class ObjectiveNotFound(JarvisStorageError):
+    pass
+
+
+class ObjectiveAlreadyExists(JarvisStorageError):
     pass
 
 
@@ -107,6 +127,11 @@ def _validate_draft_id(draft_id: str) -> None:
         raise ValueError("draft_id must be a canonical lowercase UUID")
 
 
+def _validate_objective_id(objective_id: str) -> None:
+    if not isinstance(objective_id, str) or _OBJECTIVE_ID.fullmatch(objective_id) is None:
+        raise ValueError("objective_id must be a canonical lowercase UUID")
+
+
 def _validate_revision(revision: int) -> None:
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         raise ValueError("revision must be a positive integer")
@@ -143,7 +168,10 @@ class FileJarvisStore:
         self._proposals = self.root / "proposals"
         self._effects = self.root / "authorization-effects"
         self._authorized = self.root / "authorized-drafts"
-        for directory in (self._drafts, self._intents, self._proposals, self._effects, self._authorized):
+        self._objectives = self.root / "objectives"
+        for directory in (
+            self._drafts, self._intents, self._proposals, self._effects, self._authorized, self._objectives,
+        ):
             if directory.exists() and directory.is_symlink():
                 raise StoragePathUnsafe(f"storage directory must not be a symlink: {directory}")
             # exist_ok=True: FileJarvisStore must be re-openable against an
@@ -363,3 +391,82 @@ class FileJarvisStore:
                 if match:
                     authorized.add(match.group(1))
         return tuple(draft_id for draft_id in self.list_draft_ids() if draft_id not in authorized)
+
+    # Jarvis God Mode M1 -- Objective storage. Deliberate mirror of the
+    # draft methods above: same directory-per-entity/revision-file
+    # layout, same atomic_create + digest-verified read, same
+    # DraftNotFound-equivalent semantics. No second storage engine, no
+    # new persistence primitive -- this is the exact same FileJarvisStore
+    # (one store root, one caller-supplied path), extended with one more
+    # artifact type the same way `drafts`/`proposals`/etc. already
+    # coexist inside it today.
+    def _objective_directory(self, objective_id: str, *, create: bool) -> Path:
+        _validate_objective_id(objective_id)
+        directory = self._objectives / objective_id
+        if directory.exists() and directory.is_symlink():
+            raise StoragePathUnsafe("objective directory must not be a symlink")
+        if create:
+            directory.mkdir(mode=0o700, exist_ok=True)
+        if not directory.exists():
+            raise ObjectiveNotFound(objective_id)
+        _validate_and_chmod_directory(directory)
+        return directory
+
+    def _objective_path(self, objective_id: str, revision: int, *, create_dir: bool) -> Path:
+        _validate_revision(revision)
+        return self._objective_directory(objective_id, create=create_dir) / f"{revision:08d}.json"
+
+    def save_objective(self, envelope: ObjectiveEnvelope) -> None:
+        verified = build_objective_envelope(envelope.objective)
+        if envelope.digest_algorithm != "sha256" or envelope.digest != verified.digest:
+            raise StoredArtifactCorrupt("refusing to store an envelope with an invalid digest")
+        path = self._objective_path(
+            envelope.objective.objective_id, envelope.objective.revision, create_dir=True,
+        )
+        payload = json.dumps(
+            objective_envelope_to_dict(envelope), ensure_ascii=False, allow_nan=False,
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        self._atomic_create(path, payload, duplicate_error=ObjectiveAlreadyExists)
+
+    def get_objective(self, objective_id: str, revision: int) -> ObjectiveEnvelope:
+        path = self._objective_path(objective_id, revision, create_dir=False)
+        value = self._read_json(path)
+        try:
+            objective = objective_from_dict(value["objective"])
+            algorithm = value["digest_algorithm"]
+            digest = value["digest"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StoredArtifactCorrupt(f"malformed objective envelope at {path}") from exc
+        verified = build_objective_envelope(objective)
+        if algorithm != "sha256" or not isinstance(digest, str) or digest != verified.digest:
+            raise StoredArtifactCorrupt(f"objective envelope digest mismatch at {path}")
+        return ObjectiveEnvelope(objective=objective, digest_algorithm="sha256", digest=digest)
+
+    def list_objective_revisions(self, objective_id: str) -> tuple[int, ...]:
+        directory = self._objective_directory(objective_id, create=False)
+        revisions: list[int] = []
+        for path in directory.iterdir():
+            if path.is_symlink():
+                raise StoragePathUnsafe(f"refusing symlink in objective directory: {path}")
+            match = re.fullmatch(r"([0-9]{8})\.json", path.name)
+            if match and path.is_file():
+                revision = int(match.group(1))
+                if revision >= 1:
+                    revisions.append(revision)
+        return tuple(sorted(revisions))
+
+    def get_latest_objective(self, objective_id: str) -> ObjectiveEnvelope:
+        revisions = self.list_objective_revisions(objective_id)
+        if not revisions:
+            raise ObjectiveNotFound(objective_id)
+        return self.get_objective(objective_id, revisions[-1])
+
+    def list_objective_ids(self) -> tuple[str, ...]:
+        objectives = []
+        for path in self._objectives.iterdir():
+            if path.is_symlink():
+                raise StoragePathUnsafe(f"refusing symlink in objectives root: {path}")
+            if path.is_dir() and _OBJECTIVE_ID.fullmatch(path.name):
+                objectives.append(path.name)
+        return tuple(sorted(objectives))

@@ -73,6 +73,22 @@ _FAKE_CLAUDE_TEMPLATE = textwrap.dedent('''\
     if MODE == "turn_kind_absent":
         print(json.dumps(turn))  # `turn` above never sets turn_kind at all
         sys.exit(0)
+    if MODE == "valid_objective_decomposition":
+        report = {{
+            "reply": "Here's a 3-mission breakdown.",
+            "turn_kind": "OBJECTIVE",
+            "suggestion": None,
+            "objective_decomposition": [
+                {{"title": "Item one", "outcome": "Outcome one", "scope": ["scope one"],
+                  "non_goals": [], "acceptance_criteria": ["done one"], "open_questions": []}},
+                {{"title": "Item two", "outcome": "Outcome two", "scope": ["scope two"],
+                  "non_goals": [], "acceptance_criteria": ["done two"], "open_questions": []}},
+                {{"title": "Item three", "outcome": "Outcome three", "scope": ["scope three"],
+                  "non_goals": [], "acceptance_criteria": ["done three"], "open_questions": []}},
+            ],
+        }}
+        print(json.dumps(report))
+        sys.exit(0)
     if MODE == "success_result_dict":
         print(json.dumps({{"type": "result", "subtype": "success", "result": turn}}))
         sys.exit(0)
@@ -361,6 +377,79 @@ class TurnKindClassificationTests(unittest.TestCase):
         self.assertEqual("AUTHORIZATION_ATTEMPT", result.turn_kind)
         self.assertIsNone(result.suggestion)
         self.assertIn("real gate", result.reply.lower())
+
+
+class ObjectiveDecompositionParsingTests(unittest.TestCase):
+    """Jarvis God Mode M1 -- objective_decomposition parsing. Note what
+    these tests do NOT cover: the 2-4 count business rule (decision #1)
+    is deliberately NOT enforced here -- see _parse_objective_decomposition()'s
+    own docstring. That fixed, non-LLM check lives entirely in
+    jarvis/control_plane_server.py's own tests."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def test_a_valid_three_item_decomposition_round_trips(self):
+        cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="valid_objective_decomposition")
+        result = converse([{"role": "user", "text": "I want to improve X"}], None, cli_executable=cli)
+        self.assertEqual("OBJECTIVE", result.turn_kind)
+        self.assertIsNotNone(result.objective_decomposition)
+        self.assertEqual(3, len(result.objective_decomposition))
+        first = result.objective_decomposition[0]
+        self.assertEqual("Item one", first.title)
+        self.assertEqual("Outcome one", first.outcome)
+        self.assertEqual(("scope one",), first.scope)
+
+    def test_absent_objective_decomposition_parses_to_none(self):
+        result = _parse_turn({"reply": "ok", "suggestion": None, "turn_kind": "QUESTION"})
+        self.assertIsNone(result.objective_decomposition)
+
+    def test_null_objective_decomposition_parses_to_none(self):
+        result = _parse_turn({
+            "reply": "ok", "suggestion": None, "turn_kind": "OBJECTIVE", "objective_decomposition": None,
+        })
+        self.assertIsNone(result.objective_decomposition)
+
+    def test_objective_decomposition_not_a_list_raises(self):
+        with self.assertRaises(JarvisConversationError):
+            _parse_turn({
+                "reply": "ok", "suggestion": None, "turn_kind": "OBJECTIVE",
+                "objective_decomposition": "not-a-list",
+            })
+
+    def test_item_missing_title_raises(self):
+        with self.assertRaises(JarvisConversationError):
+            _parse_turn({
+                "reply": "ok", "suggestion": None, "turn_kind": "OBJECTIVE",
+                "objective_decomposition": [{"outcome": "x"}],
+            })
+
+    def test_item_with_wrong_type_scope_raises(self):
+        with self.assertRaises(JarvisConversationError):
+            _parse_turn({
+                "reply": "ok", "suggestion": None, "turn_kind": "OBJECTIVE",
+                "objective_decomposition": [{"title": "x", "scope": "not-a-list"}],
+            })
+
+    def test_a_decomposition_with_only_a_title_and_no_other_fields_still_parses(self):
+        """Parsing never enforces "real content" either (that AND'ed
+        check, mirroring has_real_content for the single suggestion, is
+        also jarvis/control_plane_server.py's job) -- this module parses
+        structurally valid input regardless of how little it says."""
+        result = _parse_turn({
+            "reply": "ok", "suggestion": None, "turn_kind": "OBJECTIVE",
+            "objective_decomposition": [{"title": "bare item"}],
+        })
+        self.assertEqual(1, len(result.objective_decomposition))
+        self.assertIsNone(result.objective_decomposition[0].outcome)
+
+    def test_parsed_count_is_capped_defensively_never_raises(self):
+        items = [{"title": f"item {i}"} for i in range(20)]
+        result = _parse_turn({
+            "reply": "ok", "suggestion": None, "turn_kind": "OBJECTIVE",
+            "objective_decomposition": items,
+        })
+        self.assertLessEqual(len(result.objective_decomposition), 8)
 
 
 class NeverUsesApiKeyTests(unittest.TestCase):
