@@ -60,7 +60,7 @@ class RealPolicyFileTests(unittest.TestCase):
         self.assertEqual(2, len(policy.repositories))
         self.assertEqual({"github.com"}, {repository.host for repository in policy.repositories})
         self.assertEqual("refs/remotes/origin/main", policy.authorized_ref)
-        self.assertEqual("65dd75b4fc28ef8320470d608e8501dd36056eb3", policy.authorized_commit_sha)
+        self.assertEqual("90c76743e38065310c21474099fe1fb6ba482fc0", policy.authorized_commit_sha)
 
     def test_the_real_policy_has_exactly_the_ten_authorized_paths(self):
         policy = load_policy()
