@@ -1,0 +1,14 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["schema_version","observed_at","sources","missions","knowledge","github","omitted_count"],
+  "properties":{
+    "schema_version":{"const":"1.0"},
+    "observed_at":{"type":"string"},
+    "sources":{"type":"array","maxItems":12},
+    "missions":{"type":"array","maxItems":20},
+    "knowledge":{"type":"array","maxItems":5},
+    "github":{"type":"array","maxItems":2},
+    "omitted_count":{"type":"integer","minimum":0}
+  }
+}

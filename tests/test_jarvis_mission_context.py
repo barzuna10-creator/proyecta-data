@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-from jarvis.knowledge import EmmaKnowledgeReview, KnowledgeApplicability, build_candidate_envelope
+from jarvis.knowledge import EmmaKnowledgeReview, KnowledgeApplicability, RepositoryBinding, build_candidate_envelope
 from jarvis.knowledge_authorization import parse_knowledge_authorization, render_knowledge_authorization
 from jarvis.knowledge_storage import FileKnowledgeStore
 from jarvis.mission_context import draft_briefing
@@ -67,6 +67,23 @@ class DraftBriefingTests(MissionContextTestCase):
         self._promote("cccccccc-0003-4ccc-8ccc-cccccccccccc", "A canonical claim.", tier="canonical")
         briefing = draft_briefing(self.store, self.resolver, product_areas=("jarvis",))
         self.assertEqual("canonical", briefing.citations[0].tier)
+
+    def test_citation_carries_detached_provenance_for_a_fresh_bound_entry(self):
+        sha = subprocess.run(["git","rev-parse","HEAD"], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+        content = candidate(
+            candidate_id="dddddddd-0004-4ddd-8ddd-dddddddddddd", claim="Bound claim",
+            applicability=KnowledgeApplicability(("jarvis",)), repository_binding=RepositoryBinding("refs/heads/main", sha),
+        )
+        envelope = build_candidate_envelope(content); self.store.save_candidate(envelope)
+        self.store.transition_candidate(content.candidate_id, "awaiting_emma_review")
+        self.store.transition_candidate(content.candidate_id, "awaiting_human_authorization")
+        review = EmmaKnowledgeReview(content.candidate_id, 1, envelope.content_digest, "PASS", "2026-08-26T00:00:01Z")
+        authorization = parse_knowledge_authorization(render_knowledge_authorization(envelope))
+        self.store.save_review(review); self.store.save_authorization(authorization); self.store.promote(content.candidate_id, review, authorization)
+        citation = draft_briefing(self.store, self.resolver, product_areas=("jarvis",)).citations[0]
+        self.assertEqual("refs/heads/main", citation.repository_ref)
+        self.assertEqual(sha, citation.expected_commit_sha)
+        self.assertTrue(citation.evidence_sources)
 
 
 class KnowledgeIsolationFromMissionDefinitionTests(MissionContextTestCase):

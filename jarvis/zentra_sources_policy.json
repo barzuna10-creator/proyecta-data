@@ -1,21 +1,26 @@
 {
-  "schema_version": "1.0",
-  "repository": {
-    "owner": "barzuna10-creator",
-    "name": "proyecta-data",
-    "authorized_ref": "refs/heads/main",
-    "authorized_commit_sha": "8b416a74c305617efa02b4c13aea9d550e35cc8b"
-  },
-  "sources": [
-    {"path": "AGENTS.md", "tier": "canonical", "kind": "repository_file"},
-    {"path": "docs/zentra/MASTER_ROADMAP.md", "tier": "canonical", "kind": "product_document"},
-    {"path": "orchestrator/CHUGEL_V1.md", "tier": "canonical", "kind": "repository_file"},
-    {"path": "agents/jarvis/CONTRACT.md", "tier": "canonical", "kind": "repository_file"},
-    {"path": "agents/jarvis/PRINCIPLES.md", "tier": "canonical", "kind": "repository_file"},
-    {"path": "DEPLOYMENT.md", "tier": "canonical", "kind": "repository_file"},
-    {"path": ".github/workflows/backend-ci.yml", "tier": "canonical", "kind": "repository_file"},
-    {"path": "docs/zentra/HANDOFF_MISSION_001.md", "tier": "complementary", "kind": "product_document"},
-    {"path": "docs/zentra/HANDOFF_MISSION_002.md", "tier": "complementary", "kind": "product_document"},
-    {"path": "docs/zentra/HANDOFF_MISSION_002_CORRECCION.md", "tier": "complementary", "kind": "product_document"}
+  "schema_version":"1.0",
+  "repositories":[
+    {
+      "key":"backend","host":"github.com","owner":"barzuna10-creator","name":"proyecta-data",
+      "authorized_ref":"refs/remotes/origin/main","authorized_commit_sha":"65dd75b4fc28ef8320470d608e8501dd36056eb3",
+      "sources":[
+        {"path":"AGENTS.md","tier":"canonical","kind":"repository_file"},
+        {"path":"docs/zentra/MASTER_ROADMAP.md","tier":"canonical","kind":"product_document"},
+        {"path":"docs/zentra/JARVIS_V1_ORCHESTRATION.md","tier":"canonical","kind":"product_document"},
+        {"path":"orchestrator/CHUGEL_V1.md","tier":"canonical","kind":"repository_file"},
+        {"path":"agents/jarvis/CONTRACT.md","tier":"canonical","kind":"repository_file"},
+        {"path":"DEPLOYMENT.md","tier":"canonical","kind":"product_document"},
+        {"path":".github/workflows/backend-ci.yml","tier":"canonical","kind":"repository_file"}
+      ]
+    },
+    {
+      "key":"frontend","host":"github.com","owner":"barzuna10-creator","name":"Proyecta",
+      "authorized_ref":"refs/remotes/origin/main","authorized_commit_sha":"4189ad9149322e97caeb809e2fcbf66acd1a4eb5",
+      "sources":[
+        {"path":"README.md","tier":"canonical","kind":"product_document"},
+        {"path":"package.json","tier":"canonical","kind":"repository_file"}
+      ]
+    }
   ]
 }

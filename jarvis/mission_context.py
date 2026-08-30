@@ -24,6 +24,9 @@ class BriefingCitation:
     # KnowledgeEntry -- None means unclassified legacy content, never
     # silently treated as canonical by anything reading this citation.
     tier: str | None = None
+    repository_ref: str | None = None
+    expected_commit_sha: str | None = None
+    evidence_sources: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +50,16 @@ def draft_briefing(
         store, resolver, product_areas=product_areas, top_k=top_k
     )
     citations = tuple(
-        BriefingCitation(result.entry.knowledge_id, result.entry.claim, result.entry.label, result.entry.tier)
+        BriefingCitation(
+            result.entry.knowledge_id, result.entry.claim, result.entry.label, result.entry.tier,
+            result.entry.repository_binding.repository_ref if result.entry.repository_binding else None,
+            result.entry.repository_binding.expected_commit_sha if result.entry.repository_binding else None,
+            tuple({
+                "kind": source.kind, "locator": source.locator,
+                "observed_at": source.observed_at, "commit_sha": source.commit_sha,
+                "excerpt_sha256": source.excerpt_sha256,
+            } for evidence in result.entry.research_evidence for source in evidence.sources)[:10],
+        )
         for result in response.results
     )
     return ProposalBriefing(citations, response.omitted_count)

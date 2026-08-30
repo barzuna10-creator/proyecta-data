@@ -50,6 +50,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -73,6 +74,9 @@ from jarvis.mission_context import draft_briefing
 from jarvis.mission_supervisor import MissionSupervisor
 from jarvis.models import AuthorizationIntent, DraftChanges, MissionDefinitionDraft, MissionDraft
 from jarvis.repository_freshness import RepositoryFreshnessResolver
+from jarvis.trusted_zentra_context import TrustedZentraContextBuilder
+from jarvis.zentra_evidence import load_policy
+from jarvis.zentra_github_query import ReadOnlyGitHubQuery
 from jarvis.storage import (
     DraftAlreadyExists, DraftNotFound, FileJarvisStore, ProposalContentMismatch,
 )
@@ -126,6 +130,7 @@ class ControlPlaneConfig:
     def __init__(
         self, *, host: str, port: int, token: str, store_root: str,
         knowledge_store_root: str | None = None, zentra_repository_root: str | None = None,
+        zentra_backend_root: str | None = None, zentra_frontend_root: str | None = None,
         mission_repository_root: str | None = None, mission_branch: str | None = None,
         mission_pr_title: str | None = None, git_executable: str = "git", gh_executable: str = "gh",
     ):
@@ -147,6 +152,8 @@ class ControlPlaneConfig:
         # never inferred from another setting.
         self.knowledge_store_root = Path(knowledge_store_root) if knowledge_store_root else None
         self.zentra_repository_root = Path(zentra_repository_root) if zentra_repository_root else None
+        self.zentra_backend_root = Path(zentra_backend_root) if zentra_backend_root else None
+        self.zentra_frontend_root = Path(zentra_frontend_root) if zentra_frontend_root else None
         # Mission 006: the single repository this V1, single-active-mission
         # supervisor drives publish_executor/merge_executor against, once a
         # mission reaches PUBLISHING/MERGING via a real human authorization.
@@ -181,6 +188,8 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
         host=host, port=port, token=token, store_root=store_root,
         knowledge_store_root=env.get("CONTROL_PLANE_KNOWLEDGE_STORE_ROOT") or None,
         zentra_repository_root=env.get("CONTROL_PLANE_ZENTRA_REPOSITORY_ROOT") or None,
+        zentra_backend_root=env.get("CONTROL_PLANE_ZENTRA_BACKEND_ROOT") or None,
+        zentra_frontend_root=env.get("CONTROL_PLANE_ZENTRA_FRONTEND_ROOT") or None,
         mission_repository_root=env.get("CONTROL_PLANE_MISSION_REPOSITORY_ROOT") or None,
         mission_branch=env.get("CONTROL_PLANE_MISSION_BRANCH") or None,
         mission_pr_title=env.get("CONTROL_PLANE_MISSION_PR_TITLE") or None,
@@ -258,6 +267,7 @@ def _handle_conversation(
     store: FileJarvisStore, body: dict, *,
     knowledge_store: FileKnowledgeStore | None = None,
     zentra_resolver: RepositoryFreshnessResolver | None = None,
+    trusted_context_builder: TrustedZentraContextBuilder | None = None,
 ) -> dict:
     """Jarvis's own natural-language understanding of one conversation
     turn, producing a reply and -- never automatically, only when Jarvis's
@@ -320,7 +330,16 @@ def _handle_conversation(
         )
 
     try:
-        turn = jarvis_conversation.converse(history, current_fields, trusted_citations=trusted_citations)
+        trusted_context = trusted_context_builder.build().to_prompt_payload() if trusted_context_builder is not None else None
+    except Exception as exc:
+        # Fail closed before the subscription dispatch. Never answer as if
+        # current evidence had been consulted when context construction failed.
+        raise _ApiError(503, "trusted Zentra context unavailable") from exc
+    try:
+        turn = jarvis_conversation.converse(
+            history, current_fields, trusted_citations=trusted_citations,
+            trusted_zentra_context=trusted_context,
+        )
     except jarvis_conversation.SubscriptionAuthRequired as exc:
         raise _ApiError(503, f"conversational dispatch unavailable: {exc}") from exc
     except jarvis_conversation.JarvisConversationError as exc:
@@ -624,6 +643,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _zentra_resolver(self) -> RepositoryFreshnessResolver | None:
         return self.server.zentra_resolver  # type: ignore[attr-defined]
 
+    def _trusted_context_builder(self) -> TrustedZentraContextBuilder | None:
+        return self.server.trusted_context_builder  # type: ignore[attr-defined]
+
     def _supervisor(self) -> MissionSupervisor:
         return self.server.supervisor  # type: ignore[attr-defined]
 
@@ -676,6 +698,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._write_json(200, _handle_conversation(
                     self._store(), body,
                     knowledge_store=self._knowledge_store(), zentra_resolver=self._zentra_resolver(),
+                    trusted_context_builder=self._trusted_context_builder(),
                 ))
                 return
             match = re.fullmatch(r"/v1/gates/([^/]+)/authorize", self.path)
@@ -720,6 +743,25 @@ def build_server(config: ControlPlaneConfig) -> ThreadingHTTPServer:
     server.zentra_resolver = (  # type: ignore[attr-defined]
         RepositoryFreshnessResolver(config.zentra_repository_root) if config.zentra_repository_root else None
     )
+    context_roots: dict[str, Path] = {}
+    if config.zentra_backend_root is not None:
+        context_roots["backend"] = config.zentra_backend_root
+    if config.zentra_frontend_root is not None:
+        context_roots["frontend"] = config.zentra_frontend_root
+    if context_roots:
+        policy = load_policy()
+        discovered_gh = config.gh_executable if Path(config.gh_executable).is_absolute() else shutil.which(config.gh_executable)
+        if not discovered_gh:
+            raise ValueError("configured GitHub CLI executable is unavailable")
+        github_query = ReadOnlyGitHubQuery(
+            Path(discovered_gh).resolve(),
+            frozenset(f"{repository.host}/{repository.owner}/{repository.name}" for repository in policy.repositories),
+        )
+        server.trusted_context_builder = TrustedZentraContextBuilder(  # type: ignore[attr-defined]
+            policy, context_roots, knowledge_store=server.knowledge_store, github_query=github_query,
+        )
+    else:
+        server.trusted_context_builder = None  # type: ignore[attr-defined]
     # Mission 006: constructed once per server, never per-request, exactly
     # like store/knowledge_store/zentra_resolver above. The INTAKE
     # mechanical transition (mission_coordinator's own Mission 006 branch)

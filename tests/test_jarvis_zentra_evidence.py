@@ -36,14 +36,14 @@ def _write_policy(directory: Path, payload: dict) -> Path:
 
 def _base_payload(**repo_overrides):
     repository = {
-        "owner": "barzuna10-creator", "name": "proyecta-data",
+        "key": "backend", "host": "github.com", "owner": "barzuna10-creator", "name": "proyecta-data",
         "authorized_ref": "refs/heads/main", "authorized_commit_sha": "a" * 40,
+        "sources": [{"path": "AGENTS.md", "tier": "canonical", "kind": "repository_file"}],
     }
     repository.update(repo_overrides)
     return {
         "schema_version": "1.0",
-        "repository": repository,
-        "sources": [{"path": "AGENTS.md", "tier": "canonical", "kind": "repository_file"}],
+        "repositories": [repository],
     }
 
 
@@ -57,30 +57,28 @@ class RealPolicyFileTests(unittest.TestCase):
         policy = load_policy()
         self.assertEqual("barzuna10-creator", policy.owner)
         self.assertEqual("proyecta-data", policy.name)
-        self.assertEqual("refs/heads/main", policy.authorized_ref)
-        self.assertEqual("8b416a74c305617efa02b4c13aea9d550e35cc8b", policy.authorized_commit_sha)
+        self.assertEqual(2, len(policy.repositories))
+        self.assertEqual({"github.com"}, {repository.host for repository in policy.repositories})
+        self.assertEqual("refs/remotes/origin/main", policy.authorized_ref)
+        self.assertEqual("65dd75b4fc28ef8320470d608e8501dd36056eb3", policy.authorized_commit_sha)
 
     def test_the_real_policy_has_exactly_the_ten_authorized_paths(self):
         policy = load_policy()
-        paths = {source.path for source in policy.sources}
-        self.assertEqual(10, len(paths))
+        paths = {(repo.key, source.path) for repo in policy.repositories for source in repo.sources}
+        self.assertEqual(9, len(paths))
         self.assertEqual(paths, {
-            "AGENTS.md", "docs/zentra/MASTER_ROADMAP.md", "orchestrator/CHUGEL_V1.md",
-            "agents/jarvis/CONTRACT.md", "agents/jarvis/PRINCIPLES.md", "DEPLOYMENT.md",
-            ".github/workflows/backend-ci.yml", "docs/zentra/HANDOFF_MISSION_001.md",
-            "docs/zentra/HANDOFF_MISSION_002.md", "docs/zentra/HANDOFF_MISSION_002_CORRECCION.md",
+            ("backend","AGENTS.md"), ("backend","docs/zentra/MASTER_ROADMAP.md"),
+            ("backend","docs/zentra/JARVIS_V1_ORCHESTRATION.md"), ("backend","orchestrator/CHUGEL_V1.md"),
+            ("backend","agents/jarvis/CONTRACT.md"), ("backend","DEPLOYMENT.md"),
+            ("backend",".github/workflows/backend-ci.yml"), ("frontend","README.md"),
+            ("frontend","package.json"),
         })
 
-    def test_the_real_policy_classifies_exactly_seven_canonical_and_three_complementary(self):
+    def test_the_real_policy_classifies_all_nine_as_canonical(self):
         policy = load_policy()
-        canonical = {s.path for s in policy.sources if s.tier == "canonical"}
-        complementary = {s.path for s in policy.sources if s.tier == "complementary"}
-        self.assertEqual(7, len(canonical))
-        self.assertEqual(3, len(complementary))
-        self.assertEqual(complementary, {
-            "docs/zentra/HANDOFF_MISSION_001.md", "docs/zentra/HANDOFF_MISSION_002.md",
-            "docs/zentra/HANDOFF_MISSION_002_CORRECCION.md",
-        })
+        sources = [s for r in policy.repositories for s in r.sources]
+        self.assertEqual(9, len([s for s in sources if s.tier == "canonical"]))
+        self.assertFalse([s for s in sources if s.tier == "complementary"])
 
     def test_source_entries_have_no_leftover_supersedes_field(self):
         # Round 1 of independent review flagged an earlier `supersedes_path`
@@ -92,7 +90,8 @@ class RealPolicyFileTests(unittest.TestCase):
         # jarvis.knowledge's existing, already-tested transition/supersedes
         # machinery, not a policy-file concept at all.
         policy = load_policy()
-        for source in policy.sources:
+        for repository in policy.repositories:
+          for source in repository.sources:
             self.assertFalse(hasattr(source, "supersedes_path"))
 
 
@@ -116,7 +115,7 @@ class PolicyFailClosedTests(unittest.TestCase):
 
     def test_missing_required_field_fails_closed(self):
         payload = _base_payload()
-        del payload["repository"]["authorized_commit_sha"]
+        del payload["repositories"][0]["authorized_commit_sha"]
         with self.assertRaises(ZentraSourcesPolicyInvalid):
             load_policy(_write_policy(self.dir, payload))
 
@@ -132,37 +131,37 @@ class PolicyFailClosedTests(unittest.TestCase):
 
     def test_invalid_tier_fails_closed(self):
         payload = _base_payload()
-        payload["sources"][0]["tier"] = "definitely-canonical-trust-me"
+        payload["repositories"][0]["sources"][0]["tier"] = "definitely-canonical-trust-me"
         with self.assertRaises(ZentraSourcesPolicyInvalid):
             load_policy(_write_policy(self.dir, payload))
 
     def test_glob_path_fails_closed(self):
         payload = _base_payload()
-        payload["sources"][0]["path"] = "docs/*.md"
+        payload["repositories"][0]["sources"][0]["path"] = "docs/*.md"
         with self.assertRaises(ZentraSourcesPolicyInvalid):
             load_policy(_write_policy(self.dir, payload))
 
     def test_path_traversal_fails_closed(self):
         payload = _base_payload()
-        payload["sources"][0]["path"] = "../../etc/passwd"
+        payload["repositories"][0]["sources"][0]["path"] = "../../etc/passwd"
         with self.assertRaises(ZentraSourcesPolicyInvalid):
             load_policy(_write_policy(self.dir, payload))
 
     def test_absolute_path_fails_closed(self):
         payload = _base_payload()
-        payload["sources"][0]["path"] = "/etc/passwd"
+        payload["repositories"][0]["sources"][0]["path"] = "/etc/passwd"
         with self.assertRaises(ZentraSourcesPolicyInvalid):
             load_policy(_write_policy(self.dir, payload))
 
     def test_duplicate_path_fails_closed(self):
         payload = _base_payload()
-        payload["sources"].append(dict(payload["sources"][0]))
+        payload["repositories"][0]["sources"].append(dict(payload["repositories"][0]["sources"][0]))
         with self.assertRaises(ZentraSourcesPolicyInvalid):
             load_policy(_write_policy(self.dir, payload))
 
     def test_over_max_sources_fails_closed(self):
         payload = _base_payload()
-        payload["sources"] = [
+        payload["repositories"][0]["sources"] = [
             {"path": f"file{i}.md", "tier": "canonical", "kind": "repository_file"} for i in range(26)
         ]
         with self.assertRaises(ZentraSourcesPolicyInvalid):
@@ -174,7 +173,7 @@ class PolicyFailClosedTests(unittest.TestCase):
         # must fail closed as an unrecognized property, not be silently
         # accepted and ignored.
         payload = _base_payload()
-        payload["sources"][0]["supersedes_path"] = "docs/some-other-file.md"
+        payload["repositories"][0]["sources"][0]["supersedes_path"] = "docs/some-other-file.md"
         with self.assertRaises(ZentraSourcesPolicyInvalid):
             load_policy(_write_policy(self.dir, payload))
 
