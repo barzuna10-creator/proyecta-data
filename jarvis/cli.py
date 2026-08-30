@@ -51,6 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     propose.add_argument("--store-root", required=True)
     propose.add_argument("--repository-root", required=True, help="local git checkout containing the policy's authorized commit")
+    propose.add_argument("--repository-key", default="backend", help="exact policy repository key")
     propose.add_argument("--candidate-id", required=True)
     propose.add_argument("--evidence-id", required=True)
     propose.add_argument("--path", required=True, help="must be one of jarvis/zentra_sources_policy.json's exact allow-listed paths")
@@ -94,9 +95,10 @@ def main(
         elif args.knowledge_command == "propose-source":
             policy = load_policy()
             evidence, matched = gather_evidence(
-                args.path, repository_root=Path(args.repository_root),
+                args.path, repository_root=Path(args.repository_root), repository_key=args.repository_key,
                 evidence_id=args.evidence_id, claim=args.claim, policy=policy,
             )
+            repository = next(item for item in policy.repositories if item.key == args.repository_key)
             content = KnowledgeCandidateContent(
                 schema_version="1.0", candidate_id=args.candidate_id, revision=1,
                 created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -106,7 +108,7 @@ def main(
                 proposed_entry_status=args.proposed_entry_status,
                 claim=args.claim, label="FACT",
                 applicability=KnowledgeApplicability(tuple(args.product_area)),
-                repository_binding=RepositoryBinding(policy.authorized_ref, policy.authorized_commit_sha),
+                repository_binding=RepositoryBinding(repository.authorized_ref, repository.authorized_commit_sha),
                 research_evidence=(evidence,),
                 contradicts=tuple(args.contradicts), supersedes=tuple(args.supersedes),
                 tier=matched.tier,
@@ -117,7 +119,7 @@ def main(
             payload = {
                 "candidate_id": envelope.content.candidate_id, "revision": envelope.content.revision,
                 "content_digest": envelope.content_digest, "tier": envelope.content.tier,
-                "path": args.path, "commit_sha": policy.authorized_commit_sha,
+                "path": args.path, "commit_sha": repository.authorized_commit_sha,
             }
             json.dump(payload, destination, sort_keys=True, separators=(",", ":"))
             destination.write("\n")

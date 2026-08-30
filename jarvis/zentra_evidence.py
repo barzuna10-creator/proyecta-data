@@ -1,11 +1,7 @@
 """Jarvis Mission 005 -- the sole production module permitted to read
-jarvis/zentra_sources_policy.json, and the sole production module
-(besides repository_freshness.py itself) that calls
-RepositoryFreshnessResolver.read_blob(). CLI-only: this module is never
-imported by jarvis.control_plane_server or orchestrator.jarvis_conversation
--- see tests/test_jarvis_foundation_boundaries.py's
-SOLE_ZENTRA_POLICY_READERS check. There is structurally no path from a
-live conversation turn to anything in this file.
+jarvis/zentra_sources_policy.json. Mission 005's candidate-producing path
+remains operator-only; Trusted Zentra Context V1 reuses only this strictly
+validated policy and performs its own bounded read-only composition.
 
 Produces exactly one thing: a real, provenance-stamped ResearchEvidence
 for one file already on the policy's fixed, hand-authored allow-list,
@@ -56,12 +52,47 @@ class ZentraSource:
 
 
 @dataclass(frozen=True, slots=True)
-class ZentraSourcesPolicy:
+class ZentraRepository:
+    key: str
+    host: str
     owner: str
     name: str
     authorized_ref: str
     authorized_commit_sha: str
     sources: tuple[ZentraSource, ...]
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ZentraSourcesPolicy:
+    repositories: tuple[ZentraRepository, ...]
+
+    def __init__(self, repositories: tuple[ZentraRepository, ...] | None = None, *, owner: str | None = None, name: str | None = None, authorized_ref: str | None = None, authorized_commit_sha: str | None = None, sources: tuple[ZentraSource, ...] | None = None):
+        # Backward-compatible construction for existing callers/tests; the
+        # persisted V1 policy itself always uses explicit repositories.
+        if repositories is None:
+            if None in (owner, name, authorized_ref, authorized_commit_sha, sources):
+                raise TypeError("repositories or complete legacy repository fields required")
+            repositories = (ZentraRepository("backend", "github.com", owner, name, authorized_ref, authorized_commit_sha, sources),)  # type: ignore[arg-type]
+        object.__setattr__(self, "repositories", tuple(repositories))
+
+    @property
+    def _legacy(self) -> ZentraRepository: return self.repositories[0]
+    @property
+    def owner(self) -> str: return self._legacy.owner
+    @property
+    def name(self) -> str: return self._legacy.name
+    @property
+    def authorized_ref(self) -> str: return self._legacy.authorized_ref
+    @property
+    def authorized_commit_sha(self) -> str: return self._legacy.authorized_commit_sha
+    @property
+    def sources(self) -> tuple[ZentraSource, ...]: return self._legacy.sources
+
+    def source(self, repository_key: str, path: str) -> tuple[ZentraRepository, ZentraSource] | None:
+        for repository in self.repositories:
+            if repository.key == repository_key:
+                return next(((repository, source) for source in repository.sources if source.path == path), None)
+        return None
 
 
 def load_policy(policy_path: Path | None = None) -> ZentraSourcesPolicy:
@@ -95,16 +126,22 @@ def load_policy(policy_path: Path | None = None) -> ZentraSourcesPolicy:
     if errors:
         raise ZentraSourcesPolicyInvalid(errors[0].message)
 
-    paths = [item["path"] for item in payload["sources"]]
-    if len(paths) != len(set(paths)):
-        raise ZentraSourcesPolicyInvalid("duplicate path in sources")
-
-    repository = payload["repository"]
-    sources = tuple(ZentraSource(item["path"], item["tier"], item["kind"]) for item in payload["sources"])
-    return ZentraSourcesPolicy(
-        owner=repository["owner"], name=repository["name"], authorized_ref=repository["authorized_ref"],
-        authorized_commit_sha=repository["authorized_commit_sha"], sources=sources,
-    )
+    repositories = []
+    seen_keys: set[str] = set()
+    seen_names: set[str] = set()
+    for repository in payload["repositories"]:
+        if repository["key"] in seen_keys or f'{repository["owner"]}/{repository["name"]}' in seen_names:
+            raise ZentraSourcesPolicyInvalid("duplicate repository")
+        seen_keys.add(repository["key"]); seen_names.add(f'{repository["owner"]}/{repository["name"]}')
+        paths = [item["path"] for item in repository["sources"]]
+        if len(paths) != len(set(paths)):
+            raise ZentraSourcesPolicyInvalid("duplicate path in repository sources")
+        repositories.append(ZentraRepository(
+            repository["key"], repository["host"], repository["owner"], repository["name"],
+            repository["authorized_ref"], repository["authorized_commit_sha"],
+            tuple(ZentraSource(item["path"], item["tier"], item["kind"]) for item in repository["sources"]),
+        ))
+    return ZentraSourcesPolicy(tuple(repositories))
 
 
 def _now() -> str:
@@ -114,6 +151,7 @@ def _now() -> str:
 def gather_evidence(
     path: str,
     *,
+    repository_key: str = "backend",
     repository_root: Path,
     evidence_id: str,
     claim: str,
@@ -128,12 +166,13 @@ def gather_evidence(
     not present verbatim in the policy is refused outright; this
     function has no notion of "close enough"."""
     active_policy = policy or load_policy()
-    matched = next((source for source in active_policy.sources if source.path == path), None)
-    if matched is None:
+    match = active_policy.source(repository_key, path)
+    if match is None:
         raise ZentraSourceNotAllowed(path)
+    repository, matched = match
 
     resolver = RepositoryFreshnessResolver(repository_root)
-    content = resolver.read_blob(active_policy.authorized_commit_sha, path)
+    content = resolver.read_blob(repository.authorized_commit_sha, path)
     excerpt_sha256 = hashlib.sha256(content).hexdigest()
     observed_at = _now()
 
@@ -146,7 +185,7 @@ def gather_evidence(
                 kind=matched.kind,
                 locator=path,
                 observed_at=observed_at,
-                commit_sha=active_policy.authorized_commit_sha,
+                commit_sha=repository.authorized_commit_sha,
                 excerpt_sha256=excerpt_sha256,
             ),
         ),

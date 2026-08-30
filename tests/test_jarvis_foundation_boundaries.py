@@ -36,7 +36,7 @@ KNOWLEDGE_MODULES = {
     "jarvis.learning_projection", "jarvis.knowledge_retrieval", "jarvis.repository_freshness",
     "jarvis.zentra_evidence",
 }
-SOLE_SUBPROCESS_MODULE = "repository_freshness.py"
+SUBPROCESS_MODULES = {"repository_freshness.py", "zentra_github_query.py"}
 SOLE_KNOWLEDGE_SEARCH_MODULES = {"mission_context.py", "knowledge_retrieval.py", "cli.py"}
 # Mission 005: the module that reads jarvis/zentra_sources_policy.json
 # (the SHA/ref/repo/allow-list/tier manifest) and calls
@@ -46,7 +46,7 @@ SOLE_KNOWLEDGE_SEARCH_MODULES = {"mission_context.py", "knowledge_retrieval.py",
 # is included because it is the only human-operator entry point that
 # invokes zentra_evidence's ingestion path (see the "knowledge propose-source"
 # subcommand).
-SOLE_ZENTRA_POLICY_READERS = {"zentra_evidence.py", "cli.py"}
+SOLE_ZENTRA_POLICY_READERS = {"zentra_evidence.py", "trusted_zentra_context.py", "control_plane_server.py", "cli.py"}
 SOLE_COORDINATOR_IMPORTER = "mission_coordinator.py"
 COORDINATOR_ONLY_IMPORTS = {"orchestrator.autonomous_runner", "orchestrator.publish_executor",
                             "orchestrator.merge_executor", "orchestrator.publish_identity_repair"}
@@ -151,8 +151,8 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
     def test_no_subprocess_network_or_git_automation_symbols(self):
         forbidden_imports = {"subprocess", "socket", "urllib", "requests", "httpx"}
         for path in (ROOT / "jarvis").glob("*.py"):
-            if path.name == SOLE_SUBPROCESS_MODULE:
-                continue  # the one deliberate, narrowly scoped exception -- see the dedicated tests below
+            if path.name in SUBPROCESS_MODULES:
+                continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             imports = set()
             for node in ast.walk(tree):
@@ -186,11 +186,11 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
                         signals.append("importlib")
         return tuple(signals)
 
-    def test_subprocess_capability_exists_in_exactly_one_jarvis_module(self):
+    def test_subprocess_capability_exists_only_in_the_two_narrow_read_modules(self):
         for path in (ROOT / "jarvis").glob("*.py"):
             signals = self._subprocess_ast_signals(path.read_text(encoding="utf-8"), path.name)
-            if path.name == SOLE_SUBPROCESS_MODULE:
-                self.assertTrue(signals, "the sole authorized module must actually use subprocess")
+            if path.name in SUBPROCESS_MODULES:
+                self.assertTrue(signals, "authorized read module must actually use subprocess")
             else:
                 self.assertEqual(signals, (), (path, signals))
 
@@ -235,7 +235,7 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import): imports.extend(alias.name for alias in node.names)
                 elif isinstance(node, ast.ImportFrom): imports.append(node.module or "")
-            module_forbidden = tuple(value for value in forbidden if not (name == SOLE_SUBPROCESS_MODULE and value == "subprocess"))
+            module_forbidden = tuple(value for value in forbidden if not (name in SUBPROCESS_MODULES and value == "subprocess"))
             self.assertFalse(any(value.startswith(module_forbidden) for value in imports), (name, imports))
             self.assertNotRegex(source.lower(), r"\b(prompt|llm|provider|execute_mission|submit_mission)\b")
 
@@ -298,11 +298,9 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
 
     def test_only_narrow_seam_modules_read_the_zentra_sources_policy(self):
         """Structural enforcement of 'impossible to expand from
-        conversation': jarvis.zentra_evidence (the only module that loads
-        zentra_sources_policy.json and calls read_blob()) may only be
-        imported by itself and by the human-operator CLI -- never by
-        jarvis.control_plane_server or anything reachable from a live
-        conversation turn."""
+        conversation': only the declared evidence/context composition
+        seams may import the versioned policy. The user message never
+        supplies repository, ref, or path."""
         for path in (ROOT / "jarvis").glob("*.py"):
             if path.name in SOLE_ZENTRA_POLICY_READERS:
                 continue
@@ -335,20 +333,19 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
         method directly. This asserts the literal call-site text appears
         nowhere except read_blob()'s own definition (repository_freshness.py)
         and its sole caller (zentra_evidence.py)."""
-        allowed = {"repository_freshness.py", "zentra_evidence.py"}
+        allowed = {"repository_freshness.py", "zentra_evidence.py", "trusted_zentra_context.py"}
         for path in list((ROOT / "jarvis").glob("*.py")) + list((ROOT / "orchestrator").glob("*.py")):
             if path.name in allowed:
                 continue
             self.assertNotIn(".read_blob(", path.read_text(encoding="utf-8"), path)
 
-    def test_control_plane_server_never_imports_zentra_evidence(self):
-        # The single most important assertion for "conversación no puede
-        # ampliar la allow-list": the live HTTP/conversational surface
-        # has zero import path to the policy loader or read_blob(), not
-        # merely "doesn't currently call it".
+    def test_control_plane_only_loads_policy_and_never_reads_blobs_itself(self):
         path = ROOT / "jarvis" / "control_plane_server.py"
         names = set(self._imports(path))
-        self.assertNotIn("jarvis.zentra_evidence", names)
+        self.assertIn("jarvis.zentra_evidence", names)
+        source = path.read_text(encoding="utf-8")
+        self.assertNotIn(".read_blob(", source)
+        self.assertNotIn("gather_evidence", source)
 
     def test_build_mission_definition_signature_has_no_free_text_slot(self):
         import inspect
