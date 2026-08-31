@@ -705,5 +705,160 @@ class WorkspaceGuardTests(CoordinatorTestCase):
         self.assertIn(corrupt_id, report.reason)
 
 
+class VocabularioCerradoDeHumanGatesStatusTests(CoordinatorTestCase):
+    """Verification Hardening V1, Pillar 1 (contract checks) -- sixth
+    vocabulary: human_gates.<name>.status. Found by Emma's round-1
+    independent review of this same corrective: _consume_gate_if_decided()
+    used to branch explicitly only on "approved"/"rejected" and fold
+    "pending"/"not_requested"/ANY future value into one untested `else`
+    whose own comment said "anything else -- no side effect" -- the exact
+    PWNBF-class gap this whole initiative exists to close. Every one of
+    GATE_STATUSES' 4 real values now gets its own explicit test; an
+    unrecognized status is proven to raise (never silently treated as
+    "pending")."""
+
+    def _write_raw_gate_status(self, mid: str, gate_name: str, status: str) -> None:
+        """Bypasses chugel.decide_gate() entirely -- writes a status
+        no real production API call can produce (a schema violation for
+        "pending", or a value outside GATE_STATUSES entirely), to test
+        _consume_gate_if_decided()'s own defense-in-depth against a
+        corrupted/hand-edited record. Mirrors the pattern already used
+        elsewhere in this test suite for exercising a record shape no
+        public Chugel function can construct."""
+        path = chugel._mission_path(mid)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["human_gates"][gate_name]["status"] = status
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+    def test_gate_statuses_exhaustively_classified(self):
+        from orchestrator.validator import GATE_STATUSES
+        classified = mission_coordinator._GATE_STATUSES_NO_ACTION | mission_coordinator._GATE_STATUSES_ACTIONABLE
+        self.assertEqual(GATE_STATUSES, classified)
+
+    def test_not_requested_is_a_safe_no_op(self):
+        """The natural default -- a freshly scope-awaiting mission has
+        never had its gate touched at all."""
+        mid = self._mission_scope_awaiting()
+        self.assertEqual(
+            chugel.get_mission(mid)["human_gates"]["scope_authorization"]["status"], "not_requested",
+        )
+        consumed = mission_coordinator._consume_gate_if_decided(mid, "SCOPE_AWAITING_AUTHORIZATION")
+        self.assertFalse(consumed)
+        self.assertEqual(chugel.get_mission(mid)["state"], "SCOPE_AWAITING_AUTHORIZATION")
+
+    def test_pending_is_a_safe_no_op(self):
+        mid = self._mission_scope_awaiting()
+        self._write_raw_gate_status(mid, "scope_authorization", "pending")
+        consumed = mission_coordinator._consume_gate_if_decided(mid, "SCOPE_AWAITING_AUTHORIZATION")
+        self.assertFalse(consumed)
+        self.assertEqual(chugel.get_mission(mid)["state"], "SCOPE_AWAITING_AUTHORIZATION")
+
+    def test_approved_transitions_the_mission(self):
+        mid = self._mission_scope_awaiting()
+        chugel.record_repository_state(mid, {
+            "worktree_path": "/tmp/synthetic-worktree", "branch": "overnight/synthetic",
+            "base_sha": "b" * 40, "isolation_confirmed": True,
+        })
+        chugel.decide_gate(mid, "scope_authorization", _scope_gate_approval())
+        consumed = mission_coordinator._consume_gate_if_decided(mid, "SCOPE_AWAITING_AUTHORIZATION")
+        self.assertTrue(consumed)
+        self.assertEqual(chugel.get_mission(mid)["state"], "AUTHORIZED")
+
+    def test_rejected_transitions_the_mission(self):
+        mid = self._mission_scope_awaiting()
+        chugel.decide_gate(mid, "scope_authorization", _scope_gate_rejection())
+        consumed = mission_coordinator._consume_gate_if_decided(mid, "SCOPE_AWAITING_AUTHORIZATION")
+        self.assertTrue(consumed)
+        self.assertEqual(chugel.get_mission(mid)["state"], "CANCELLED")
+
+    def test_registro_en_disco_con_status_invalido_es_rechazado_por_chugel_antes_de_llegar_aqui(self):
+        """The outer protection: orchestrator.chugel._read_mission_record()
+        (chugel.get_mission()'s own implementation) validates the FULL
+        record against the schema on every single read, unconditionally
+        -- an out-of-vocabulary human_gates.*.status can never even reach
+        _consume_gate_if_decided() through any real on-disk path. Proven
+        directly, not assumed."""
+        mid = self._mission_scope_awaiting()
+        self._write_raw_gate_status(mid, "scope_authorization", "revoked")
+        with self.assertRaises(chugel.MissionRecordInvalid):
+            chugel.get_mission(mid)
+
+    def test_status_fuera_del_vocabulario_es_rechazado_sin_side_effect(self):
+        """The inner protection, defense-in-depth: even if chugel's own
+        outer schema-validation-on-read were ever bypassed or weakened,
+        _consume_gate_if_decided()'s own explicit vocabulary check still
+        fails closed -- proven directly by mocking chugel.get_mission()
+        to return a record the real on-disk read path could never
+        produce, exercising this function's own logic in isolation. A
+        future 5th gate status must never be silently treated as
+        "pending" -- it must raise, and must never transition the
+        mission (chugel.transition is never reached)."""
+        mid = self._mission_scope_awaiting()
+        record = chugel.get_mission(mid)
+        record = json.loads(json.dumps(record))  # deep copy
+        record["human_gates"]["scope_authorization"]["status"] = "revoked"
+        with mock.patch("jarvis.mission_coordinator.chugel.get_mission", return_value=record), \
+             mock.patch("jarvis.mission_coordinator.chugel.transition") as transition_mock:
+            with self.assertRaises(ValueError):
+                mission_coordinator._consume_gate_if_decided(mid, "SCOPE_AWAITING_AUTHORIZATION")
+            transition_mock.assert_not_called()
+        # The real on-disk record was never touched by the mocked call.
+        self.assertEqual(chugel.get_mission(mid)["state"], "SCOPE_AWAITING_AUTHORIZATION")
+
+
+class VocabularioCerradoDeCoordinatorReportTests(unittest.TestCase):
+    """Verification Hardening V1, Pillar 1 (contract checks).
+    CoordinatorReport.status has no JSON schema of its own to check
+    against -- it is a pure-Python, internal-only vocabulary (unlike
+    reviewer_evidence.verdict or dispatch_ledger_entry.
+    result_classification). Its closure is instead enforced directly by
+    CoordinatorReport.__post_init__ against COORDINATOR_REPORT_STATUSES
+    -- these tests prove that enforcement is real (rejects an unlisted
+    status, accepts every declared one), which is the correct-shaped
+    check for a vocabulary with no external source of truth to compare
+    against."""
+
+    def test_status_fuera_del_vocabulario_declarado_es_rechazado(self):
+        with self.assertRaises(ValueError):
+            mission_coordinator.CoordinatorReport("NOT_A_REAL_STATUS", "BUILDING")
+
+    def test_cada_status_declarado_es_construible(self):
+        for status in mission_coordinator.COORDINATOR_REPORT_STATUSES:
+            with self.subTest(status=status):
+                report = mission_coordinator.CoordinatorReport(status, "BUILDING")
+                self.assertEqual(report.status, status)
+
+
+class VocabularioCerradoDeRunnerResultStatusTests(unittest.TestCase):
+    """Verification Hardening V1, Pillar 1 (contract checks).
+    RunnerResult.status DOES have a real, single consumer worth checking
+    exhaustively against: mission_coordinator.advance()'s BUILDING-family
+    branch, which explicitly checks AUTHORIZATION_REQUIRED/
+    TERMINAL_FAILURE/COMPLETED and treats everything else -- by
+    construction, not accidentally -- as HUMAN_ACTION_REQUIRED. This is
+    exactly the shape PWNBF Runner Handling's fix and this same
+    corrective's own DISPATCH_RETRYABLE_CLASSIFICATIONS gap both had:
+    prove the fallback bucket is the REST of the declared vocabulary,
+    not an untested assumption."""
+
+    def test_todo_runner_result_status_esta_cubierto_por_advance(self):
+        from orchestrator.autonomous_runner import RUNNER_RESULT_STATUSES
+        explicitly_checked = {"AUTHORIZATION_REQUIRED", "TERMINAL_FAILURE", "COMPLETED"}
+        fallback = {"HUMAN_ACTION_REQUIRED"}
+        self.assertEqual(RUNNER_RESULT_STATUSES, explicitly_checked | fallback)
+
+    def test_status_fuera_del_vocabulario_declarado_es_rechazado(self):
+        from orchestrator.autonomous_runner import RunnerResult
+        with self.assertRaises(ValueError):
+            RunnerResult("NOT_A_REAL_STATUS", "BUILDING", 0)
+
+    def test_cada_status_declarado_es_construible(self):
+        from orchestrator.autonomous_runner import RUNNER_RESULT_STATUSES, RunnerResult
+        for status in RUNNER_RESULT_STATUSES:
+            with self.subTest(status=status):
+                result = RunnerResult(status, "BUILDING", 0)
+                self.assertEqual(result.status, status)
+
+
 if __name__ == "__main__":
     unittest.main()

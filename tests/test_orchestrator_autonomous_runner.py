@@ -30,6 +30,7 @@ from pathlib import Path
 
 import orchestrator.agent_invocation as ai
 import orchestrator.chugel as chugel
+import orchestrator.validator as validator
 from orchestrator.adapters.codex_cli_adapter import CodexCliAdapter
 from orchestrator.autonomous_runner import (
     _durable_attempt_counts,
@@ -487,6 +488,100 @@ class PruebaRestartTrasReservaSinCompletar(AutonomousRunnerRealPersistenceTestCa
         fresh_entry = next(e for e in ledger if e["invocation_id"] != stale_invocation_id)
         self.assertEqual(fresh_entry["status"], "FINALIZED")
         self.assertEqual(fresh_entry["result_classification"], "completed")
+
+    def test_result_recorded_invalid_output_sin_finalizar_permite_recuperacion_real(self):
+        """Verification Hardening V1, Pillar 1 corrective: invalid_output
+        writes no evidence (identical to failed/timeout/unavailable in
+        that respect), so a crash between record_dispatch_result() and
+        finalize_dispatch() must be recoverable exactly like those three
+        -- before this corrective it was NOT (DISPATCH_RETRYABLE_
+        CLASSIFICATIONS excluded it with no evidence-protection reason,
+        confirmed by direct reproduction: the mission stayed permanently
+        stuck, reserve_dispatch() refusing every subsequent restart
+        forever). This is regression 1 of the corrective's required set."""
+        mid = self._mission_building()
+        _, stale_invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, stale_invocation_id, provider="codex")
+        chugel.record_dispatch_result(
+            mid, stale_invocation_id, outcome="invalid_output",
+            diagnostic={"reason_code": "INVALID_OUTPUT_NOT_JSON_OBJECT", "output_byte_length": 5},
+        )  # crash right here -- never finalized
+
+        adapters = {"codex": _FakeAdapter([_emilio_completed_template(attempt=0)])}
+        result = run_mission(mid, adapters, max_total_attempts=2, max_builder_attempts=2)
+        self.assertEqual(len(adapters["codex"].calls), 1)
+        self.assertNotEqual(adapters["codex"].calls[0].invocation_id, stale_invocation_id)
+        self.assertEqual(result.state, "VERIFYING")
+
+        record = chugel.get_mission(mid)
+        ledger = record["dispatch_ledger"]
+        self.assertEqual(len(ledger), 2)
+        stale_entry = next(e for e in ledger if e["invocation_id"] == stale_invocation_id)
+        self.assertEqual(stale_entry["status"], "FINALIZED")
+        self.assertEqual(stale_entry["result_classification"], "invalid_output")
+        # Regression 5: the durable diagnostic from the crashed attempt
+        # remains intact and schema-valid after the fresh reservation
+        # supersedes its ledger entry -- superseding must never erase or
+        # corrupt it.
+        self.assertEqual(stale_entry["diagnostic"], {
+            "reason_code": "INVALID_OUTPUT_NOT_JSON_OBJECT", "output_byte_length": 5,
+        })
+        validation = validator.validate_mission_record(record)
+        self.assertTrue(validation.valid, validation.errors)
+
+        fresh_entry = next(e for e in ledger if e["invocation_id"] != stale_invocation_id)
+        self.assertEqual(fresh_entry["status"], "FINALIZED")
+        self.assertEqual(fresh_entry["result_classification"], "completed")
+        # Regression 4: exactly one builder_evidence entry -- no duplicate
+        # evidence from the crashed/superseded reservation.
+        self.assertEqual(len(record["builder_evidence"]), 1)
+
+    def test_result_recorded_invalid_output_sin_finalizar_respeta_presupuesto_total(self):
+        """Regression 2: the crashed invalid_output reservation still
+        durably counts toward max_total_attempts (via
+        _durable_attempt_counts() reading dispatch_ledger regardless of
+        status -- unchanged by this corrective), so a budget of exactly 2
+        is exhausted by [crashed attempt, fresh retry] with no third
+        dispatch, identical in shape to the existing timeout/failed
+        crash-recovery test above."""
+        mid = self._mission_building()
+        _, stale_invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, stale_invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, stale_invocation_id, outcome="invalid_output")
+
+        # The one real retry uses codex again but ALSO fails invalid_output
+        # -- proves the budget stops further dispatch once max_total_attempts
+        # (2) is reached, not just that one retry is allowed.
+        failing_template = dict(_failed_template("codex"))
+        failing_template["outcome"] = "invalid_output"
+        failing_template["diagnostic"] = {"reason_code": "INVALID_OUTPUT_NOT_JSON_OBJECT"}
+        adapters = {"codex": _FakeAdapter([failing_template])}
+        result = run_mission(mid, adapters, max_total_attempts=2, max_builder_attempts=2)
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(result.reason, "total attempt budget exhausted")
+        self.assertEqual(len(adapters["codex"].calls), 1)
+
+        record = chugel.get_mission(mid)
+        self.assertEqual(len(record["dispatch_ledger"]), 2)
+        self.assertTrue(all(e["status"] == "FINALIZED" for e in record["dispatch_ledger"]))
+        self.assertEqual(len(record["builder_evidence"]), 0)
+
+    def test_result_recorded_completed_sigue_fail_closed_tras_el_corrective(self):
+        """Regression 3, explicit for this corrective (the pre-existing
+        test_result_recorded_completed_sin_finalizar_no_hace_llamadas
+        above already covers this, but this corrective's own test suite
+        stays self-contained: 'completed' must remain the one
+        classification a crash-recovery redispatch can never supersede,
+        unaffected by invalid_output joining DISPATCH_RETRYABLE_
+        CLASSIFICATIONS)."""
+        mid = self._mission_building()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
+        chugel.record_dispatch_result(mid, invocation_id, outcome="completed")  # crash right here
+        adapters = {"codex": _NeverCalledAdapter()}
+        result = run_mission(mid, adapters, max_total_attempts=2)
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(len(chugel.get_mission(mid)["dispatch_ledger"]), 1)
 
     def test_provider_fallo_normal_deja_registro_de_resultado_reintentable(self):
         """The ordinary (non-crash) retry path -- run_mission() itself

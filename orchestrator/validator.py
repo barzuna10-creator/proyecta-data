@@ -623,7 +623,35 @@ def _check_reviewer_provider_identity_independence(record: dict) -> list[Validat
 
 
 DISPATCH_LEDGER_STATUSES = frozenset({"RESERVED", "IN_FLIGHT", "RESULT_RECORDED", "FINALIZED"})
-DISPATCH_RETRYABLE_CLASSIFICATIONS = frozenset({"failed", "timeout", "unavailable"})
+
+# Verification Hardening V1, Pillar 1 corrective: of dispatch_ledger_entry's
+# 5 real result_classification values, exactly 2 are excluded here, and for
+# two DIFFERENT reasons -- this set is not simply "everything except
+# completed".
+#
+# "completed" is excluded because a crash between record_dispatch_result()
+# and finalize_dispatch()/record_builder_evidence()'s atomic write (two
+# separate _mission_lock acquisitions, never one) must never be treated as
+# license to guess the outcome and silently discard real, already-produced
+# evidence by superseding the reservation -- chugel.reserve_dispatch()'s own
+# docstring, and test_result_recorded_completed_sin_finalizar_no_hace_llamadas,
+# already establish this as an intentional, tested permanent stall pending a
+# human/schema-attempt-derived decision.
+#
+# "invalid_output" was ALSO excluded until this corrective, but for no
+# equivalent reason: it writes no evidence at all (identical to failed/
+# timeout/unavailable in that respect), so there is nothing to protect from
+# being silently discarded. Its exclusion meant the exact same crash window
+# -- record_dispatch_result(outcome="invalid_output") completing durably,
+# then a crash before finalize_dispatch() ever runs -- left a mission
+# PERMANENTLY stuck: reserve_dispatch() refuses every subsequent restart's
+# attempt to reserve a fresh (role, attempt) slot forever, with no evidence
+# ever at risk and no attempt-budget reason to refuse. Confirmed by direct
+# reproduction against real chugel.reserve_dispatch()/run_mission() before
+# this fix. Included here now: identical treatment to failed/timeout/
+# unavailable, all four of which write no evidence and are genuinely safe
+# to retry after this specific crash window.
+DISPATCH_RETRYABLE_CLASSIFICATIONS = frozenset({"failed", "timeout", "unavailable", "invalid_output"})
 
 
 def _check_dispatch_ledger_consistency(record: dict) -> list[ValidationError]:

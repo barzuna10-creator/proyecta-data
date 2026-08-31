@@ -1280,13 +1280,23 @@ class PruebaReserveDispatchDuplicadoYConflicto(DispatchLedgerTestCase):
         with self.assertRaises(chugel.DispatchNotEligible):
             chugel.reserve_dispatch(mid, role="emilio", attempt=0)
 
-    def test_resultado_no_reintentable_bloquea_redespacho(self):
+    def test_invalid_output_ya_no_bloquea_redespacho(self):
+        """Verification Hardening V1, Pillar 1 corrective: invalid_output
+        writes no evidence -- identical to failed/timeout/unavailable in
+        that respect -- so it was moved into DISPATCH_RETRYABLE_
+        CLASSIFICATIONS alongside them (see orchestrator/validator.py's
+        own extensive docstring on this constant for the full history:
+        before this corrective, a crash between record_dispatch_result()
+        and finalize_dispatch() for an invalid_output outcome left the
+        mission PERMANENTLY stuck, confirmed by direct reproduction).
+        `completed` remains the one classification this can never apply
+        to -- see test_resultado_completed_no_finalizado_bloquea_redespacho
+        below, unchanged."""
         mid = self._mission_ready_for_emilio()
         _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
         chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")
         chugel.record_dispatch_result(mid, invocation_id, outcome="invalid_output")
-        with self.assertRaises(chugel.DispatchNotEligible):
-            chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.reserve_dispatch(mid, role="emilio", attempt=0)  # must not raise
 
     def test_resultado_completed_no_finalizado_bloquea_redespacho(self):
         mid = self._mission_ready_for_emilio()
@@ -1313,8 +1323,8 @@ class PruebaReserveDispatchDuplicadoYConflicto(DispatchLedgerTestCase):
         self.assertEqual(first_entry["status"], "FINALIZED")
         self.assertEqual(second_entry["status"], "RESERVED")
 
-    def test_las_tres_clasificaciones_reintentables_permiten_redespacho(self):
-        for outcome in ("failed", "timeout", "unavailable"):
+    def test_las_cuatro_clasificaciones_reintentables_permiten_redespacho(self):
+        for outcome in ("failed", "timeout", "unavailable", "invalid_output"):
             mid = self._mission_ready_for_emilio()
             _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
             chugel.mark_dispatch_in_flight(mid, invocation_id, provider="codex")

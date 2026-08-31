@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from orchestrator import autonomous_runner, chugel, merge_executor, publish_executor
 from orchestrator import publish_identity_repair
 from orchestrator.agent_invocation import InvocationNotAuthorized
+from orchestrator.validator import GATE_STATUSES
 
 _GATE_STATES = frozenset({
     "SCOPE_AWAITING_AUTHORIZATION", "PUBLISH_AWAITING_AUTHORIZATION", "MERGE_AWAITING_AUTHORIZATION",
@@ -230,6 +231,23 @@ def _mission_occupying_repository_root(mission_id: str) -> str | None:
     return None
 
 
+# Verification Hardening V1, Pillar 1 (contract checks) -- sixth
+# vocabulary: human_gates.<name>.status, orchestrator.validator's own
+# GATE_STATUSES (the single source of truth this partitions, imported
+# rather than duplicated). Before this corrective, _consume_gate_if_decided()
+# branched explicitly only on "approved"/"rejected" and folded
+# "pending"/"not_requested"/anything else into one untested `else: return
+# False` -- the code's own prior comment literally said "anything else --
+# no side effect". A future 5th gate status would have silently taken
+# that same no-op path, exactly the PWNBF-class gap this whole initiative
+# exists to close. Every value now has explicit, tested treatment; an
+# unrecognized status raises rather than being silently treated as
+# equivalent to "pending" -- see
+# tests/test_jarvis_mission_coordinator.py's own exhaustiveness test.
+_GATE_STATUSES_NO_ACTION = frozenset({"not_requested", "pending"})
+_GATE_STATUSES_ACTIONABLE = frozenset({"approved", "rejected"})
+
+
 def _consume_gate_if_decided(mission_id: str, state: str) -> bool:
     """Mission 006 (gate-consumption follow-up): reads ONLY
     human_gates.<name>.status -- the field jarvis.mission_write.
@@ -247,17 +265,30 @@ def _consume_gate_if_decided(mission_id: str, state: str) -> bool:
     granting one implicitly). chugel.transition()'s own can_transition()
     independently re-verifies the target state's evidence -- this
     function does not need to duplicate that check to be safe against
-    its own bugs."""
+    its own bugs.
+
+    Fails closed (ValueError) for any status outside GATE_STATUSES'S own
+    four declared values -- an on-disk Mission Record with a status
+    validate_mission_record() itself would already reject cannot reach
+    this function through any real Chugel write path, so this is
+    defense-in-depth against a corrupted/hand-edited record, never a
+    reachable production behavior."""
     gate_name = _GATE_NAME_FOR_STATE[state]
     record = chugel.get_mission(mission_id)
     gate = (record.get("human_gates") or {}).get(gate_name) or {}
     status = gate.get("status")
+    if status in _GATE_STATUSES_NO_ACTION:
+        return False
     if status == "approved":
         target = _GATE_APPROVED_TARGET[state]
     elif status == "rejected":
         target = _GATE_REJECTED_TARGET
     else:
-        return False  # "pending" / "not_requested" / anything else -- no side effect
+        raise ValueError(
+            f"mission {mission_id}: human_gates.{gate_name}.status is {status!r}, "
+            f"not one of orchestrator.validator.GATE_STATUSES {sorted(GATE_STATUSES)} "
+            "-- refusing to guess whether this gate was decided"
+        )
     chugel.transition(mission_id, target, actor=_SYSTEM_ACTOR, reason=_GATE_CONSUMED_REASON)
     return True
 
@@ -271,12 +302,39 @@ def _last_transition_reason(record: dict) -> str:
     return history[-1].get("reason", "") if history else ""
 
 
+# Verification Hardening V1, Pillar 1 (contract checks): advance()'s
+# closed vocabulary of report statuses -- previously documented only as a
+# Python comment on the field below, never a real, checkable constant.
+# Declared here so CoordinatorReport.__post_init__ can fail closed against
+# a typo'd or genuinely-new-but-forgotten status at every construction
+# site, and so both real exhaustiveness tests have a source of truth:
+# tests/test_jarvis_mission_coordinator.py's
+# VocabularioCerradoDeCoordinatorReportTests (closure: every declared
+# status is constructible, an undeclared one is rejected) and
+# tests/test_jarvis_mission_supervisor.py's
+# CoordinatorReportStatusExhaustivenessTests (the real per-status
+# behavior against _drain_pass() itself -- construction alone proves
+# nothing about how the consumer treats each value).
+COORDINATOR_REPORT_STATUSES = frozenset({
+    "GATE_REQUIRED", "BLOCKED", "HUMAN_ACTION_REQUIRED",
+    "TERMINAL_FAILURE", "MERGED", "WORKSPACE_OCCUPIED",
+})
+
+
 @dataclass(frozen=True)
 class CoordinatorReport:
-    status: str  # "GATE_REQUIRED" | "BLOCKED" | "HUMAN_ACTION_REQUIRED" | "TERMINAL_FAILURE" | "MERGED" | "WORKSPACE_OCCUPIED"
+    status: str
     state: str
     gate_name: str | None = None
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in COORDINATOR_REPORT_STATUSES:
+            raise ValueError(
+                f"CoordinatorReport.status must be one of {sorted(COORDINATOR_REPORT_STATUSES)}, "
+                f"got {self.status!r} -- every construction site in this module must use "
+                "one of the declared statuses, never an ad hoc string"
+            )
 
 
 def advance(

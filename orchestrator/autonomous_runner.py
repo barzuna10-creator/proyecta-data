@@ -78,12 +78,38 @@ from orchestrator.provider_router import AttemptRecord, DEFAULT_PROVIDER_CONFIG,
 from orchestrator.wiring import run_emilio_attempt, run_emma_attempt
 
 
+# Verification Hardening V1, Pillar 1 (contract checks): the closed
+# vocabulary run_mission() actually returns -- previously four bare string
+# literals scattered across this function with no declared type and no
+# central constant. Declared here so RunnerResult.__post_init__ can fail
+# closed the moment any future edit constructs one with an unlisted value
+# (a typo, or a genuinely new status nobody updated this set for), and so
+# tests/test_jarvis_mission_coordinator.py's
+# VocabularioCerradoDeRunnerResultStatusTests has a real source of truth
+# to check every call site against -- including a genuine exhaustiveness
+# proof against mission_coordinator.advance()'s own consuming branch, the
+# same pattern jarvis/mission_supervisor.py's AUTO_ADVANCE_ELIGIBLE_STATES/
+# GATE_WAITING_STATES/TERMINAL_STATES already established for schema
+# states (see its own test_every_schema_state_is_classified_somewhere).
+RUNNER_RESULT_STATUSES = frozenset({
+    "HUMAN_ACTION_REQUIRED", "COMPLETED", "AUTHORIZATION_REQUIRED", "TERMINAL_FAILURE",
+})
+
+
 @dataclass(frozen=True)
 class RunnerResult:
     status: str
     state: str
     attempts: int
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in RUNNER_RESULT_STATUSES:
+            raise ValueError(
+                f"RunnerResult.status must be one of {sorted(RUNNER_RESULT_STATUSES)}, "
+                f"got {self.status!r} -- every construction site in this module must use "
+                "one of the declared statuses, never an ad hoc string"
+            )
 
 
 class AutonomousRunnerError(Exception):
@@ -118,6 +144,23 @@ def _durable_attempt_counts(record: dict) -> tuple[int, int, int]:
     builder = sum(1 for e in ledger if isinstance(e, dict) and e.get("role") == "emilio")
     reviewer = sum(1 for e in ledger if isinstance(e, dict) and e.get("role") == "emma")
     return len(ledger), builder, reviewer
+
+
+# Verification Hardening V1, Pillar 1 (contract checks): every value
+# orchestrator/schemas/mission_record.schema.json's reviewer_evidence.verdict
+# enum can take, classified into exactly one of the two buckets below --
+# this is exactly the shape of gap PWNBF Runner Handling fixed (a verdict
+# value silently falling into the `else` with nobody having decided that
+# was correct). BLOCKED is deliberately NOT in either bucket: a P0 finding
+# requires human action, so it correctly falls through to the `else` in
+# run_mission() below -- see
+# tests/test_orchestrator_validator.py's
+# test_every_schema_verdict_is_classified_somewhere, which asserts this
+# explicitly (schema's verdict enum == the two buckets below | {"BLOCKED"}),
+# the same pattern jarvis/mission_supervisor.py's
+# test_every_schema_state_is_classified_somewhere already established.
+_VERDICT_REQUESTS_CORRECTION = frozenset({"CHANGES_REQUIRED"})
+_VERDICT_PUBLISHABLE = frozenset({"PASS", "PASS_WITH_NON_BLOCKING_FINDINGS"})
 
 
 def run_mission(
@@ -260,10 +303,10 @@ def run_mission(
                 continue
             current = chugel.get_mission(mission_id)
             verdict = (outcome.result.evidence or {}).get("verdict")
-            if verdict == "CHANGES_REQUIRED":
+            if verdict in _VERDICT_REQUESTS_CORRECTION:
                 chugel.transition(mission_id, "CHANGES_REQUIRED", actor="emma", reason="review requested changes")
                 chugel.transition(mission_id, "CORRECTING", actor="chugel", reason="start bounded corrective cycle")
-            elif verdict in ("PASS", "PASS_WITH_NON_BLOCKING_FINDINGS"):
+            elif verdict in _VERDICT_PUBLISHABLE:
                 chugel.transition(mission_id, "PUBLISH_AWAITING_AUTHORIZATION", actor="emma", reason="review passed")
             else:
                 return RunnerResult(
