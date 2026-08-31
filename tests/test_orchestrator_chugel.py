@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest import mock
 
 import orchestrator.chugel as chugel
+import orchestrator.validator as validator
 
 
 # --- fixtures --------------------------------------------------------
@@ -1376,6 +1377,260 @@ class PruebaLedgerLifecycleTransiciones(DispatchLedgerTestCase):
         chugel.finalize_dispatch(mid, invocation_id)
         with self.assertRaises(chugel.DispatchEntryNotFound):
             chugel.finalize_dispatch(mid, invocation_id)
+
+
+class PruebaDiagnosticoEstructuradoDeDispatch(DispatchLedgerTestCase):
+    """Structured Allow-Listed Diagnostics -- persistence, eligibility,
+    and schema enforcement of record_dispatch_result()'s `diagnostic`
+    parameter. This design replaced an abandoned free-text
+    `diagnostic_detail` + regex-redaction approach (three review rounds
+    each found a new secret shape slipping through); these tests prove
+    both that real diagnosis-relevant structure survives durably AND
+    that nothing outside the schema's closed enum/typed fields can ever
+    be persisted -- there is no sanitizer left to test, only the shape
+    itself, enforced the same way every other Mission Record field is."""
+
+    def _reserved_in_flight(self, provider="codex"):
+        mid = self._mission_ready_for_emilio()
+        _, invocation_id = chugel.reserve_dispatch(mid, role="emilio", attempt=0)
+        chugel.mark_dispatch_in_flight(mid, invocation_id, provider=provider)
+        return mid, invocation_id
+
+    def _entry(self, mid, invocation_id):
+        record = chugel.get_mission(mid)
+        for entry in record["dispatch_ledger"]:
+            if entry["invocation_id"] == invocation_id:
+                return entry
+        raise AssertionError(f"no ledger entry for {invocation_id!r}")
+
+    # --- durable persistence for each eligible outcome ---------------
+
+    def test_invalid_output_persiste_diagnostic_estructurado(self):
+        mid, invocation_id = self._reserved_in_flight()
+        chugel.record_dispatch_result(
+            mid, invocation_id, outcome="invalid_output",
+            diagnostic={
+                "reason_code": "INVALID_OUTPUT_MALFORMED_JSON",
+                "exception_type": "JSONDecodeError",
+                "json_decode_error_position": 640,
+                "output_byte_length": 812,
+            },
+        )
+        entry = self._entry(mid, invocation_id)
+        self.assertEqual(entry["diagnostic"]["reason_code"], "INVALID_OUTPUT_MALFORMED_JSON")
+        self.assertEqual(entry["diagnostic"]["json_decode_error_position"], 640)
+        self.assertEqual(entry["diagnostic"]["output_byte_length"], 812)
+
+    def test_failed_persiste_diagnostic_estructurado(self):
+        mid, invocation_id = self._reserved_in_flight()
+        chugel.record_dispatch_result(
+            mid, invocation_id, outcome="failed",
+            diagnostic={"reason_code": "FAILED_NONZERO_EXIT", "exit_code": 1, "stderr_byte_length": 0},
+        )
+        entry = self._entry(mid, invocation_id)
+        self.assertEqual(entry["diagnostic"]["reason_code"], "FAILED_NONZERO_EXIT")
+        self.assertEqual(entry["diagnostic"]["exit_code"], 1)
+
+    def test_timeout_persiste_diagnostic_estructurado(self):
+        mid, invocation_id = self._reserved_in_flight()
+        chugel.record_dispatch_result(
+            mid, invocation_id, outcome="timeout",
+            diagnostic={"reason_code": "TIMEOUT_EXCEEDED", "timeout_seconds": 600.0},
+        )
+        entry = self._entry(mid, invocation_id)
+        self.assertEqual(entry["diagnostic"]["reason_code"], "TIMEOUT_EXCEEDED")
+        self.assertEqual(entry["diagnostic"]["timeout_seconds"], 600.0)
+
+    def test_unknown_es_un_reason_code_valido_fail_closed(self):
+        """The catch-all for a real future failure branch that hasn't
+        been given its own reason_code yet -- still zero free text."""
+        mid, invocation_id = self._reserved_in_flight()
+        chugel.record_dispatch_result(
+            mid, invocation_id, outcome="failed",
+            diagnostic={"reason_code": "UNKNOWN"},
+        )
+        entry = self._entry(mid, invocation_id)
+        self.assertEqual(entry["diagnostic"]["reason_code"], "UNKNOWN")
+
+    # --- eligibility: only failed/timeout/invalid_output ---------------
+
+    def test_completed_nunca_persiste_diagnostic(self):
+        mid, invocation_id = self._reserved_in_flight()
+        chugel.record_dispatch_result(
+            mid, invocation_id, outcome="completed",
+            diagnostic={"reason_code": "UNKNOWN"},
+        )
+        entry = self._entry(mid, invocation_id)
+        self.assertNotIn("diagnostic", entry)
+
+    def test_diagnostic_none_no_agrega_la_clave(self):
+        mid, invocation_id = self._reserved_in_flight()
+        chugel.record_dispatch_result(mid, invocation_id, outcome="invalid_output")
+        entry = self._entry(mid, invocation_id)
+        self.assertNotIn("diagnostic", entry)
+
+    def test_diagnostic_vacio_no_agrega_la_clave(self):
+        mid, invocation_id = self._reserved_in_flight()
+        chugel.record_dispatch_result(mid, invocation_id, outcome="invalid_output", diagnostic={})
+        entry = self._entry(mid, invocation_id)
+        self.assertNotIn("diagnostic", entry)
+
+    # --- impossibility of persisting non-allow-listed fields/text ------
+
+    def test_texto_arbitrario_en_reason_code_es_rechazado_por_el_schema(self):
+        """A reason_code outside the closed enum -- e.g. an adapter bug
+        that tried to put a raw error string directly into reason_code --
+        must be rejected before anything is written to disk."""
+        mid, invocation_id = self._reserved_in_flight()
+        with self.assertRaises(chugel.MissionValidationFailed):
+            chugel.record_dispatch_result(
+                mid, invocation_id, outcome="failed",
+                diagnostic={"reason_code": "Authorization: Bearer sk-live-shouldnotpersist"},
+            )
+        record = chugel.get_mission(mid)
+        entry = next(e for e in record["dispatch_ledger"] if e["invocation_id"] == invocation_id)
+        self.assertEqual(entry["status"], "IN_FLIGHT")
+        self.assertNotIn("diagnostic", entry)
+
+    def test_campo_no_allow_listed_es_rechazado_por_additional_properties(self):
+        """additionalProperties: false on the diagnostic object itself --
+        an adapter cannot smuggle an arbitrary extra key (e.g. a raw
+        'stderr_excerpt' string) through, even alongside an otherwise
+        valid reason_code."""
+        mid, invocation_id = self._reserved_in_flight()
+        with self.assertRaises(chugel.MissionValidationFailed):
+            chugel.record_dispatch_result(
+                mid, invocation_id, outcome="failed",
+                diagnostic={
+                    "reason_code": "FAILED_NONZERO_EXIT",
+                    "exit_code": 1,
+                    "stderr_excerpt": "this free-text field does not exist in the schema",
+                },
+            )
+        record = chugel.get_mission(mid)
+        entry = next(e for e in record["dispatch_ledger"] if e["invocation_id"] == invocation_id)
+        self.assertNotIn("diagnostic", entry)
+
+    def test_valor_de_texto_libre_en_exception_type_es_rechazado(self):
+        """exception_type is pattern-constrained to look like a bare
+        Python class name -- a full exception message (which could carry
+        arbitrary interpolated data) does not match that pattern and must
+        be rejected, not silently truncated or accepted."""
+        mid, invocation_id = self._reserved_in_flight()
+        with self.assertRaises(chugel.MissionValidationFailed):
+            chugel.record_dispatch_result(
+                mid, invocation_id, outcome="invalid_output",
+                diagnostic={
+                    "reason_code": "INVALID_OUTPUT_UNREADABLE_FILE",
+                    "exception_type": "OSError: [Errno 13] Permission denied: '/secret/path'",
+                },
+            )
+
+    def test_reason_code_de_timeout_exige_result_classification_timeout(self):
+        """Cross-field allOf: a TIMEOUT_EXCEEDED reason_code paired with
+        result_classification=failed must be rejected -- reason_code and
+        result_classification cannot silently disagree."""
+        mid, invocation_id = self._reserved_in_flight()
+        with self.assertRaises(chugel.MissionValidationFailed):
+            chugel.record_dispatch_result(
+                mid, invocation_id, outcome="failed",
+                diagnostic={"reason_code": "TIMEOUT_EXCEEDED", "timeout_seconds": 60.0},
+            )
+
+    def test_reason_code_de_invalid_output_exige_result_classification_invalid_output(self):
+        mid, invocation_id = self._reserved_in_flight()
+        with self.assertRaises(chugel.MissionValidationFailed):
+            chugel.record_dispatch_result(
+                mid, invocation_id, outcome="timeout",
+                diagnostic={"reason_code": "INVALID_OUTPUT_NOT_JSON_OBJECT"},
+            )
+
+    # --- direct schema tests (independent of chugel.py's own gate) -----
+
+    def _mutated_with_entry(self, mid, invocation_id, **entry_overrides):
+        record = chugel.get_mission(mid)
+        ledger = list(record["dispatch_ledger"])
+        idx = next(i for i, e in enumerate(ledger) if e["invocation_id"] == invocation_id)
+        entry = dict(ledger[idx])
+        entry.update(entry_overrides)
+        ledger[idx] = entry
+        mutated = dict(record)
+        mutated["dispatch_ledger"] = ledger
+        return mutated
+
+    def test_schema_rechaza_diagnostic_junto_a_completed(self):
+        mid, invocation_id = self._reserved_in_flight()
+        mutated = self._mutated_with_entry(
+            mid, invocation_id,
+            status="RESULT_RECORDED", result_classification="completed",
+            diagnostic={"reason_code": "UNKNOWN"},
+        )
+        result = validator.validate_mission_record(mutated)
+        self.assertFalse(result.valid)
+
+    def test_schema_exige_result_classification_cuando_hay_diagnostic(self):
+        mid, invocation_id = self._reserved_in_flight()
+        record = chugel.get_mission(mid)
+        ledger = list(record["dispatch_ledger"])
+        idx = next(i for i, e in enumerate(ledger) if e["invocation_id"] == invocation_id)
+        entry = dict(ledger[idx])
+        entry["status"] = "RESULT_RECORDED"
+        entry["diagnostic"] = {"reason_code": "UNKNOWN"}
+        del entry["result_classification"]
+        ledger[idx] = entry
+        mutated = dict(record)
+        mutated["dispatch_ledger"] = ledger
+        result = validator.validate_mission_record(mutated)
+        self.assertFalse(result.valid)
+
+    def test_schema_acepta_diagnostic_completo_para_cada_reason_code_conocido(self):
+        """Positive-case coverage for every reason_code this corrective
+        introduces, paired with its correct result_classification --
+        guards against a future over-tightening of the allOf silently
+        breaking the happy path for any one of them."""
+        cases = [
+            ("timeout", {"reason_code": "TIMEOUT_EXCEEDED", "timeout_seconds": 600.0}),
+            ("failed", {"reason_code": "FAILED_NONZERO_EXIT", "exit_code": 1, "stderr_byte_length": 0}),
+            ("failed", {"reason_code": "FAILED_UNEXPECTED_EXCEPTION", "exception_type": "RuntimeError"}),
+            ("invalid_output", {"reason_code": "INVALID_OUTPUT_NO_OUTPUT_FILE", "output_file_present": False}),
+            ("invalid_output", {
+                "reason_code": "INVALID_OUTPUT_UNREADABLE_FILE",
+                "output_file_present": True, "exception_type": "OSError",
+            }),
+            ("invalid_output", {
+                "reason_code": "INVALID_OUTPUT_MALFORMED_JSON",
+                "exception_type": "JSONDecodeError", "json_decode_error_position": 12,
+                "output_byte_length": 40,
+            }),
+            ("invalid_output", {"reason_code": "INVALID_OUTPUT_NOT_JSON_OBJECT", "output_byte_length": 5}),
+            ("invalid_output", {"reason_code": "INVALID_OUTPUT_UNRECOGNIZED_RESULT_SHAPE"}),
+            ("invalid_output", {"reason_code": "INVALID_OUTPUT_VERDICT_SEVERITY_MISMATCH"}),
+            ("invalid_output", {
+                "reason_code": "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+                "artifact_failure_reason": "NO_UNCOMMITTED_CHANGE",
+            }),
+            ("invalid_output", {
+                "reason_code": "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+                "artifact_failure_reason": "GIT_OPERATION_REFUSED",
+            }),
+            ("invalid_output", {
+                "reason_code": "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+                "artifact_failure_reason": "OTHER",
+            }),
+            ("failed", {"reason_code": "UNKNOWN"}),
+            ("timeout", {"reason_code": "UNKNOWN"}),
+            ("invalid_output", {"reason_code": "UNKNOWN"}),
+        ]
+        for result_classification, diagnostic in cases:
+            with self.subTest(diagnostic=diagnostic):
+                mid, invocation_id = self._reserved_in_flight()
+                mutated = self._mutated_with_entry(
+                    mid, invocation_id,
+                    status="RESULT_RECORDED", result_classification=result_classification,
+                    diagnostic=diagnostic,
+                )
+                result = validator.validate_mission_record(mutated)
+                self.assertTrue(result.valid, (diagnostic, result.errors))
 
 
 class PruebaEvidenciaFinalizaLedgerAtomicamente(DispatchLedgerTestCase):

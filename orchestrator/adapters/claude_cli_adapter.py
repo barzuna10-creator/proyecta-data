@@ -394,12 +394,13 @@ def _now() -> str:
 
 
 def _result(request: AgentInvocationRequest, outcome: str, error_detail: str | None,
-            evidence: dict | None = None, conversation_id: str | None = None) -> AgentInvocationResult:
+            evidence: dict | None = None, conversation_id: str | None = None,
+            diagnostic: dict | None = None) -> AgentInvocationResult:
     return AgentInvocationResult(
         invocation_id=request.invocation_id, outcome=outcome, provider="claude",
         model=None, responded_at=_now(), fresh_context_attested=True,
         provider_session_id=None, provider_conversation_id=conversation_id,
-        evidence=evidence, error_detail=error_detail,
+        evidence=evidence, error_detail=error_detail, diagnostic=diagnostic,
     )
 
 
@@ -464,7 +465,9 @@ def _extract_structured_result(raw_stdout: str) -> dict | None:
 _GIT_DIFF_TIMEOUT_SECONDS = 30.0
 
 
-def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, str | None]:
+def _compute_uncommitted_patch_artifact(
+    worktree: Path,
+) -> tuple[dict | None, str | None, str | None]:
     """Corrective cycle #5: deliberately duplicated from
     codex_cli_adapter.py's function of the same name (see this module's
     docstring for why -- pure `git`-subprocess logic, no adapter-specific
@@ -480,8 +483,14 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
     failure (the model claimed completed work but left nothing real
     behind), never synthesized into a fake non-empty artifact.
 
-    Returns `(artifact, None)` on success or `(None, error_detail)` on
-    failure -- exactly one is non-None.
+    Returns `(artifact, None, None)` on success or
+    `(None, error_detail, artifact_failure_reason)` on failure --
+    `artifact` is exactly non-None on success. `error_detail` remains
+    ephemeral/in-memory-only (mirroring `_result()`'s own shape);
+    `artifact_failure_reason` is the closed, schema-safe classification
+    Structured Allow-Listed Diagnostics durably persists as
+    `diagnostic.artifact_failure_reason` -- identical convention to
+    codex_cli_adapter.py's own function of this name.
 
     Disclosed, accepted limitation (identical to codex_cli_adapter.py's
     own disclosure): the patch file lives in its own directory under
@@ -498,13 +507,13 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
             return None, (
                 "git add -N failed while computing the uncommitted patch artifact: "
                 + add_result.stderr.decode("utf-8", "replace").strip()[:2000]
-            )
+            ), "GIT_OPERATION_REFUSED"
         diff_result = subprocess.run(
             ["git", "-C", str(worktree), "diff", "--binary"],
             capture_output=True, timeout=_GIT_DIFF_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, f"could not compute the uncommitted patch artifact via git: {exc!r}"
+        return None, f"could not compute the uncommitted patch artifact via git: {exc!r}", "OTHER"
     finally:
         subprocess.run(
             ["git", "-C", str(worktree), "reset"],
@@ -514,13 +523,13 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
         return None, (
             "git diff failed while computing the uncommitted patch artifact: "
             + diff_result.stderr.decode("utf-8", "replace").strip()[:2000]
-        )
+        ), "GIT_OPERATION_REFUSED"
     patch_bytes = diff_result.stdout
     if not patch_bytes:
         return None, (
             "claude -p reported completed work, but no uncommitted change exists "
             "in the worktree to capture as a patch artifact"
-        )
+        ), "NO_UNCOMMITTED_CHANGE"
     artifact_dir_raw = tempfile.mkdtemp(prefix="zentra-claude-cli-artifact-", dir=trusted_system_temp_root())
     artifact_dir = Path(artifact_dir_raw)
     artifact_dir.chmod(0o700)
@@ -535,7 +544,7 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
         "patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
         "patch_byte_size": len(patch_bytes),
     }
-    return artifact, None
+    return artifact, None, None
 
 
 class ClaudeCliAdapter:
@@ -593,8 +602,15 @@ class ClaudeCliAdapter:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate()
-                return _result(request, "timeout", "claude -p timed out")
+                return _result(
+                    request, "timeout", "claude -p timed out",
+                    diagnostic={"reason_code": "TIMEOUT_EXCEEDED", "timeout_seconds": self._timeout_seconds},
+                )
             except OSError as exc:
+                # outcome="unavailable" is not a Structured Allow-Listed
+                # Diagnostics eligible classification -- see
+                # codex_cli_adapter.py's identical note at its own
+                # matching call site.
                 return _result(request, "unavailable", f"could not launch claude CLI: {exc!r}")
 
             if process.returncode != 0:
@@ -602,14 +618,29 @@ class ClaudeCliAdapter:
                     request, "failed",
                     f"claude -p exited with code {process.returncode}: "
                     f"{stderr.decode('utf-8', 'replace').strip()[:2000]}",
+                    diagnostic={
+                        "reason_code": "FAILED_NONZERO_EXIT",
+                        "exit_code": process.returncode,
+                        "stderr_byte_length": len(stderr),
+                    },
                 )
 
             raw_stdout = stdout.decode("utf-8", "replace")
             evidence = _extract_structured_result(raw_stdout)
             if evidence is None:
-                return _result(request, "invalid_output", "claude -p output did not match any recognized structured-result shape")
+                return _result(
+                    request, "invalid_output",
+                    "claude -p output did not match any recognized structured-result shape",
+                    diagnostic={
+                        "reason_code": "INVALID_OUTPUT_UNRECOGNIZED_RESULT_SHAPE",
+                        "output_byte_length": len(raw_stdout.encode("utf-8")),
+                    },
+                )
             if request.agent_role == "emma" and _reviewer_verdict_severity_mismatch(evidence):
-                return _result(request, "invalid_output", _REVIEWER_VERDICT_SEVERITY_MISMATCH)
+                return _result(
+                    request, "invalid_output", _REVIEWER_VERDICT_SEVERITY_MISMATCH,
+                    diagnostic={"reason_code": "INVALID_OUTPUT_VERDICT_SEVERITY_MISMATCH"},
+                )
 
             # Corrective cycle #5: `artifact` is never taken from the
             # model (stripped from the schema in _load_evidence_schema()
@@ -618,9 +649,15 @@ class ClaudeCliAdapter:
             # itself from what actually changed on disk. Emma
             # (agent_role == "emma") never reaches this branch.
             if request.agent_role == "emilio":
-                artifact, artifact_error = _compute_uncommitted_patch_artifact(worktree)
+                artifact, artifact_error, artifact_failure_reason = _compute_uncommitted_patch_artifact(worktree)
                 if artifact_error is not None:
-                    return _result(request, "invalid_output", artifact_error)
+                    return _result(
+                        request, "invalid_output", artifact_error,
+                        diagnostic={
+                            "reason_code": "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+                            "artifact_failure_reason": artifact_failure_reason,
+                        },
+                    )
                 evidence["artifact"] = artifact
 
             # provider_conversation_id: only a genuine, provider-reported
@@ -638,5 +675,13 @@ class ClaudeCliAdapter:
             # existing requirement, already honored by claude_adapter.py's
             # own _map_exception_to_outcome()). No credential exists in this
             # adapter's memory to leak; the exception's own repr is the only
-            # content included.
-            return _result(request, "failed", f"unexpected error: {exc!r}")
+            # content included -- error_detail here stays ephemeral/
+            # in-memory only, same distinction as codex_cli_adapter.py's
+            # matching branch.
+            return _result(
+                request, "failed", f"unexpected error: {exc!r}",
+                diagnostic={
+                    "reason_code": "FAILED_UNEXPECTED_EXCEPTION",
+                    "exception_type": type(exc).__name__,
+                },
+            )

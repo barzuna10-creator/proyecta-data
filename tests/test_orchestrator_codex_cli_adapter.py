@@ -269,12 +269,22 @@ class PruebaFalloCerrado(CodexCliAdapterTestCase):
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "invalid_output")
         self.assertIsNone(result.evidence)
+        # Structured Allow-Listed Diagnostics: reason_code identifies the
+        # branch; json_decode_error_position/output_byte_length are safe
+        # ints, never the raw (malformed) output text itself.
+        self.assertEqual(result.diagnostic["reason_code"], "INVALID_OUTPUT_MALFORMED_JSON")
+        self.assertIsInstance(result.diagnostic["json_decode_error_position"], int)
+        self.assertIsInstance(result.diagnostic["output_byte_length"], int)
 
     def test_sin_archivo_de_salida_es_invalid_output(self):
         cli = _write_fake_codex(self._tmp, login_status="Logged in using ChatGPT", exec_mode="no_output_file")
         adapter = CodexCliAdapter(cli_path=cli)
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "invalid_output")
+        self.assertEqual(result.diagnostic, {
+            "reason_code": "INVALID_OUTPUT_NO_OUTPUT_FILE",
+            "output_file_present": False,
+        })
 
     def test_exit_no_cero_es_failed(self):
         cli = _write_fake_codex(self._tmp, login_status="Logged in using ChatGPT", exec_mode="nonzero_exit")
@@ -282,12 +292,22 @@ class PruebaFalloCerrado(CodexCliAdapterTestCase):
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "failed")
         self.assertIn("fake codex exec failure", result.error_detail)
+        # The durable diagnostic carries only the exit code and a byte
+        # COUNT of stderr -- never the stderr content itself. The real
+        # stderr text (present in the ephemeral error_detail above) must
+        # not appear anywhere in the durable diagnostic dict.
+        self.assertEqual(result.diagnostic["reason_code"], "FAILED_NONZERO_EXIT")
+        self.assertIsInstance(result.diagnostic["exit_code"], int)
+        self.assertIsInstance(result.diagnostic["stderr_byte_length"], int)
+        self.assertNotIn("fake codex exec failure", json.dumps(result.diagnostic))
 
     def test_timeout_es_timeout(self):
         cli = _write_fake_codex(self._tmp, login_status="Logged in using ChatGPT", exec_mode="hang")
         adapter = CodexCliAdapter(cli_path=cli, timeout_seconds=1)
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "timeout")
+        self.assertEqual(result.diagnostic["reason_code"], "TIMEOUT_EXCEEDED")
+        self.assertEqual(result.diagnostic["timeout_seconds"], 1.0)
 
 
 class PruebaConfinamientoDeWorktree(CodexCliAdapterTestCase):
@@ -620,12 +640,22 @@ class PruebaArtefactoDePatchGenuinoDesdeGitDiff(CodexCliAdapterTestCase):
     def test_ninguna_modificacion_real_es_invalid_output(self):
         """The model claims changed_files but never actually writes
         anything -- this must fail closed, never fabricate a non-empty
-        patch for work that was never really done."""
+        patch for work that was never really done. Real live incident:
+        this exact branch is the confirmed root cause of a real Mission
+        B stall during M1 Live Acceptance Validation -- Structured
+        Allow-Listed Diagnostics exists specifically to make this
+        diagnosable durably, which the free-text-only predecessor design
+        could not do (the raw error_detail was never persisted anywhere,
+        by design -- see chugel.py's record_dispatch_result() docstring)."""
         cli = self._write_fake_codex_no_artifact(write_real_file=False)
         adapter = CodexCliAdapter(cli_path=cli)
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "invalid_output")
         self.assertIn("no uncommitted change", result.error_detail)
+        self.assertEqual(result.diagnostic, {
+            "reason_code": "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+            "artifact_failure_reason": "NO_UNCOMMITTED_CHANGE",
+        })
 
     def test_git_diff_no_altera_el_arbol_de_trabajo_ni_dejar_staging_pendiente(self):
         cli = self._write_fake_codex_no_artifact(write_real_file=True)

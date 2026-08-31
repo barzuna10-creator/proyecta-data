@@ -584,7 +584,9 @@ def _extract_turn_failure_message(json_lines: list[str]) -> str | None:
 _GIT_DIFF_TIMEOUT_SECONDS = 30.0
 
 
-def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, str | None]:
+def _compute_uncommitted_patch_artifact(
+    worktree: Path,
+) -> tuple[dict | None, str | None, str | None]:
     """Corrective cycle #4, requirement 1 (runtime discovery from the
     authorized real zero-cost pilot retry): Emilio's real dispatch
     completed with genuinely correct, passing code, but the model's own
@@ -619,11 +621,21 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
     failure (the model claimed completed work but left no real change
     behind), not synthesized into a fake non-empty artifact.
 
-    Returns `(artifact, None)` on success or `(None, error_detail)` on
-    failure -- exactly one is non-None, mirroring `_result()`'s own
-    outcome/error_detail shape so callers can return a "failed" result
-    directly from the error_detail string without inventing a second
-    error-reporting convention.
+    Returns `(artifact, None, None)` on success or
+    `(None, error_detail, artifact_failure_reason)` on failure --
+    `artifact` is exactly non-None on success. `error_detail` remains
+    the ephemeral, in-memory-only free-text description (mirroring
+    `_result()`'s own shape, for the immediate "invalid_output" call at
+    this function's one call site -- never durably persisted).
+    `artifact_failure_reason` is the closed, schema-safe classification
+    of which of the three failure branches below fired
+    (`"GIT_OPERATION_REFUSED"` for either git subprocess failing,
+    `"OTHER"` for git itself being unlaunchable/timing out,
+    `"NO_UNCOMMITTED_CHANGE"` for a genuinely empty diff -- the real
+    cause behind the M1 Live Acceptance Mission B stall this corrective
+    exists to make diagnosable) -- this is the value
+    Structured Allow-Listed Diagnostics durably persists as
+    `diagnostic.artifact_failure_reason`.
 
     Disclosed, accepted limitation: the patch file this writes lives in
     its own directory under `trusted_system_temp_root()`, deliberately
@@ -648,13 +660,13 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
             return None, (
                 "git add -N failed while computing the uncommitted patch artifact: "
                 + add_result.stderr.decode("utf-8", "replace").strip()[:2000]
-            )
+            ), "GIT_OPERATION_REFUSED"
         diff_result = subprocess.run(
             ["git", "-C", str(worktree), "diff", "--binary"],
             capture_output=True, timeout=_GIT_DIFF_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, f"could not compute the uncommitted patch artifact via git: {exc!r}"
+        return None, f"could not compute the uncommitted patch artifact via git: {exc!r}", "OTHER"
     finally:
         subprocess.run(
             ["git", "-C", str(worktree), "reset"],
@@ -664,13 +676,13 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
         return None, (
             "git diff failed while computing the uncommitted patch artifact: "
             + diff_result.stderr.decode("utf-8", "replace").strip()[:2000]
-        )
+        ), "GIT_OPERATION_REFUSED"
     patch_bytes = diff_result.stdout
     if not patch_bytes:
         return None, (
             "codex exec reported completed work, but no uncommitted change exists "
             "in the worktree to capture as a patch artifact"
-        )
+        ), "NO_UNCOMMITTED_CHANGE"
     artifact_dir_raw = tempfile.mkdtemp(prefix="zentra-codex-cli-artifact-", dir=trusted_system_temp_root())
     artifact_dir = Path(artifact_dir_raw)
     artifact_dir.chmod(0o700)
@@ -685,16 +697,17 @@ def _compute_uncommitted_patch_artifact(worktree: Path) -> tuple[dict | None, st
         "patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
         "patch_byte_size": len(patch_bytes),
     }
-    return artifact, None
+    return artifact, None, None
 
 
 def _result(request: AgentInvocationRequest, outcome: str, error_detail: str | None,
-            evidence: dict | None = None, conversation_id: str | None = None) -> AgentInvocationResult:
+            evidence: dict | None = None, conversation_id: str | None = None,
+            diagnostic: dict | None = None) -> AgentInvocationResult:
     return AgentInvocationResult(
         invocation_id=request.invocation_id, outcome=outcome, provider="codex",
         model=None, responded_at=_now(), fresh_context_attested=True,
         provider_session_id=None, provider_conversation_id=conversation_id,
-        evidence=evidence, error_detail=error_detail,
+        evidence=evidence, error_detail=error_detail, diagnostic=diagnostic,
     )
 
 
@@ -770,8 +783,16 @@ class CodexCliAdapter:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.communicate()
-                    return _result(request, "timeout", "codex exec timed out")
+                    return _result(
+                        request, "timeout", "codex exec timed out",
+                        diagnostic={"reason_code": "TIMEOUT_EXCEEDED", "timeout_seconds": self._timeout_seconds},
+                    )
                 except OSError as exc:
+                    # outcome="unavailable" -- not one of the three
+                    # Structured Allow-Listed Diagnostics eligible
+                    # classifications (failed/timeout/invalid_output), so
+                    # no diagnostic is built here; chugel.py would drop
+                    # it anyway.
                     return _result(request, "unavailable", f"could not launch codex CLI: {exc!r}")
 
                 stdout_lines = stdout.decode("utf-8", "replace").splitlines()
@@ -784,7 +805,14 @@ class CodexCliAdapter:
                     turn_failure = _extract_turn_failure_message(stdout_lines)
                     if turn_failure is not None:
                         detail += f" | provider turn failure: {turn_failure}"
-                    return _result(request, "failed", detail)
+                    return _result(
+                        request, "failed", detail,
+                        diagnostic={
+                            "reason_code": "FAILED_NONZERO_EXIT",
+                            "exit_code": process.returncode,
+                            "stderr_byte_length": len(stderr),
+                        },
+                    )
 
                 # `--json` events (stdout) are scanned only for a genuine
                 # provider thread/session id -- see _extract_thread_id()'s
@@ -799,17 +827,44 @@ class CodexCliAdapter:
                     turn_failure = _extract_turn_failure_message(stdout_lines)
                     if turn_failure is not None:
                         detail += f" (provider turn failure: {turn_failure})"
-                    return _result(request, "invalid_output", detail)
+                    return _result(
+                        request, "invalid_output", detail,
+                        diagnostic={
+                            "reason_code": "INVALID_OUTPUT_NO_OUTPUT_FILE",
+                            "output_file_present": False,
+                        },
+                    )
                 try:
                     raw = last_message_path.read_text(encoding="utf-8")
                 except OSError as exc:
-                    return _result(request, "invalid_output", f"could not read codex exec output: {exc!r}")
+                    return _result(
+                        request, "invalid_output", f"could not read codex exec output: {exc!r}",
+                        diagnostic={
+                            "reason_code": "INVALID_OUTPUT_UNREADABLE_FILE",
+                            "output_file_present": True,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
                 try:
                     evidence = json.loads(raw)
                 except json.JSONDecodeError as exc:
-                    return _result(request, "invalid_output", f"codex exec final message was not valid JSON: {exc}")
+                    return _result(
+                        request, "invalid_output", f"codex exec final message was not valid JSON: {exc}",
+                        diagnostic={
+                            "reason_code": "INVALID_OUTPUT_MALFORMED_JSON",
+                            "exception_type": type(exc).__name__,
+                            "json_decode_error_position": exc.pos,
+                            "output_byte_length": len(raw.encode("utf-8")),
+                        },
+                    )
                 if not isinstance(evidence, dict):
-                    return _result(request, "invalid_output", "codex exec final message was not a JSON object")
+                    return _result(
+                        request, "invalid_output", "codex exec final message was not a JSON object",
+                        diagnostic={
+                            "reason_code": "INVALID_OUTPUT_NOT_JSON_OBJECT",
+                            "output_byte_length": len(raw.encode("utf-8")),
+                        },
+                    )
 
                 # Corrective cycle #4, requirement 1: `artifact` is never
                 # taken from the model (stripped from the schema in
@@ -817,9 +872,15 @@ class CodexCliAdapter:
                 # model cannot even include one) -- this adapter computes
                 # the genuine one itself from what actually changed on disk.
                 if request.agent_role == "emilio":
-                    artifact, artifact_error = _compute_uncommitted_patch_artifact(worktree)
+                    artifact, artifact_error, artifact_failure_reason = _compute_uncommitted_patch_artifact(worktree)
                     if artifact_error is not None:
-                        return _result(request, "invalid_output", artifact_error)
+                        return _result(
+                            request, "invalid_output", artifact_error,
+                            diagnostic={
+                                "reason_code": "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+                                "artifact_failure_reason": artifact_failure_reason,
+                            },
+                        )
                     evidence["artifact"] = artifact
 
                 # provider_conversation_id: only a genuine, provider-reported
@@ -838,7 +899,18 @@ class CodexCliAdapter:
                 # section 10's existing requirement, already honored by
                 # codex_adapter.py's own _map_exception_to_outcome()). No
                 # credential exists in this adapter's memory to leak; the
-                # exception's own repr is the only content included.
-                return _result(request, "failed", f"unexpected error: {exc!r}")
+                # exception's own repr is the only content included --
+                # error_detail here stays ephemeral/in-memory only. The
+                # durable diagnostic carries just the exception's CLASS
+                # NAME (never str(exc)/repr(exc), which could interpolate
+                # arbitrary runtime data) -- exactly the distinction
+                # Structured Allow-Listed Diagnostics exists to draw.
+                return _result(
+                    request, "failed", f"unexpected error: {exc!r}",
+                    diagnostic={
+                        "reason_code": "FAILED_UNEXPECTED_EXCEPTION",
+                        "exception_type": type(exc).__name__,
+                    },
+                )
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)

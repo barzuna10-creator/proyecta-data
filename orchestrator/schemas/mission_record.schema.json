@@ -370,6 +370,48 @@
         { "type": "string", "minLength": 1 }
       ]
     },
+    "dispatch_diagnostic": {
+      "description": "Structured Allow-Listed Diagnostics for a non-completed dispatch outcome (failed/timeout/invalid_output only -- enforced by dispatch_ledger_entry's own allOf, not here). Deliberately NOT free text: every field is either a closed enum or an individually-typed safe value (byte counts, exit codes, booleans, a bounded identifier-shaped exception class name), so nothing this schema accepts can carry an arbitrary provider output excerpt, stderr dump, or exception message -- see chugel.py's record_dispatch_result() for the full design rationale (this replaces an abandoned free-text 'diagnostic_detail' + regex-redaction approach that three independent review rounds each found a new secret shape slipping through). `exception_type`, when present, is constrained to look like a bare Python class name (identifier characters and dots only, bounded length) rather than a fixed enum -- unlike reason_code, the exact set of exception classes that can appear here is not fully enumerable by this schema's author, but a class NAME (e.g. 'OSError', 'JSONDecodeError') structurally cannot carry interpolated runtime data the way str(exc)/repr(exc) can, so the pattern constraint alone is sufficient to keep this field safe without an enum.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason_code"],
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "TIMEOUT_EXCEEDED",
+            "FAILED_NONZERO_EXIT",
+            "FAILED_UNEXPECTED_EXCEPTION",
+            "INVALID_OUTPUT_NO_OUTPUT_FILE",
+            "INVALID_OUTPUT_UNREADABLE_FILE",
+            "INVALID_OUTPUT_MALFORMED_JSON",
+            "INVALID_OUTPUT_NOT_JSON_OBJECT",
+            "INVALID_OUTPUT_UNRECOGNIZED_RESULT_SHAPE",
+            "INVALID_OUTPUT_VERDICT_SEVERITY_MISMATCH",
+            "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+            "UNKNOWN"
+          ]
+        },
+        "exit_code": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": -128, "maximum": 255 }] },
+        "stderr_byte_length": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }] },
+        "output_file_present": { "anyOf": [{ "type": "null" }, { "type": "boolean" }] },
+        "output_byte_length": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }] },
+        "json_decode_error_position": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }] },
+        "timeout_seconds": { "anyOf": [{ "type": "null" }, { "type": "number", "exclusiveMinimum": 0 }] },
+        "artifact_failure_reason": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "enum": ["NO_UNCOMMITTED_CHANGE", "GIT_OPERATION_REFUSED", "OTHER"] }
+          ]
+        },
+        "exception_type": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.]{0,79}$" }
+          ]
+        }
+      }
+    },
     "dispatch_ledger_entry": {
       "description": "One durable reservation for exactly one provider dispatch attempt, identified by invocation_id. Written (status RESERVED) strictly before any provider process may be launched for this (role, attempt), then updated in place -- never appended again -- as the same invocation_id progresses RESERVED -> IN_FLIGHT -> RESULT_RECORDED -> FINALIZED. provider/model are null until IN_FLIGHT (the routing decision is not yet known at reservation time); result_classification is null until RESULT_RECORDED.",
       "type": "object",
@@ -410,6 +452,7 @@
           "type": "string",
           "enum": ["MISSION_EVIDENCE_VALIDATION_FAILED"]
         },
+        "diagnostic": { "$ref": "#/definitions/dispatch_diagnostic" },
         "reserved_at": { "$ref": "#/definitions/timestamp" },
         "updated_at": { "$ref": "#/definitions/timestamp" }
       },
@@ -433,6 +476,61 @@
             "required": ["evidence_disposition"],
             "properties": { "evidence_disposition": { "const": "rejected" } }
           }
+        },
+        {
+          "if": { "required": ["diagnostic"] },
+          "then": {
+            "required": ["result_classification"],
+            "properties": {
+              "result_classification": {
+                "type": "string",
+                "enum": ["failed", "timeout", "invalid_output"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["diagnostic"],
+            "properties": { "diagnostic": { "properties": { "reason_code": { "const": "TIMEOUT_EXCEEDED" } } } }
+          },
+          "then": { "properties": { "result_classification": { "const": "timeout" } } }
+        },
+        {
+          "if": {
+            "required": ["diagnostic"],
+            "properties": {
+              "diagnostic": {
+                "properties": {
+                  "reason_code": { "enum": ["FAILED_NONZERO_EXIT", "FAILED_UNEXPECTED_EXCEPTION"] }
+                }
+              }
+            }
+          },
+          "then": { "properties": { "result_classification": { "const": "failed" } } }
+        },
+        {
+          "if": {
+            "required": ["diagnostic"],
+            "properties": {
+              "diagnostic": {
+                "properties": {
+                  "reason_code": {
+                    "enum": [
+                      "INVALID_OUTPUT_NO_OUTPUT_FILE",
+                      "INVALID_OUTPUT_UNREADABLE_FILE",
+                      "INVALID_OUTPUT_MALFORMED_JSON",
+                      "INVALID_OUTPUT_NOT_JSON_OBJECT",
+                      "INVALID_OUTPUT_UNRECOGNIZED_RESULT_SHAPE",
+                      "INVALID_OUTPUT_VERDICT_SEVERITY_MISMATCH",
+                      "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": { "properties": { "result_classification": { "const": "invalid_output" } } }
         },
         {
           "if": { "properties": { "status": { "const": "RESERVED" } } },
