@@ -172,6 +172,13 @@ Trusted Zentra Context. Existe para que un supervisor externo simple
 (launchd, o cualquier chequeo manual) pueda confirmar que el proceso HTTP
 responde, sin tocar Chugel ni el store.
 
+### Verificación post-deploy del backend
+
+Después de un deploy, consultar `GET /v1/health` en el Control Plane de
+Jarvis. El backend quedó corriendo si responde HTTP 200 con el body
+`{"status": "ok"}`. Este chequeo mínimo es el mismo en staging y en
+producción; no varía entre entornos.
+
 ### Riesgo abierto (no resuelto por M0)
 
 `KeepAlive` reinicia el proceso incondicionalmente ante cualquier salida,
