@@ -263,7 +263,7 @@ def run_mission(
             if verdict == "CHANGES_REQUIRED":
                 chugel.transition(mission_id, "CHANGES_REQUIRED", actor="emma", reason="review requested changes")
                 chugel.transition(mission_id, "CORRECTING", actor="chugel", reason="start bounded corrective cycle")
-            elif verdict == "PASS":
+            elif verdict in ("PASS", "PASS_WITH_NON_BLOCKING_FINDINGS"):
                 chugel.transition(mission_id, "PUBLISH_AWAITING_AUTHORIZATION", actor="emma", reason="review passed")
             else:
                 return RunnerResult(
