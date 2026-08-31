@@ -14,9 +14,11 @@ orchestrator/MISSION_RECORD.md y la revisión de Emma en Increment #3
 identificaron como fuera del alcance de JSON Schema."""
 
 import copy
+import json
 import unittest
+from pathlib import Path
 
-from orchestrator.validator import validate_mission_record
+from orchestrator.validator import DISPATCH_RETRYABLE_CLASSIFICATIONS, validate_mission_record
 
 
 ARTIFACT_A = {"mode": "commit", "commit_sha": "b" * 40, "patch_path": None, "patch_sha256": None, "patch_byte_size": None}
@@ -1480,6 +1482,101 @@ class PruebaDispatchLedgerConsistencia(unittest.TestCase):
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
         self.assertTrue(any(code.startswith("SCHEMA_") for code in error_codes(result)), error_codes(result))
+
+
+class PruebaExhaustividadDeVocabulariosCerrados(unittest.TestCase):
+    """Verification Hardening V1, Pillar 1 (contract checks). Every real
+    closed vocabulary this schema declares must have every one of its
+    values classified/handled somewhere in real code -- never left to an
+    accidental `else` that nobody decided was correct. This is exactly
+    the shape of gap PWNBF Runner Handling fixed for reviewer_evidence.
+    verdict (autonomous_runner.py's REVIEWING-branch verdict dispatch)
+    and Verification Hardening's own P1 corrective fixed for
+    dispatch_ledger_entry.result_classification
+    (DISPATCH_RETRYABLE_CLASSIFICATIONS excluding invalid_output with no
+    protective reason). These tests read the schema itself, never a
+    hand-duplicated copy of its enums, so a future schema addition this
+    module doesn't yet know about fails here, not silently in production."""
+
+    def _schema(self):
+        schema_path = (
+            Path(__file__).resolve().parents[1] / "orchestrator" / "schemas" / "mission_record.schema.json"
+        )
+        return json.loads(schema_path.read_text(encoding="utf-8"))
+
+    def test_every_result_classification_is_retryable_or_completed(self):
+        """dispatch_ledger_entry.result_classification's 5 real values,
+        classified into exactly the two buckets DISPATCH_RETRYABLE_
+        CLASSIFICATIONS/completed's exclusion represent -- see
+        orchestrator/validator.py's own extensive docstring on the
+        constant for why each of the two buckets exists."""
+        # Scans anyOf for the branch carrying an "enum" key, rather than
+        # indexing positionally -- a schema restructure (switch to oneOf,
+        # a reordered/added anyOf branch) must fail this assertion clearly
+        # ("no enum branch found" / "more than one"), never raise
+        # IndexError/KeyError or, worse, silently check the wrong node.
+        any_of = (
+            self._schema()["definitions"]["dispatch_ledger_entry"]["properties"]
+            ["result_classification"]["anyOf"]
+        )
+        enum_branches = [branch["enum"] for branch in any_of if "enum" in branch]
+        self.assertEqual(len(enum_branches), 1, any_of)
+        classifications = set(enum_branches[0])
+        classified = DISPATCH_RETRYABLE_CLASSIFICATIONS | {"completed"}
+        self.assertEqual(classifications, classified)
+
+    def test_every_reason_code_is_correlated_to_exactly_one_result_classification_group(self):
+        """dispatch_diagnostic.reason_code's closed enum, read directly
+        from the schema, cross-checked against dispatch_ledger_entry's
+        own allOf correlation blocks (also read directly, never
+        hand-copied) -- every reason_code other than UNKNOWN must appear
+        in exactly one of the three correlation groups (TIMEOUT_EXCEEDED
+        <-> timeout, FAILED_* <-> failed, INVALID_OUTPUT_* <->
+        invalid_output), and no reason_code may appear in more than one
+        group (a genuine ambiguity the schema itself would need to
+        resolve, not silently allow)."""
+        schema = self._schema()
+        full_enum = set(schema["definitions"]["dispatch_diagnostic"]["properties"]["reason_code"]["enum"])
+
+        groups: list[set[str]] = []
+        for block in schema["definitions"]["dispatch_ledger_entry"]["allOf"]:
+            diagnostic_if = block.get("if", {}).get("properties", {}).get("diagnostic", {})
+            reason_code_constraint = diagnostic_if.get("properties", {}).get("reason_code", {})
+            if "const" in reason_code_constraint:
+                groups.append({reason_code_constraint["const"]})
+            elif "enum" in reason_code_constraint:
+                groups.append(set(reason_code_constraint["enum"]))
+
+        # Exactly 3 correlation groups exist today (timeout/failed/
+        # invalid_output) -- this count itself is worth asserting: a
+        # missing group would silently show up as reason codes with no
+        # home, caught below anyway, but an ACCIDENTALLY DUPLICATED group
+        # (e.g. a copy-paste that redefines "failed"'s group twice)
+        # would not be, without this.
+        self.assertEqual(len(groups), 3, groups)
+
+        classified = set()
+        for group in groups:
+            self.assertTrue(classified.isdisjoint(group), f"reason_code in more than one group: {classified & group}")
+            classified |= group
+
+        self.assertEqual(full_enum, classified | {"UNKNOWN"})
+
+    def test_every_schema_verdict_is_classified_somewhere(self):
+        """reviewer_evidence.verdict's 4 real values -- the exact
+        vocabulary PWNBF Runner Handling's corrective fixed one gap in
+        (PASS_WITH_NON_BLOCKING_FINDINGS silently falling into the
+        `else`). BLOCKED is deliberately the one value that still falls
+        through to run_mission()'s `else` -- a P0 finding requires human
+        action, so this is intentional, not accidental; see
+        orchestrator/autonomous_runner.py's own comment on the two
+        declared buckets for why."""
+        from orchestrator.autonomous_runner import _VERDICT_PUBLISHABLE, _VERDICT_REQUESTS_CORRECTION
+        verdicts = set(
+            self._schema()["definitions"]["reviewer_evidence_entry"]["properties"]["verdict"]["enum"]
+        )
+        classified = _VERDICT_REQUESTS_CORRECTION | _VERDICT_PUBLISHABLE | {"BLOCKED"}
+        self.assertEqual(verdicts, classified)
 
 
 if __name__ == "__main__":

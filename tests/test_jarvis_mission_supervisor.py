@@ -650,5 +650,81 @@ class ConcurrentNotifyStressTests(SupervisorTestCase):
             self.assertEqual("SCOPE_AWAITING_AUTHORIZATION", chugel.get_mission(mid)["state"])
 
 
+class CoordinatorReportStatusExhaustivenessTests(SupervisorTestCase):
+    """Verification Hardening V1, Pillar 1 (contract checks): explicit,
+    per-status treatment of every one of CoordinatorReport's 6 declared
+    statuses against _drain_pass()'s real handling -- not just that
+    CoordinatorReport can be constructed with each one (round-trip),
+    which proves nothing about how _drain_pass() actually treats them.
+    _drain_pass() special-cases exactly one status (HUMAN_ACTION_REQUIRED
+    -> self._stalled, see StalledMissionTests above); every other
+    declared status must be confirmed here to receive the SAME uniform
+    treatment: the mission is reported, never added to _stalled, and a
+    second, independent notify() calls advance() again for it (i.e.
+    genuinely not stalled, matching current, unchanged behavior --
+    Emma's round-2 review confirmed BLOCKED/TERMINAL_FAILURE/MERGED are
+    additionally protected in real production paths by the mission's own
+    Chugel state moving outside AUTO_ADVANCE_ELIGIBLE_STATES before advance()
+    would ever return one of those statuses again -- this test proves the
+    supervisor-level half of that safety net directly, independent of any
+    one caller's real state-transition behavior)."""
+
+    def _assert_status_never_stalls(self, status: str):
+        _create_intake_mission("algo")
+        supervisor = self._supervisor()
+        call_count = 0
+
+        def fake_advance(mission_id, adapters, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return mission_coordinator.CoordinatorReport(status, "INTAKE", reason="synthetic")
+
+        with mock.patch("jarvis.mission_supervisor.mission_coordinator.advance", side_effect=fake_advance):
+            supervisor.notify()
+            worker = supervisor._worker
+            self.assertIsNotNone(worker)
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(1, call_count)
+        self.assertEqual(1, len(supervisor.last_drain_outcomes[-1].reports))
+        self.assertEqual(0, len(supervisor.last_drain_outcomes[-1].errors))
+
+        # The exact opposite assertion from StalledMissionTests: a SECOND,
+        # independent notify() DOES call advance() again for this
+        # mission -- it was never added to _stalled.
+        with mock.patch("jarvis.mission_supervisor.mission_coordinator.advance", side_effect=fake_advance):
+            supervisor.notify()
+            supervisor._worker.join(timeout=5)
+        self.assertEqual(2, call_count)
+
+    def test_gate_required_never_stalls(self):
+        self._assert_status_never_stalls("GATE_REQUIRED")
+
+    def test_blocked_never_stalls(self):
+        self._assert_status_never_stalls("BLOCKED")
+
+    def test_terminal_failure_never_stalls(self):
+        self._assert_status_never_stalls("TERMINAL_FAILURE")
+
+    def test_merged_never_stalls(self):
+        self._assert_status_never_stalls("MERGED")
+
+    def test_workspace_occupied_never_stalls(self):
+        self._assert_status_never_stalls("WORKSPACE_OCCUPIED")
+
+    def test_human_action_required_is_the_only_status_that_stalls(self):
+        """Direct cross-check: every status in COORDINATOR_REPORT_STATUSES
+        except HUMAN_ACTION_REQUIRED must be proven (by the five tests
+        above) to never stall -- this test asserts that partition itself,
+        so a future addition to COORDINATOR_REPORT_STATUSES with no
+        corresponding test above fails immediately and visibly, rather
+        than silently inheriting untested "safe" treatment."""
+        tested_never_stalls = {"GATE_REQUIRED", "BLOCKED", "TERMINAL_FAILURE", "MERGED", "WORKSPACE_OCCUPIED"}
+        self.assertEqual(
+            mission_coordinator.COORDINATOR_REPORT_STATUSES,
+            tested_never_stalls | {"HUMAN_ACTION_REQUIRED"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
