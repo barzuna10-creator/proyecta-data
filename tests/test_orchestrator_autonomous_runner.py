@@ -265,6 +265,49 @@ class PruebaPipelineCompletoConPersistenciaReal(AutonomousRunnerRealPersistenceT
         self.assertEqual(len(adapters["codex"].calls), 1)
         self.assertEqual(len(adapters["claude"].calls), 1)
 
+    def test_authorized_hasta_publish_awaiting_authorization_camino_pass_with_non_blocking_findings(self):
+        """Corrective regression for PWNBF runner handling: Emma's real
+        PASS_WITH_NON_BLOCKING_FINDINGS verdict -- schema-valid, P3-only
+        findings, the only findings profile the validator accepts for this
+        verdict -- must be treated exactly like PASS by run_mission(): the
+        mission reaches PUBLISH_AWAITING_AUTHORIZATION in this same call,
+        with no HUMAN_ACTION_REQUIRED, no redispatch of either provider,
+        and exactly one persisted reviewer_evidence entry (no duplicate)."""
+        mid = self._mission_authorized()
+        p3_only = [{"id": "f1", "severity": "P3", "summary": "minor nit",
+                    "file": "a.py", "line_range": "1-2", "category": "style"}]
+        emma_review = _emma_completed_template(
+            attempt=0, verdict="PASS_WITH_NON_BLOCKING_FINDINGS"
+        )
+        emma_review["evidence"]["findings"] = p3_only
+        adapters = {
+            "codex": _FakeAdapter([_emilio_completed_template(attempt=0)]),
+            "claude": _FakeAdapter([emma_review]),
+        }
+        result = run_mission(mid, adapters, max_total_attempts=4)
+        self.assertEqual(result.status, "AUTHORIZATION_REQUIRED")
+        record = chugel.get_mission(mid)
+        self.assertEqual(record["state"], "PUBLISH_AWAITING_AUTHORIZATION")
+
+        ledger = record["dispatch_ledger"]
+        self.assertEqual(len(ledger), 2)
+        for entry in ledger:
+            self.assertEqual(entry["status"], "FINALIZED")
+            self.assertEqual(entry["result_classification"], "completed")
+        emilio_entries = [e for e in ledger if e["role"] == "emilio"]
+        emma_entries = [e for e in ledger if e["role"] == "emma"]
+        self.assertEqual(len(emilio_entries), 1)
+        self.assertEqual(len(emma_entries), 1)
+        # No redispatch of either provider -- exactly one real call each.
+        self.assertEqual(len(adapters["codex"].calls), 1)
+        self.assertEqual(len(adapters["claude"].calls), 1)
+        # No duplicate evidence persisted for the one real review.
+        self.assertEqual(len(record["reviewer_evidence"]), 1)
+        self.assertEqual(
+            record["reviewer_evidence"][0]["verdict"],
+            "PASS_WITH_NON_BLOCKING_FINDINGS",
+        )
+
     def test_corrective_cycle_persiste_resume_y_despacha_emma_fresca(self):
         """Two SEPARATE run_mission() calls -- the second simulating a
         fresh process after a restart -- driven purely by persisted
