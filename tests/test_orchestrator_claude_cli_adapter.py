@@ -21,8 +21,13 @@ from orchestrator.adapters.claude_cli_adapter import (
     ClaudeCliAdapter,
     ClaudeCliAdapterError,
     _EMMA_VERDICT_GRAMMAR,
+    _LIFECYCLE_CRITICAL_PATHS,
+    _LIFECYCLE_REVIEW_ADDENDUM,
     _REVIEWER_VERDICT_SEVERITY_MISMATCH,
+    _normalize_changed_file_path,
     _reviewer_verdict_severity_mismatch,
+    _touches_lifecycle_critical_path,
+    _trusted_prompt,
 )
 from orchestrator.agent_invocation import AgentInvocationRequest
 
@@ -715,6 +720,203 @@ class PruebaEmmaNoComputaArtefactoDePatch(ClaudeCliAdapterTestCase):
         result = adapter.invoke(_request(self._worktree, agent_role="emma"))
         self.assertEqual(result.outcome, "completed")
         self.assertNotIn("artifact", result.evidence)
+
+
+def _request_with_changed_files(agent_role: str, changed_files) -> AgentInvocationRequest:
+    return AgentInvocationRequest(
+        invocation_id="55555555-5555-4555-8555-555555555555",
+        mission_id="66666666-6666-4666-8666-666666666666",
+        agent_role=agent_role, attempt=0,
+        task={
+            "mission_definition": {"outcome": "x"},
+            "repository": {"worktree_path": "/tmp/synthetic-worktree"},
+            "changed_files": changed_files,
+        },
+        requested_at="2026-08-25T20:00:00Z", requested_fresh_context=True,
+    )
+
+
+class PruebaAddendumDeRevisionDeLifecycle(unittest.TestCase):
+    """Verification Hardening V1, Pillar 2 (Emma lifecycle/integration
+    review): _touches_lifecycle_critical_path()'s classifier and its
+    conditional injection into _trusted_prompt() -- Emma-only, never
+    Emilio, never for an ordinary non-lifecycle-touching change."""
+
+    def test_cada_path_critico_declarado_dispara_el_addendum(self):
+        for path in _LIFECYCLE_CRITICAL_PATHS:
+            with self.subTest(path=path):
+                self.assertTrue(
+                    _touches_lifecycle_critical_path([{"path": path, "reason": "x"}])
+                )
+
+    def test_paths_no_criticos_no_disparan_el_addendum(self):
+        non_critical = [
+            "README.md",
+            "docs/zentra/REVIEWER_QA_V1.md",
+            "orchestrator/publish_executor.py",
+            "orchestrator/merge_executor.py",
+            "jarvis/status.py",
+            "tests/test_orchestrator_chugel.py",
+            "orchestrator/adapters/codex_worker_runtime.py",
+        ]
+        for path in non_critical:
+            with self.subTest(path=path):
+                self.assertFalse(
+                    _touches_lifecycle_critical_path([{"path": path, "reason": "x"}])
+                )
+
+    def test_lista_vacia_no_dispara(self):
+        self.assertFalse(_touches_lifecycle_critical_path([]))
+
+    def test_normalizacion_forma_plana_y_con_punto_barra(self):
+        """Corrective round 2 (Emma's F2 finding), the two forms
+        explicitly required: a plain repo-relative path is returned
+        unchanged; a single leading "./" is stripped -- the one
+        unambiguous normalization."""
+        self.assertEqual(_normalize_changed_file_path("orchestrator/chugel.py"), "orchestrator/chugel.py")
+        self.assertEqual(_normalize_changed_file_path("./orchestrator/chugel.py"), "orchestrator/chugel.py")
+
+    def test_normalizacion_rechaza_representaciones_ambiguas(self):
+        """None means "cannot safely normalize" -- callers must treat
+        that as ambiguous (fail closed toward triggering), never as
+        "not critical". No worktree root exists at this layer to resolve
+        an absolute path or a ".." traversal against, so this function
+        never attempts to guess one."""
+        ambiguous = [
+            "/absolute/orchestrator/chugel.py",
+            "../orchestrator/chugel.py",
+            "orchestrator/../orchestrator/chugel.py",
+            "..",
+            "",
+            "   ",
+            "orchestrator\\chugel.py",
+            None,
+            123,
+        ]
+        for raw in ambiguous:
+            with self.subTest(raw=raw):
+                self.assertIsNone(_normalize_changed_file_path(raw))
+
+    def test_normalizacion_rechaza_separadores_redundantes_y_segmentos_punto(self):
+        """Corrective round 3 (Emma's F3 finding): the three explicit
+        adversarial cases -- redundant interior "//", an interior "/./"
+        segment, and a trailing "/" -- plus reasonable equivalent
+        variants (leading "//", a bare trailing "/.", multiple redundant
+        slashes together). Before this round these were backslash-free,
+        non-absolute, non-"../"-prefixed, so they passed through
+        unchanged and then silently failed to match any critical path --
+        exactly the failure mode this closes."""
+        redundant_separator_forms = [
+            "orchestrator//chugel.py",
+            "orchestrator/./chugel.py",
+            "orchestrator/chugel.py/",
+            "//orchestrator/chugel.py",
+            "orchestrator/chugel.py/.",
+            "orchestrator///chugel.py",
+            "orchestrator/./././chugel.py",
+        ]
+        for raw in redundant_separator_forms:
+            with self.subTest(raw=raw):
+                self.assertIsNone(_normalize_changed_file_path(raw))
+
+    def test_los_tres_casos_explicitos_de_f3_disparan_el_addendum(self):
+        """The caller-facing guarantee for exactly the three cases named
+        in the corrective authorization: none may silently evade the
+        lifecycle trigger for a genuinely critical file."""
+        explicit_f3_cases = [
+            "orchestrator//chugel.py",
+            "orchestrator/./chugel.py",
+            "orchestrator/chugel.py/",
+        ]
+        for raw in explicit_f3_cases:
+            with self.subTest(raw=raw):
+                self.assertTrue(_touches_lifecycle_critical_path([{"path": raw, "reason": "x"}]))
+
+    def test_segmento_punto_punto_interior_no_solo_al_inicio_es_rechazado(self):
+        """".." anywhere in the path, not only as a leading segment, must
+        be rejected -- a real regression guard distinct from the
+        leading-"../" case already covered above."""
+        self.assertIsNone(_normalize_changed_file_path("orchestrator/../orchestrator/chugel.py"))
+        self.assertIsNone(_normalize_changed_file_path("orchestrator/chugel.py/.."))
+
+    def test_representaciones_ambiguas_disparan_el_addendum_por_seguridad(self):
+        """The caller-facing guarantee: every ambiguous representation
+        above must trigger the addendum (fail closed), never silently
+        evade it -- this is the exact failure mode Emma's F2 finding
+        identified and this round closes."""
+        ambiguous_paths = [
+            "/absolute/orchestrator/chugel.py",
+            "../orchestrator/chugel.py",
+            "orchestrator\\chugel.py",
+        ]
+        for raw in ambiguous_paths:
+            with self.subTest(raw=raw):
+                self.assertTrue(_touches_lifecycle_critical_path([{"path": raw, "reason": "x"}]))
+
+    def test_prefijo_estilo_diff_no_evade_silenciosamente_el_trigger(self):
+        """Adversarial case: a git-diff-style "a/"/"b/" prefix (or any
+        other single unknown leading segment) ahead of a genuinely
+        critical path must still trigger -- the exact silent-miss shape
+        Emma's F2 finding demonstrated against the pre-fix exact-match-only
+        comparison."""
+        for prefixed in ("a/orchestrator/chugel.py", "b/orchestrator/chugel.py", "some/other/prefix/orchestrator/chugel.py"):
+            with self.subTest(prefixed=prefixed):
+                self.assertTrue(_touches_lifecycle_critical_path([{"path": prefixed, "reason": "x"}]))
+
+    def test_coincidencia_por_sufijo_no_produce_falsos_positivos_obvios(self):
+        """The suffix-match slack must not fire for an unrelated file
+        that merely shares a short trailing filename -- only a full
+        critical path as an exact tail (preceded by "/") counts."""
+        non_matches = [
+            "tests/test_orchestrator_chugel.py",  # shares "chugel.py", not "orchestrator/chugel.py"
+            "somewhere/not_chugel.py",
+            "README.md",
+        ]
+        for path in non_matches:
+            with self.subTest(path=path):
+                self.assertFalse(_touches_lifecycle_critical_path([{"path": path, "reason": "x"}]))
+
+    def test_entrada_malformada_falla_cerrado_disparando(self):
+        """Fail-closed toward triggering the addendum on anything
+        unexpected -- never silently skip it."""
+        for malformed in (None, "not a list", [{"reason": "no path key"}], [{"path": 123}], ["not a dict"]):
+            with self.subTest(malformed=malformed):
+                self.assertTrue(_touches_lifecycle_critical_path(malformed))
+
+    def test_emma_recibe_el_addendum_cuando_corresponde(self):
+        request = _request_with_changed_files(
+            "emma", [{"path": "orchestrator/chugel.py", "reason": "fix"}],
+        )
+        prompt = json.loads(_trusted_prompt(request))
+        self.assertEqual(prompt["_zentra_lifecycle_review_addendum"], _LIFECYCLE_REVIEW_ADDENDUM)
+        # Normal policy is still present alongside it -- the addendum is
+        # additive, never a replacement.
+        self.assertEqual(prompt["_zentra_reviewer_verdict_grammar"], _EMMA_VERDICT_GRAMMAR)
+
+    def test_emma_no_recibe_el_addendum_fuera_de_lifecycle_scope(self):
+        request = _request_with_changed_files(
+            "emma", [{"path": "README.md", "reason": "typo"}],
+        )
+        prompt = json.loads(_trusted_prompt(request))
+        self.assertNotIn("_zentra_lifecycle_review_addendum", prompt)
+        # The rest of the prompt is completely unaffected by this
+        # corrective for a non-lifecycle-touching Emma review.
+        self.assertEqual(prompt["_zentra_reviewer_verdict_grammar"], _EMMA_VERDICT_GRAMMAR)
+        self.assertEqual(prompt["mission_definition"], {"outcome": "x"})
+
+    def test_emilio_nunca_recibe_el_addendum(self):
+        """Even when Emilio's own task carries a lifecycle-critical
+        changed_files entry, his prompt must never gain the addendum --
+        agent_role=="emma" gates the entire branch that could add it."""
+        request = _request_with_changed_files(
+            "emilio", [{"path": "orchestrator/chugel.py", "reason": "fix"}],
+        )
+        prompt = json.loads(_trusted_prompt(request))
+        self.assertNotIn("_zentra_lifecycle_review_addendum", prompt)
+        self.assertNotIn("_zentra_reviewer_verdict_grammar", prompt)
+        # Emilio's prompt is exactly his raw task, byte-for-byte -- this
+        # corrective adds nothing to his path at all.
+        self.assertEqual(prompt, request.task)
 
 
 if __name__ == "__main__":
