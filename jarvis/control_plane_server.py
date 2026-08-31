@@ -649,6 +649,28 @@ def _pending_real_gate(mission_id: str, status) -> dict | None:
     }
 
 
+def _timeline_event_dict(event) -> dict:
+    """Verification Hardening V1, Pillar 4: JSON-safe serialization of a
+    jarvis.status.TimelineEvent -- a flat dict of exactly its own
+    allow-listed fields, nothing more. No new data is added or inferred
+    here; this is pure wire-format shaping of an already-derived,
+    already allow-listed projection."""
+    return {
+        "at": event.at,
+        "kind": event.kind,
+        "fromState": event.from_state,
+        "toState": event.to_state,
+        "actor": event.actor,
+        "role": event.role,
+        "attempt": event.attempt,
+        "provider": event.provider,
+        "model": event.model,
+        "status": event.status,
+        "resultClassification": event.result_classification,
+        "reasonCode": event.reason_code,
+    }
+
+
 def _build_projection(store: FileJarvisStore) -> dict:
     listings = mission_query.list_missions()
     gates: list[dict] = []
@@ -676,6 +698,11 @@ def _build_projection(store: FileJarvisStore) -> dict:
             "status": "active" if item.bucket == "running" else ("blocked" if item.bucket in ("blocked", "terminal") else "active"),
             "updatedAt": item.updated_at or "",
             "staleness": status.staleness if status is not None else "NORMAL",
+            # Verification Hardening V1, Pillar 4 (Structured Progress /
+            # Timeline Projection): same reused `status` fetch as
+            # `staleness` above -- no new read. An unreadable/unfetchable
+            # mission gets an empty timeline, never a fabricated one.
+            "timeline": [_timeline_event_dict(e) for e in status.timeline] if status is not None else [],
         })
         if status is not None:
             gate = _pending_real_gate(item.mission_id, status)

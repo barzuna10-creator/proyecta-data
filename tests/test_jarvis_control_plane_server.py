@@ -1148,5 +1148,94 @@ class ProjectionExposesStalenessTests(ControlPlaneServerTestCase):
         self.assertEqual("WATCH", entry["staleness"])
 
 
+class ProjectionExposesTimelineTests(ControlPlaneServerTestCase):
+    """Verification Hardening V1, Pillar 4 (Structured Progress / Timeline
+    Projection): integration coverage proving GET
+    /v1/command-center/projection's real, wire-serialized response
+    actually carries the derived `timeline` field on each mission entry."""
+
+    def _mission_entry(self, mission_id):
+        _, body = self._request("GET", "/v1/command-center/projection")
+        return next(m for m in body["missions"] if m["id"] == mission_id)
+
+    def test_a_freshly_created_mission_has_one_state_transition_timeline_event(self):
+        record = _create_intake_mission("timeline integration -- fresh")
+        entry = self._mission_entry(record["mission_id"])
+        self.assertEqual(1, len(entry["timeline"]))
+        event = entry["timeline"][0]
+        self.assertEqual("state_transition", event["kind"])
+        self.assertIsNone(event["fromState"])
+        self.assertEqual("INTAKE", event["toState"])
+        # No "reason" key at all -- Round-1 Emma review (P0): see
+        # tests/test_jarvis_status.py's TimelineReasonNeverLeaksTests.
+        self.assertNotIn("reason", event)
+
+    def test_a_dispatch_ledger_entry_appears_as_a_timeline_event_through_the_real_endpoint(self):
+        record = _create_intake_mission("timeline integration -- dispatch")
+        mutated = dict(record)
+        mutated["dispatch_ledger"] = [{
+            "role": "emilio", "attempt": 0,
+            "invocation_id": "11111111-1111-4111-8111-111111111111",
+            "provider": "codex", "model": "gpt-5-codex",
+            "status": "RESULT_RECORDED", "result_classification": "failed",
+            "diagnostic": {"reason_code": "FAILED_NONZERO_EXIT", "exit_code": 1},
+            "reserved_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }]
+        chugel._write_mission_record(mutated)
+
+        entry = self._mission_entry(record["mission_id"])
+        dispatch_events = [e for e in entry["timeline"] if e["kind"] == "dispatch"]
+        self.assertEqual(1, len(dispatch_events))
+        event = dispatch_events[0]
+        self.assertEqual("emilio", event["role"])
+        self.assertEqual(0, event["attempt"])
+        self.assertEqual("codex", event["provider"])
+        self.assertEqual("failed", event["resultClassification"])
+        self.assertEqual("FAILED_NONZERO_EXIT", event["reasonCode"])
+        # Diagnostic fields other than reason_code never leak onto the
+        # wire -- there is no key for them at all, not merely a null one.
+        self.assertNotIn("exitCode", event)
+        self.assertNotIn("exit_code", event)
+
+    def test_an_unreadable_mission_gets_an_empty_timeline_not_a_fabricated_one(self):
+        record = _create_intake_mission("timeline integration -- corrupt")
+        path = Path(chugel._MISSIONS_DIR) / f"{record['mission_id']}.json"
+        path.write_text("{not valid json", encoding="utf-8")
+
+        entry = self._mission_entry(record["mission_id"])
+        self.assertEqual([], entry["timeline"])
+
+    def test_a_secret_like_exception_derived_state_history_reason_never_reaches_the_real_endpoint(self):
+        """Round-1 Emma review, P0, third leg of the required regression:
+        proves the absence at the actual GET /v1/command-center/projection
+        HTTP response body, not just at the jarvis.status projection
+        level (see tests/test_jarvis_status.py's
+        TimelineReasonNeverLeaksTests for the other two legs)."""
+        secret = (
+            "gh pr view 42 failed: FileNotFoundError: [Errno 2] No such file or "
+            "directory: '/Users/jose/.config/gh/hosts.yml' token=ghp_SECRETVALUE123"
+        )
+        record = _create_intake_mission("timeline integration -- secret reason")
+        mutated = dict(record)
+        mutated["state"] = "BLOCKED"
+        mutated["state_history"] = record["state_history"] + [{
+            "from_state": "INTAKE", "to_state": "BLOCKED",
+            "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "actor": "chugel", "reason": secret,
+        }]
+        chugel._write_mission_record(mutated)
+
+        status, body = self._request("GET", "/v1/command-center/projection")
+        self.assertEqual(200, status)
+        rendered = json.dumps(body)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("ghp_SECRETVALUE123", rendered)
+        self.assertNotIn("hosts.yml", rendered)
+        entry = self._mission_entry(record["mission_id"])
+        blocked_event = next(e for e in entry["timeline"] if e["toState"] == "BLOCKED")
+        self.assertNotIn("reason", blocked_event)
+
+
 if __name__ == "__main__":
     unittest.main()
