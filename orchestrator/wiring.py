@@ -257,8 +257,17 @@ def _select_and_dispatch(
         request.mission_id, request.invocation_id, provider=decision.adapter_name
     )
     result = adapter.invoke(request)  # exactly once (requirement 5)
+    # Structured Allow-Listed Diagnostics: result.diagnostic, when the
+    # adapter built one, is a small closed-reason-code/typed-fields dict
+    # -- never free text -- forwarded here so record_invocation_result()/
+    # chugel.record_dispatch_result() can persist it durably (subject to
+    # eligibility/schema enforcement there). result.error_detail is
+    # intentionally NOT forwarded anywhere durable -- it remains only
+    # what it always was, an ephemeral in-memory string used to build
+    # prior_attempts within this same run_mission() call.
     record_invocation_result(
-        request.mission_id, request.invocation_id, outcome=result.outcome
+        request.mission_id, request.invocation_id,
+        outcome=result.outcome, diagnostic=result.diagnostic,
     )
     if result.provider != decision.adapter_name:
         raise ProviderMismatch(

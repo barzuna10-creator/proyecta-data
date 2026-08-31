@@ -121,6 +121,23 @@ class AgentInvocationResult:
     provider_conversation_id: str | None
     evidence: dict | None
     error_detail: str | None
+    # Structured Allow-Listed Diagnostics (durable dispatch diagnostics,
+    # design finalized after three rounds of an abandoned regex-redaction
+    # approach found new secret shapes each round -- see chugel.py's
+    # record_dispatch_result() docstring for the full rationale). An
+    # adapter that wants a non-completed outcome (failed/timeout/
+    # invalid_output) to be diagnosable later builds this itself, from a
+    # fixed, closed reason_code plus a handful of individually-typed safe
+    # fields (byte counts, exit codes, exception class names, boolean
+    # flags) -- never free text, never a raw provider output excerpt,
+    # never an exception message. error_detail (above) remains exactly
+    # what it always was: an ephemeral, in-memory-only string used within
+    # a single run_mission() call to build prior_attempts context for a
+    # same-call retry -- it is never durably persisted (see wiring.py/
+    # agent_invocation.py: only `diagnostic` is forwarded into
+    # chugel.record_dispatch_result()). Default None: every existing
+    # caller/fixture that predates this field is unaffected.
+    diagnostic: dict | None = None
 
 
 _OUTCOMES = frozenset({"completed", "failed", "timeout", "invalid_output", "unavailable"})
@@ -267,11 +284,22 @@ def mark_invocation_dispatched(mission_id: str, invocation_id: str, *, provider:
     chugel.mark_dispatch_in_flight(mission_id, invocation_id, provider=provider)
 
 
-def record_invocation_result(mission_id: str, invocation_id: str, *, outcome: str) -> None:
+def record_invocation_result(
+    mission_id: str, invocation_id: str, *, outcome: str, diagnostic: dict | None = None
+) -> None:
     """Thin wrapper, same reason as mark_invocation_dispatched() -- durably
     records the raw provider outcome immediately after adapter.invoke()
-    returns, before any evidence is constructed."""
-    chugel.record_dispatch_result(mission_id, invocation_id, outcome=outcome)
+    returns, before any evidence is constructed.
+
+    Structured Allow-Listed Diagnostics: `diagnostic`, when given, is
+    forwarded verbatim to chugel.record_dispatch_result(), which alone
+    decides whether `outcome` is eligible to carry one and enforces its
+    shape (via the mission record schema's own closed reason_code enum
+    and typed fields) -- this wrapper adds no policy of its own, exactly
+    like every other thin wrapper in this module."""
+    chugel.record_dispatch_result(
+        mission_id, invocation_id, outcome=outcome, diagnostic=diagnostic
+    )
 
 
 def _persist_explicit_evidence_rejection(

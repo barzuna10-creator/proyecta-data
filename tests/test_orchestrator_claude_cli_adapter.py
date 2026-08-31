@@ -265,6 +265,7 @@ class PruebaContratoVeredictoSeveridadEnAdapter(ClaudeCliAdapterTestCase):
         self.assertEqual(result.outcome, "invalid_output")
         self.assertEqual(result.error_detail, _REVIEWER_VERDICT_SEVERITY_MISMATCH)
         self.assertIsNone(result.evidence)
+        self.assertEqual(result.diagnostic, {"reason_code": "INVALID_OUTPUT_VERDICT_SEVERITY_MISMATCH"})
 
     def test_intento_7_recibe_gramatica_y_sigue_fallando_cerrado_si_la_contradice(self):
         script_path = self._tmp / "fake_claude_attempt_7.py"
@@ -359,6 +360,8 @@ class PruebaExtraccionDeResultadoEstructurado(ClaudeCliAdapterTestCase):
         adapter = ClaudeCliAdapter(cli_path=cli)
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "invalid_output")
+        self.assertEqual(result.diagnostic["reason_code"], "INVALID_OUTPUT_UNRECOGNIZED_RESULT_SHAPE")
+        self.assertIsInstance(result.diagnostic["output_byte_length"], int)
 
 
 class PruebaFalloCerrado(ClaudeCliAdapterTestCase):
@@ -367,6 +370,7 @@ class PruebaFalloCerrado(ClaudeCliAdapterTestCase):
         adapter = ClaudeCliAdapter(cli_path=cli)
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "invalid_output")
+        self.assertEqual(result.diagnostic["reason_code"], "INVALID_OUTPUT_UNRECOGNIZED_RESULT_SHAPE")
 
     def test_exit_no_cero_es_failed(self):
         cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="nonzero_exit")
@@ -374,12 +378,18 @@ class PruebaFalloCerrado(ClaudeCliAdapterTestCase):
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "failed")
         self.assertIn("fake claude failure", result.error_detail)
+        self.assertEqual(result.diagnostic["reason_code"], "FAILED_NONZERO_EXIT")
+        self.assertIsInstance(result.diagnostic["exit_code"], int)
+        self.assertIsInstance(result.diagnostic["stderr_byte_length"], int)
+        self.assertNotIn("fake claude failure", json.dumps(result.diagnostic))
 
     def test_timeout_es_timeout(self):
         cli = _write_fake_claude(self._tmp, auth_status=_SUBSCRIPTION_AUTH, mode="hang")
         adapter = ClaudeCliAdapter(cli_path=cli, timeout_seconds=1)
         result = adapter.invoke(_request(self._worktree))
         self.assertEqual(result.outcome, "timeout")
+        self.assertEqual(result.diagnostic["reason_code"], "TIMEOUT_EXCEEDED")
+        self.assertEqual(result.diagnostic["timeout_seconds"], 1.0)
 
 
 class PruebaConfinamientoDeWorktreeYHerramientas(ClaudeCliAdapterTestCase):
@@ -649,6 +659,10 @@ class PruebaArtefactoDePatchGenuinoParaEmilioFallback(ClaudeCliAdapterTestCase):
         result = adapter.invoke(_request(self._worktree, agent_role="emilio"))
         self.assertEqual(result.outcome, "invalid_output")
         self.assertIn("no uncommitted change", result.error_detail)
+        self.assertEqual(result.diagnostic, {
+            "reason_code": "INVALID_OUTPUT_ARTIFACT_COMPUTATION_FAILED",
+            "artifact_failure_reason": "NO_UNCOMMITTED_CHANGE",
+        })
 
     def test_commit_sha_falso_o_preexistente_reportado_por_el_modelo_es_ignorado(self):
         """Reproduces the real pilot's second, more dangerous failure

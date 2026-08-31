@@ -869,13 +869,55 @@ def mark_dispatch_in_flight(
         return mutated
 
 
-def record_dispatch_result(mission_id: str, invocation_id: str, *, outcome: str) -> dict:
+_DIAGNOSTIC_ELIGIBLE_CLASSIFICATIONS = frozenset({"failed", "timeout", "invalid_output"})
+
+
+def record_dispatch_result(
+    mission_id: str, invocation_id: str, *, outcome: str, diagnostic: dict | None = None
+) -> dict:
     """Transition one IN_FLIGHT ledger entry to RESULT_RECORDED, durably
     capturing the raw provider outcome before any evidence is
     constructed or written. This is the checkpoint that lets a later
     restart distinguish 'we know exactly what happened' from 'execution
     is unknown' -- and, for a retryable outcome, is exactly what
     reserve_dispatch() reads to authorize a fresh attempt.
+
+    Structured Allow-Listed Diagnostics: when outcome is one of
+    failed/timeout/invalid_output and the caller supplies a non-empty
+    `diagnostic` dict (an adapter's own closed-reason-code classification
+    of exactly what happened -- see orchestrator/adapters/
+    codex_cli_adapter.py's and claude_cli_adapter.py's own `_result()`
+    call sites, and orchestrator/wiring.py's _select_and_dispatch(),
+    which is the one place `diagnostic` reaches this function), it is
+    persisted verbatim onto this ledger entry, surviving both this
+    process's exit and the adapter's own ephemeral-temp-directory cleanup
+    that happens before this function is ever called. For any other
+    outcome (completed, unavailable), or when `diagnostic` is None/empty,
+    nothing is added.
+
+    Design history (why this is a closed dict, not free text): an
+    earlier corrective attempt persisted a raw, sanitized `error_detail`
+    string here instead, redacting known credential/token shapes with
+    regex before writing. Three independent review rounds each found a
+    new secret shape the redaction missed (Bearer-scheme-only ->
+    underscore-compound env-var names -> JSON-quoted keys and non-Bearer
+    auth schemes) -- the structural signature of a deny-list against
+    unbounded free text, which can encode a credential in unboundedly
+    many shapes and can never be proven complete. This design removes
+    the free text from the trust boundary entirely instead: the adapter
+    that already knows exactly which of its own known failure branches
+    it is in classifies that branch into a closed `reason_code` (the
+    mission record schema's own enum -- this function performs no
+    enum-membership check of its own; validate_mission_record() below is
+    the single enforcement point, exactly like every other field this
+    module writes) plus a handful of individually-typed safe fields
+    (byte counts, exit codes, boolean flags, and Python exception class
+    NAMES -- never an exception's message, which is exactly the kind of
+    interpolated free text this redesign exists to avoid). There is
+    nothing left here to sanitize: a caller cannot construct a
+    `diagnostic` dict this function or the schema will accept that
+    smuggles arbitrary text through, because no field is typed to allow
+    it.
 
     Acquires _mission_lock, same reason as mark_dispatch_in_flight()."""
     with _mission_lock(mission_id):
@@ -890,6 +932,8 @@ def record_dispatch_result(mission_id: str, invocation_id: str, *, outcome: str)
         entry = dict(ledger[idx])
         entry["status"] = "RESULT_RECORDED"
         entry["result_classification"] = outcome
+        if outcome in _DIAGNOSTIC_ELIGIBLE_CLASSIFICATIONS and isinstance(diagnostic, dict) and diagnostic:
+            entry["diagnostic"] = diagnostic
         entry["updated_at"] = _now()
         ledger[idx] = entry
 

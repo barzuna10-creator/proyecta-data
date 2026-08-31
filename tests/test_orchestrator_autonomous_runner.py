@@ -513,6 +513,62 @@ class PruebaRestartTrasReservaSinCompletar(AutonomousRunnerRealPersistenceTestCa
         self.assertEqual(len(ledger), 2)
         self.assertTrue(all(e["status"] == "FINALIZED" for e in ledger))
 
+    def test_diagnostic_estructurado_de_un_fallo_sobrevive_a_run_mission(self):
+        """Structured Allow-Listed Diagnostics: a real adapter's own
+        closed-reason-code classification for a non-completed outcome
+        must be readable from the persisted Mission Record AFTER
+        run_mission() has returned -- proving it survives past the whole
+        call, not just transiently in-memory during it. Read back via a
+        *fresh* chugel.get_mission() call, exactly what a separate
+        process (or this same one, later) would see."""
+        mid = self._mission_building()
+        failing_template = dict(_failed_template("codex"))
+        failing_template["diagnostic"] = {
+            "reason_code": "FAILED_NONZERO_EXIT", "exit_code": 1, "stderr_byte_length": 0,
+        }
+        fallback_template = dict(_emilio_completed_template(attempt=0))
+        fallback_template["provider"] = "claude"
+        adapters = {
+            "codex": _FakeAdapter([failing_template]),
+            "claude": _FakeAdapter([fallback_template]),
+        }
+        run_mission(mid, adapters, max_total_attempts=2, max_builder_attempts=2)
+
+        record = chugel.get_mission(mid)
+        ledger = record["dispatch_ledger"]
+        failed_entry = next(e for e in ledger if e["result_classification"] == "failed")
+        self.assertEqual(failed_entry["status"], "FINALIZED")
+        self.assertEqual(failed_entry["diagnostic"], {
+            "reason_code": "FAILED_NONZERO_EXIT", "exit_code": 1, "stderr_byte_length": 0,
+        })
+        # The completed entry (the fallback that actually succeeded)
+        # must never carry one.
+        completed_entry = next(e for e in ledger if e["result_classification"] == "completed")
+        self.assertNotIn("diagnostic", completed_entry)
+
+    def test_diagnostic_no_allow_listed_de_un_adapter_defectuoso_es_rechazado(self):
+        """Fail-closed proof through the real dispatch path: if a
+        (hypothetically buggy) adapter ever built a diagnostic dict with
+        a non-allow-listed field or free-text reason_code, the schema
+        validation inside chugel.record_dispatch_result() must reject it
+        before anything is written -- run_mission() propagates that
+        failure rather than silently persisting the bad value."""
+        mid = self._mission_building()
+        bad_template = dict(_failed_template("codex"))
+        bad_template["diagnostic"] = {
+            "reason_code": "FAILED_NONZERO_EXIT",
+            "stderr_excerpt": "this free-text field does not exist in the schema",
+        }
+        adapters = {"codex": _FakeAdapter([bad_template])}
+        with self.assertRaises(chugel.MissionValidationFailed):
+            run_mission(mid, adapters, max_total_attempts=2, max_builder_attempts=2)
+        record = chugel.get_mission(mid)
+        # The IN_FLIGHT reservation from before the rejected write is
+        # exactly what's left -- no diagnostic, no result_classification.
+        self.assertEqual(len(record["dispatch_ledger"]), 1)
+        self.assertEqual(record["dispatch_ledger"][0]["status"], "IN_FLIGHT")
+        self.assertNotIn("diagnostic", record["dispatch_ledger"][0])
+
 
 # --- no automatic action at human gates / terminal states -----------------
 
