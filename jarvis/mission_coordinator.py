@@ -337,6 +337,20 @@ class CoordinatorReport:
             )
 
 
+# Verification Hardening V1, Pillar 3 (Progress Watchdog): hoisted out of
+# advance()'s own parameter default so it has one real, importable,
+# canonical source -- previously this value existed nowhere but as a bare
+# literal in that one default, which the watchdog would otherwise have
+# had to either duplicate (a magic-number-drift risk) or reach into via
+# `advance.__defaults__` introspection (fragile, effectively the same
+# duplication one layer removed). Mechanical extraction only: advance()'s
+# real default behavior is unchanged -- see
+# tests/test_jarvis_mission_coordinator.py's own regression proving the
+# parameter's effective default still resolves to this constant, so a
+# future edit to one without the other is caught immediately.
+DEFAULT_CI_POLL_TIMEOUT_SECONDS = 1800.0
+
+
 def advance(
     mission_id: str,
     adapters: dict,
@@ -346,7 +360,7 @@ def advance(
     pr_title: str,
     git_executable: str = "git",
     gh_executable: str = "gh",
-    ci_poll_timeout_seconds: float = 1800.0,
+    ci_poll_timeout_seconds: float = DEFAULT_CI_POLL_TIMEOUT_SECONDS,
     ci_poll_interval_seconds: float = 30.0,
     build_review_deadline: float | None = None,
 ) -> CoordinatorReport:

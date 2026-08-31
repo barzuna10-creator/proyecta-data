@@ -4,6 +4,7 @@ the actual socket. No mocking of the HTTP layer itself."""
 
 from __future__ import annotations
 
+import datetime
 import json
 import threading
 from pathlib import Path
@@ -1090,6 +1091,61 @@ class ObjectiveDecompositionFlowTests(ControlPlaneServerTestCase):
         after = self.server.store.get_latest_draft(draft_id)
         self.assertEqual(before.digest, after.digest)
         self.assertEqual((1,), self.server.store.list_draft_revisions(draft_id))
+
+
+class ProjectionExposesStalenessTests(ControlPlaneServerTestCase):
+    """Verification Hardening V1, Pillar 3 (Progress Watchdog): integration
+    coverage for the one HTTP seam this pillar adds -- proving GET
+    /v1/command-center/projection's real, wire-serialized response
+    actually carries the derived `staleness` field on each mission entry,
+    not just that jarvis/status.py's compute_staleness()/
+    project_mission_status() compute it correctly in isolation. Drives a
+    real mission through chugel.create_mission()/_write_mission_record()
+    (the same real persistence _build_projection() reads from) and hits
+    the actual server over a real socket, exactly like every other test
+    in this file."""
+
+    def _mission_staleness(self, mission_id):
+        _, body = self._request("GET", "/v1/command-center/projection")
+        entry = next(m for m in body["missions"] if m["id"] == mission_id)
+        return entry
+
+    def test_a_freshly_created_mission_is_normal(self):
+        record = _create_intake_mission("watchdog integration -- fresh")
+        entry = self._mission_staleness(record["mission_id"])
+        self.assertEqual("NORMAL", entry["staleness"])
+
+    def test_a_stalled_intake_mission_is_stalled_through_the_real_endpoint(self):
+        # INTAKE is one of jarvis.status._OTHER_LIVE_STATES -- STALLED at
+        # >= 90 minutes with no live dispatch of its own. Mutates the
+        # already-persisted record's updated_at directly on disk (the
+        # same file _build_projection() itself reads through
+        # mission_query.list_missions()/get_mission_status()), rather
+        # than re-deriving staleness some other way -- this is a real
+        # end-to-end check of the wiring, not a restatement of
+        # jarvis/status.py's own unit tests.
+        record = _create_intake_mission("watchdog integration -- stalled")
+        stale_timestamp = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=95)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        mutated = dict(record)
+        mutated["updated_at"] = stale_timestamp
+        chugel._write_mission_record(mutated)
+
+        entry = self._mission_staleness(record["mission_id"])
+        self.assertEqual("STALLED", entry["staleness"])
+
+    def test_a_watch_intake_mission_is_watch_through_the_real_endpoint(self):
+        record = _create_intake_mission("watchdog integration -- watch")
+        watch_timestamp = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=45)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        mutated = dict(record)
+        mutated["updated_at"] = watch_timestamp
+        chugel._write_mission_record(mutated)
+
+        entry = self._mission_staleness(record["mission_id"])
+        self.assertEqual("WATCH", entry["staleness"])
 
 
 if __name__ == "__main__":
