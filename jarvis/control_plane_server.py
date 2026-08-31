@@ -654,6 +654,20 @@ def _build_projection(store: FileJarvisStore) -> dict:
     gates: list[dict] = []
     missions: list[dict] = []
     for item in listings:
+        # Verification Hardening V1, Pillar 3 (Progress Watchdog):
+        # `status` is already fetched here for the gate-projection logic
+        # below -- reused, not re-fetched, to also expose `staleness` on
+        # the mission dict itself. An unreadable listing, or one whose
+        # full read fails, has no determinable staleness -- "NORMAL"
+        # here means "undetermined", the same fail-safe default
+        # jarvis.status.compute_staleness() itself returns for an
+        # unparseable timestamp, never a manufactured stall.
+        status = None
+        if item.readable:
+            try:
+                status = mission_query.get_mission_status(item.mission_id)
+            except mission_query.MissionQueryError:
+                status = None
         missions.append({
             "id": item.mission_id,
             "title": item.mission_id,
@@ -661,12 +675,9 @@ def _build_projection(store: FileJarvisStore) -> dict:
             "progress": 0,
             "status": "active" if item.bucket == "running" else ("blocked" if item.bucket in ("blocked", "terminal") else "active"),
             "updatedAt": item.updated_at or "",
+            "staleness": status.staleness if status is not None else "NORMAL",
         })
-        if item.readable:
-            try:
-                status = mission_query.get_mission_status(item.mission_id)
-            except mission_query.MissionQueryError:
-                continue
+        if status is not None:
             gate = _pending_real_gate(item.mission_id, status)
             if gate is not None:
                 gates.append(gate)

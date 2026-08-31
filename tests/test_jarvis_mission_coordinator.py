@@ -6,6 +6,7 @@ test_orchestrator_merge_executor.py."""
 
 from __future__ import annotations
 
+import inspect
 import json
 import tempfile
 import unittest
@@ -858,6 +859,30 @@ class VocabularioCerradoDeRunnerResultStatusTests(unittest.TestCase):
             with self.subTest(status=status):
                 result = RunnerResult(status, "BUILDING", 0)
                 self.assertEqual(result.status, status)
+
+
+class DefaultCiPollTimeoutConstantTests(unittest.TestCase):
+    """Verification Hardening V1, Pillar 3 (Progress Watchdog): mechanical
+    extraction of advance()'s ci_poll_timeout_seconds default into a real,
+    named, importable module constant, DEFAULT_CI_POLL_TIMEOUT_SECONDS --
+    so jarvis/status.py's watchdog has one canonical source rather than
+    duplicating the literal or reaching into advance.__defaults__ as a
+    runtime dependency. This test uses inspect.signature() only to prove
+    the two stay in sync as a drift guard -- never as anything the
+    watchdog itself depends on at runtime."""
+
+    def test_advance_ci_poll_timeout_seconds_default_matches_la_constante(self):
+        effective_default = inspect.signature(mission_coordinator.advance).parameters[
+            "ci_poll_timeout_seconds"
+        ].default
+        self.assertEqual(effective_default, mission_coordinator.DEFAULT_CI_POLL_TIMEOUT_SECONDS)
+
+    def test_la_constante_es_exactamente_1800(self):
+        """Pins the real value itself -- not just internal self-consistency
+        -- so an edit that changes BOTH the constant and the parameter
+        together (still "in sync" per the test above) still surfaces as a
+        deliberate, reviewed change here."""
+        self.assertEqual(mission_coordinator.DEFAULT_CI_POLL_TIMEOUT_SECONDS, 1800.0)
 
 
 if __name__ == "__main__":
