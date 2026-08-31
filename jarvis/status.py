@@ -80,6 +80,137 @@ class RepositoryStatus:
     isolation_confirmed: bool
 
 
+# Verification Hardening V1, Pillar 4 (Structured Progress / Timeline
+# Projection): a read-only, purely-derived, deterministic merge of
+# state_history and dispatch_ledger -- both already durable Mission
+# Record fields, both already schema-validated by orchestrator/validator.py
+# before any record this reads was ever written. No new persistence, no
+# new event store: this is the same "compute a view, never store one"
+# discipline Pillar 3's staleness already established. Two event
+# "kinds" share one dataclass shape (rather than a real union type) so
+# jarvis/control_plane_server.py can serialize a flat, homogeneous list
+# without a discriminated-union encoding of its own; unused fields for a
+# given `kind` are always None, never omitted.
+TimelineEventKind = Literal["state_transition", "dispatch"]
+
+
+@dataclass(frozen=True)
+class TimelineEvent:
+    at: str
+    kind: TimelineEventKind
+    # state_transition fields -- from record["state_history"][i]. Always
+    # None on a "dispatch" event.
+    from_state: str | None = None
+    to_state: str | None = None
+    actor: str | None = None
+    # Deliberately NO `reason` field. Round-1 Emma review (P0): Chugel's
+    # own schema defines state_history[i].reason as a free string, not a
+    # closed enum -- and, verified directly, orchestrator/publish_executor.py
+    # and orchestrator/merge_executor.py both have real, reachable
+    # BLOCKED-transition call sites that pass `reason=str(exc)`, an
+    # exception message that can embed raw subprocess/stderr content.
+    # That data already sits durably in the Mission Record today (this
+    # pillar changes nothing about that, and does not touch those
+    # writers) -- but surfacing it through THIS projection would be the
+    # first time it ever reaches an HTTP-exposed API, which is exactly
+    # what "cero exception messages/free text nuevas" (this pillar's own
+    # authorized constraint) forbids. No sanitization, no redaction, no
+    # allow-list of "safe" reasons, no substitute field: a
+    # state_transition event communicates only WHAT transitioned and
+    # WHEN, via from_state/to_state/actor/at -- all four already
+    # schema-closed or structurally safe (actor is a small, fixed set of
+    # system/human identities, never free text). See
+    # tests/test_jarvis_status.py's TimelineReasonNeverLeaksTests for the
+    # explicit regression proving this.
+    # dispatch fields -- from record["dispatch_ledger"][i]. Always None
+    # on a "state_transition" event. Every one of these is either a
+    # schema-closed enum or a nullable schema-closed enum -- role
+    # ("emilio"|"emma"), provider ("codex"|"claude"|None), model (a
+    # nullable provider-identity string, never free text), status
+    # (RESERVED/IN_FLIGHT/RESULT_RECORDED/FINALIZED),
+    # result_classification (completed/failed/timeout/invalid_output/
+    # unavailable/None). `reason_code` is the ONE field lifted out of
+    # dispatch_ledger[i]["diagnostic"] -- deliberately only reason_code,
+    # never any other diagnostic field (exit_code, stderr_byte_length,
+    # etc.), and never error_detail (which is not durable at all -- see
+    # orchestrator/agent_invocation.py's own docstring) and never a raw
+    # provider output excerpt or exception message. reason_code is
+    # itself a schema-closed enum (orchestrator/schemas/mission_record.
+    # schema.json's dispatch_diagnostic definition) -- e.g.
+    # "TIMEOUT_EXCEEDED", "FAILED_NONZERO_EXIT" -- structurally
+    # incapable of carrying free text.
+    role: str | None = None
+    attempt: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    status: str | None = None
+    result_classification: str | None = None
+    reason_code: str | None = None
+
+
+def _state_history_timeline_events(record: dict[str, Any]) -> list[TimelineEvent]:
+    events = []
+    for entry in record.get("state_history") or []:
+        events.append(TimelineEvent(
+            at=str(entry["at"]),
+            kind="state_transition",
+            from_state=None if entry["from_state"] is None else str(entry["from_state"]),
+            to_state=str(entry["to_state"]),
+            actor=str(entry["actor"]),
+        ))
+    return events
+
+
+def _dispatch_ledger_timeline_events(record: dict[str, Any]) -> list[TimelineEvent]:
+    events = []
+    for entry in record.get("dispatch_ledger") or []:
+        diagnostic = entry.get("diagnostic")
+        reason_code = (
+            str(diagnostic["reason_code"]) if isinstance(diagnostic, dict) else None
+        )
+        events.append(TimelineEvent(
+            at=str(entry["updated_at"]),
+            kind="dispatch",
+            role=str(entry["role"]),
+            attempt=int(entry["attempt"]),
+            provider=None if entry["provider"] is None else str(entry["provider"]),
+            model=None if entry["model"] is None else str(entry["model"]),
+            status=str(entry["status"]),
+            result_classification=(
+                None if entry["result_classification"] is None
+                else str(entry["result_classification"])
+            ),
+            reason_code=reason_code,
+        ))
+    return events
+
+
+def compute_mission_timeline(record: dict[str, Any]) -> tuple[TimelineEvent, ...]:
+    """Deterministic total order over state_history + dispatch_ledger
+    events. Primary key: `at` (Chugel's own "%Y-%m-%dT%H:%M:%SZ" format,
+    lexicographically sortable at second granularity). Tie-break for two
+    events landing in the same second: state_transition events before
+    dispatch events, then each source list's own original (already
+    chronological, append-only for state_history; monotonically
+    updated-in-place for dispatch_ledger) order -- a documented,
+    deterministic convention, not a claim of true sub-second causal
+    order finer than the record itself durably captures. A
+    dispatch_ledger entry contributes exactly ONE event, at its current
+    (most recent) status/updated_at -- Chugel mutates the same entry in
+    place through RESERVED -> IN_FLIGHT -> RESULT_RECORDED -> FINALIZED
+    rather than durably retaining each intermediate status, so "one
+    event per (role, attempt) reflecting where it currently stands" is
+    the real granularity the Mission Record itself preserves."""
+    state_events = _state_history_timeline_events(record)
+    dispatch_events = _dispatch_ledger_timeline_events(record)
+    combined = (
+        [(0, i, e) for i, e in enumerate(state_events)]
+        + [(1, i, e) for i, e in enumerate(dispatch_events)]
+    )
+    combined.sort(key=lambda item: (item[2].at, item[0], item[1]))
+    return tuple(e for _, _, e in combined)
+
+
 @dataclass(frozen=True)
 class MissionStatus:
     mission_id: str
@@ -94,6 +225,7 @@ class MissionStatus:
     reviewer: tuple[ReviewerStatus, ...]
     human_action_required: str | None
     staleness: Staleness
+    timeline: tuple[TimelineEvent, ...]
 
 
 _HUMAN_ACTION_BY_STATE = {
@@ -328,9 +460,11 @@ def project_mission_status(record: dict[str, Any], *, now: datetime.datetime | N
     The caller must provide a Mission Record already validated by Chugel. No
     unknown field, intent, provider identity/output, dispatch entry, raw gate
     decision, worktree path, or publication/deployment payload is projected --
-    ``staleness`` is the one exception in spirit, not in mechanism: it is a
-    DERIVED classification computed from allow-listed fields
-    (state/updated_at/dispatch_ledger timestamps), never a raw value itself.
+    ``staleness`` and ``timeline`` are the exceptions in spirit, not in
+    mechanism: both are DERIVED views computed only from already-allow-listed
+    fields (state/updated_at/dispatch_ledger timestamps, and -- for
+    ``timeline`` -- state_history plus dispatch_ledger's own schema-closed
+    enum fields and diagnostic.reason_code), never a raw or free-text value.
 
     ``now``, if omitted, defaults to the real current UTC time -- injectable
     so ``staleness`` (Verification Hardening V1, Pillar 3) stays exactly as
@@ -384,4 +518,5 @@ def project_mission_status(record: dict[str, Any], *, now: datetime.datetime | N
         ),
         human_action_required=_HUMAN_ACTION_BY_STATE.get(record["state"]),
         staleness=compute_staleness(record, now=now),
+        timeline=compute_mission_timeline(record),
     )
