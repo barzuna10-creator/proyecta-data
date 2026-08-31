@@ -199,6 +199,167 @@ _EMMA_VERDICT_GRAMMAR = """Mandatory reviewer verdict grammar:
 - PASS is allowed only when findings is empty.
 These rules are mandatory. Do not soften, relabel, or omit a finding to obtain a different verdict."""
 
+# Verification Hardening V1, Pillar 2 (Emma lifecycle/integration review):
+# a fixed, deterministic, non-LLM allow-list of paths whose real consumers
+# reach beyond whatever diff hunk touched them -- the exact shape of gap
+# PWNBF Runner Handling and this initiative's own Pillar 1 correctives
+# exist to close (a value or a state silently mishandled somewhere far
+# from the line that changed). Extending this set is a deliberate,
+# reviewed code change, never an inferred/LLM judgment -- same discipline
+# as AUTO_ADVANCE_ELIGIBLE_STATES/_GATE_NAMES/DISPATCH_RETRYABLE_
+# CLASSIFICATIONS elsewhere in this codebase. See
+# tests/test_orchestrator_claude_cli_adapter.py's own coverage for exactly
+# which paths fire and which do not.
+_LIFECYCLE_CRITICAL_PATHS = frozenset({
+    "orchestrator/chugel.py",
+    "orchestrator/autonomous_runner.py",
+    "orchestrator/wiring.py",
+    "orchestrator/agent_invocation.py",
+    "orchestrator/provider_router.py",
+    "orchestrator/validator.py",
+    "orchestrator/state_machine.py",
+    "jarvis/mission_coordinator.py",
+    "jarvis/mission_supervisor.py",
+    "orchestrator/adapters/codex_cli_adapter.py",
+    "orchestrator/adapters/claude_cli_adapter.py",
+    "orchestrator/schemas/mission_record.schema.json",
+})
+
+
+def _normalize_changed_file_path(raw_path: object) -> str | None:
+    """Corrective round 2 (Emma's F2 finding): the mission_record schema
+    places no format constraint on changed_files[].path beyond
+    "non-empty string" -- nothing guarantees the model always reports a
+    plain repo-relative path with no leading "./" (or reports one at
+    all, rather than something absolute or otherwise ambiguous). Returns
+    a normalized repo-relative path safe to compare against
+    _LIFECYCLE_CRITICAL_PATHS by exact membership, or None if the
+    representation is ambiguous enough that guessing a translation could
+    hide a real match -- there is no worktree root available at this
+    layer to resolve an absolute path or a ".." traversal against, so
+    this function never attempts to. Callers MUST treat None as "cannot
+    rule out a critical path" (fail closed toward triggering), never as
+    "not critical".
+
+    Handles exactly the two forms explicitly required: "path/to/file.py"
+    (returned unchanged) and "./path/to/file.py" (one leading "./"
+    stripped, the only unambiguous normalization -- a repo-relative path
+    can start with "./" or not and mean the same thing). Everything else
+    that isn't already a clean, non-empty, backslash-free, non-absolute,
+    non-traversing path is treated as ambiguous."""
+    if not isinstance(raw_path, str):
+        return None
+    path = raw_path.strip()
+    if not path:
+        return None
+    if "\\" in path:
+        return None  # not a POSIX repo-relative form this codebase ever produces
+    if path.startswith("./"):
+        path = path[2:]
+    if not path:
+        return None
+    # Corrective round 3 (Emma's F3 finding): segment-based, not a growing
+    # list of string-prefix special cases -- splitting on "/" and
+    # rejecting any empty segment (leading "/", trailing "/", or an
+    # interior "//"), any "." segment (an interior or trailing "/./"),
+    # and any ".." segment (parent traversal, wherever it appears, not
+    # only at the very start) catches every one of these ambiguous shapes
+    # -- and any equivalent one -- by construction, rather than by
+    # enumerating each shape as its own prefix/substring check. There is
+    # still no worktree root available at this layer to actually resolve
+    # a ".." traversal against, so this never attempts to -- any segment
+    # that isn't a plain, literal path component is treated as ambiguous.
+    segments = path.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        return None
+    return "/".join(segments)
+
+
+def _touches_lifecycle_critical_path(changed_files: object) -> bool:
+    """Pure, deterministic membership check -- never an LLM judgment.
+    `changed_files` is exactly builder_evidence[attempt].changed_files,
+    already part of Emma's own task payload (build_emma_invocation_request()),
+    so this needs no new field and no new call site to read it from.
+    Fails closed toward triggering the addendum on any malformed input
+    (not a list, an entry missing/with a non-string "path", or a path
+    _normalize_changed_file_path() cannot safely normalize) rather than
+    silently skipping it -- the cost of an unnecessary lifecycle addendum
+    is a slightly longer review; the cost of silently skipping one on a
+    real lifecycle-critical change is the exact PWNBF-class gap this
+    exists to close.
+
+    Match is exact-or-suffix, not exact-only: a normalized path matches
+    a critical path either by full equality, or by ending with
+    "/" + that critical path. This is deliberate, conservative slack for
+    an unknown single leading path segment this module has no way to
+    identify with certainty (a diff-tool convention like a git-style
+    "a/"/"b/" prefix, or any other prefix a model might report) --
+    without it, that exact ambiguous shape would silently evade the
+    trigger for a genuinely critical file, which is precisely the
+    failure mode this function exists to prevent."""
+    if not isinstance(changed_files, list):
+        return True
+    for entry in changed_files:
+        if not isinstance(entry, dict):
+            return True
+        normalized = _normalize_changed_file_path(entry.get("path"))
+        if normalized is None:
+            return True
+        if any(
+            normalized == critical or normalized.endswith("/" + critical)
+            for critical in _LIFECYCLE_CRITICAL_PATHS
+        ):
+            return True
+    return False
+
+
+_LIFECYCLE_REVIEW_ADDENDUM = """Lifecycle/integration review required for this change:
+
+This diff touches at least one file whose real consumers commonly reach
+beyond the diff hunk itself (state machines, dispatch/retry lifecycle,
+provider routing, or a JSON Schema enum). Reviewing only the changed lines
+is not sufficient. In addition to your normal review:
+
+You have Read/Glob/Grep only -- no Bash, no test-execution tool of any
+kind, on this dispatch. Every step below is something you do by reading,
+never by running anything. Do not claim you ran a command, and do not add
+a rechecked_commands entry for anything you did not literally, actually
+execute yourself with a real tool -- that field is reserved for commands a
+real mechanism actually ran (yours, if you ever legitimately have one; a
+prior Builder's own recorded check; a real CI result already present in
+this mission's evidence); it is never a place to fabricate a "ran the
+tests" claim you have no way to back.
+
+1. Use Read/Glob/Grep to trace every real consumer of anything this diff
+   changed or added -- not just the lines shown in the diff. Read the
+   complete files you need, not only the changed hunks.
+2. Identify every closed vocabulary (a JSON Schema `enum`, or a Python
+   frozenset/literal-comparison representing a fixed set of valid values)
+   this diff touches or introduces.
+3. For each one, READ (never run) the relevant existing exhaustiveness
+   test file(s) if you can locate one -- for example (not exhaustive; use
+   Glob/Grep to find what actually applies, and do not assume a name
+   below still exists without confirming it by reading):
+   `tests/test_orchestrator_validator.py` (PruebaExhaustividadDeVocabulariosCerrados)
+   `tests/test_jarvis_mission_coordinator.py` (VocabularioCerradoDeHumanGatesStatusTests,
+     VocabularioCerradoDeRunnerResultStatusTests)
+   `tests/test_jarvis_mission_supervisor.py` (CoordinatorReportStatusExhaustivenessTests)
+   Reason from what the test's own assertions actually check (e.g. does
+   it compare the full schema enum against every declared bucket, or
+   only construct-and-round-trip) whether it genuinely proves every real
+   value has explicit, tested handling -- never an untested `else`/
+   fallback nobody has verified is correct for every remaining value.
+   State your reasoning and its basis (which file/test you read) as a
+   finding or a note; never phrase it as if you executed the test.
+4. If this diff introduces a NEW closed vocabulary, or touches an
+   existing one you could not find a matching exhaustiveness test for by
+   reading/searching, that is itself a finding -- report it, citing the
+   file and the vocabulary, at the severity the missing coverage
+   actually warrants.
+
+Do not expand this into an unbounded audit of the whole repository: scope
+this to the real consumers of what this diff actually changed."""
+
 
 class ClaudeCliAdapterError(Exception):
     """Pre-invocation fail-closed refusal specific to the subscription-CLI
@@ -227,10 +388,22 @@ def _reviewer_verdict_severity_mismatch(evidence: dict) -> bool:
 
 
 def _trusted_prompt(request: AgentInvocationRequest) -> str:
-    """Serialize the allow-listed task with only fixed reviewer policy added."""
+    """Serialize the allow-listed task with only fixed reviewer policy added.
+
+    Verification Hardening V1, Pillar 2: `_zentra_lifecycle_review_addendum`
+    is added ONLY for agent_role == "emma" AND only when
+    _touches_lifecycle_critical_path() finds a real match in this task's
+    own changed_files -- never for Emilio (his task shape has no
+    changed_files at all; the check below is agent_role-gated first,
+    independent of that), and never for an ordinary, non-lifecycle-touching
+    Emma review, which sees exactly the same prompt as before this
+    corrective. Deterministic and fixed -- this function invents nothing
+    and asks the model nothing before deciding whether to include it."""
     if request.agent_role == "emma":
         prompt = dict(request.task)
         prompt["_zentra_reviewer_verdict_grammar"] = _EMMA_VERDICT_GRAMMAR
+        if _touches_lifecycle_critical_path(request.task.get("changed_files")):
+            prompt["_zentra_lifecycle_review_addendum"] = _LIFECYCLE_REVIEW_ADDENDUM
         return json.dumps(prompt)
     return json.dumps(request.task)
 

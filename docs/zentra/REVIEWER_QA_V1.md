@@ -55,6 +55,59 @@ Reviewer/QA must not edit implementation files, amend commits, weaken tests, or
 silently fix findings. Suggested patches may be described, but the Builder owns
 the corrective change.
 
+## Lifecycle/integration review
+
+Added by Verification Hardening V1, Pillar 2, after two real, confirmed P1
+defects were each caused by the same shape of gap: a value silently falling
+into an untested `else`/fallback that nobody had verified was correct for
+every remaining case (PWNBF Runner Handling's reviewer verdict handling;
+this same initiative's own dispatch-retry classification handling).
+Reviewing only the changed lines is not sufficient for a change of this
+shape.
+
+When the change under review touches a file whose real consumers commonly
+reach beyond the diff hunk itself -- a state machine, the dispatch/retry
+lifecycle, provider routing, or a JSON Schema `enum` -- the control-plane
+dispatch path itself detects this deterministically (see
+`orchestrator/adapters/claude_cli_adapter.py`'s `_LIFECYCLE_CRITICAL_PATHS`/
+`_touches_lifecycle_critical_path()`) and adds this to your task. When it
+does, in addition to the procedure above:
+
+Reviewer/QA's real dispatch grants Read/Glob/Grep only -- no Bash, no
+test-execution tool of any kind. Every step below is something done by
+reading, never by running anything. Never claim to have run a command,
+and never add a `rechecked_commands` entry for anything not literally,
+actually executed by a real mechanism -- that field is reserved for a
+command a real mechanism actually ran, never a fabricated "ran the tests"
+claim.
+
+1. Use Read/Glob/Grep to trace every real consumer of anything this diff
+   changed or added -- not just the lines shown in the diff. Read the
+   complete files needed, not only the changed hunks.
+2. Identify every closed vocabulary (a JSON Schema `enum`, or a Python
+   frozenset/literal-comparison representing a fixed set of valid values)
+   this diff touches or introduces.
+3. For each one, READ (never run) the relevant existing exhaustiveness
+   test file(s) if one can be located -- use Glob/Grep to find what
+   actually applies, and confirm a cited test still exists by reading it
+   rather than assuming its name is current. Reason from what the test's
+   own assertions actually check (e.g. does it compare the full schema
+   enum against every declared bucket, or only construct-and-round-trip)
+   whether it genuinely proves every real value has explicit, tested
+   handling -- never an untested fallback nobody has verified is correct
+   for every remaining value. State this reasoning, and which file was
+   read to reach it, as a finding or a note -- never phrase it as if the
+   test was executed.
+4. If this diff introduces a NEW closed vocabulary, or touches an existing
+   one with no matching exhaustiveness test found by reading/searching,
+   that is itself a finding -- report it, citing the file and the
+   vocabulary, at the severity the missing coverage actually warrants.
+
+This does not become an unbounded audit of the whole repository: it scopes
+to the real consumers of what the diff actually changed, triggered only
+when the deterministic path check above actually fires -- an ordinary
+change outside this scope sees no addition to this procedure at all.
+
 ## Severity model
 
 - **P0 — Critical:** destructive behavior; production data, secret, deployment,
