@@ -52,6 +52,7 @@ below is unchanged from Mission 004."""
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from orchestrator import autonomous_runner, chugel, merge_executor, publish_executor
@@ -186,49 +187,191 @@ def _mission_owns_repository_root(mission_id: str, state: str) -> bool:
     return any(entry.get("to_state") in _REPOSITORY_ROOT_OWNING_STATES for entry in history)
 
 
-def _mission_occupying_repository_root(mission_id: str) -> str | None:
+def _resolve_worktree_identity(worktree_path: str) -> tuple[int, int] | None:
+    """M2B (Workspace Guard V2) -- a new, small, LOCAL identity primitive.
+    Deliberately NOT imported from orchestrator/workspace.py: that module
+    already has its own O_NOFOLLOW fd-chain identity check
+    (_capture_leaf_identity(), used during real worktree *provisioning*),
+    but reusing it here would mean reaching across a module boundary into
+    another module's private, underscore-prefixed internals for a
+    genuinely different job -- provisioning verifies a chain it is itself
+    building, step by step, against a swap race; this is read-only
+    identity comparison of two already-existing, independently-claimed
+    directories, with no multi-step construction to protect. A small
+    independent implementation is cleaner and keeps that already-reviewed
+    module completely untouched, at the cost of one shared idiom
+    (O_NOFOLLOW + fstat) living in two places instead of one -- an
+    accepted duplication, not an oversight.
+
+    Returns the real (st_dev, st_ino) identity of `worktree_path` if it
+    currently names a real, directly-reachable directory; None (never an
+    exception) for anything else -- missing, not a directory, a symlink
+    at any point, or any other OSError. `os.O_NOFOLLOW` means a symlink
+    AT worktree_path itself is refused outright by open(); it does NOT,
+    by itself, protect against a symlinked intermediate parent segment
+    (this repository's own mission worktrees are never nested under a
+    caller-controlled symlinked parent, unlike the multi-segment fd-chain
+    orchestrator/workspace.py's provisioning path defends -- so a single
+    O_NOFOLLOW open of the full path is the right amount of suspicion
+    here, not the multi-hop chain that a different, riskier construction
+    site needs).
+
+    None always means "cannot confirm a distinct identity," never "safe
+    to treat as different" -- every caller in this module must (and
+    does) fail closed on None, exactly as it fails closed on any other
+    unconfirmable ownership signal elsewhere in this file.
+
+    Also catches ValueError -- os.open() raises that (not OSError) for a
+    small class of malformed strings (an embedded NUL byte, notably) --
+    so a genuinely pathological worktree_path value still comes back
+    None rather than propagating, honoring "never raises" for real
+    rather than only for the OSError cases the design's own prose named
+    first."""
+    try:
+        fd = os.open(worktree_path, os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (OSError, ValueError):
+        return None
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return (st.st_dev, st.st_ino)
+
+
+def _mission_occupying_repository_root(mission_id: str, own_worktree_path: str) -> str | None:
     """Read-only, via the same disclosed chugel.list_missions()/
     get_mission() seams this module already uses nowhere else directly
     (both are among Chugel's three disclosed import seams -- see module
     docstring) -- no second state engine, no new persisted concept:
     ownership is entirely re-derived, every call, from the same
-    canonical Mission Record state (current state, and -- only for the
-    ambiguous BLOCKED case -- state_history) everything else in this
-    module already reads. A fixed frozenset membership test plus one
-    bounded history scan, nothing else -- no model output, no free-text
-    interpretation, no judgment call.
+    canonical Mission Record state (current state, state_history for the
+    ambiguous BLOCKED case, and now also repository.worktree_path)
+    everything else in this module already reads. A fixed frozenset
+    membership test, one bounded history scan, and one bounded real
+    filesystem identity comparison -- nothing else; no model output, no
+    free-text interpretation, no judgment call.
 
     Jarvis God Mode M1 Final Hardening Round (closing Emma's P3, round 3
-    of independent review): an unreadable listing (corrupt/invalid/unsafe)
-    is treated as OWNING, never skipped. The approved invariant is
-    unconditional -- "si el sistema no puede determinar con certeza que
-    repository_root está libre, NO puede permitir adquisición" -- and an
-    unreadable record is exactly that: undetermined, not confirmed free.
-    A prior version of this function skipped unreadable listings,
-    reasoning only about whether a corrupt record could itself newly
-    ACQUIRE ownership going forward (it cannot, since every dispatch
-    branch in this module starts with a successful chugel.get_mission()
-    read) -- but that reasoning never addressed a mission that was
-    already a real, legitimate owner (mid-BUILDING, say, with genuine
-    uncommitted changes in the shared tree) whose record then becomes
-    unreadable for any reason before release. Silently skipping such a
-    listing let a second mission acquire over it -- a real fail-open gap,
-    now closed: this function can no longer be fooled by a record it
-    cannot read into believing repository_root is free.
+    of independent review, unchanged by M2B): an unreadable listing
+    (corrupt/invalid/unsafe) is treated as OWNING, never skipped -- see
+    the fail-closed invariant this whole function still honors below.
+
+    M2B (Workspace Guard V2) -- what actually changed from M1: M1 treated
+    ANY other mission in an owning state, ANYWHERE, as occupying --
+    correct under M1's own assumption (every mission shares the exact
+    same repository_root, since nothing yet varies it), but stricter
+    than necessary once a mission can genuinely have its OWN, different,
+    real worktree. V2 adds one more, narrower question before blocking on
+    a same-state-owning candidate: does that candidate's real worktree
+    identity actually collide with THIS mission's own? Two owning-state
+    missions whose worktree_path values resolve to genuinely different,
+    both-confirmed (st_dev, st_ino) no longer block each other; anything
+    less certain than that -- either side unresolvable, or both resolving
+    to the SAME real directory (whether by identical path strings, by
+    two different strings that both traverse there, or by a symlink alias
+    that O_NOFOLLOW itself refuses and so resolves to None) -- still
+    blocks, exactly as M1 always did. Every other part of the ownership
+    determination (unreadable-listing handling, the BLOCKED
+    state_history scan, the owning-states table) is completely
+    unchanged from M1; only the final "is this actually the same tree"
+    question is new.
+
+    Honest scoping note (Emma Revision-2 P1, now made explicit rather
+    than left implicit): AUTHORIZED is deliberately excluded from
+    _REPOSITORY_ROOT_OWNING_STATES (pre-acquisition -- see that table's
+    own docstring), so an AUTHORIZED mission's own repository.worktree_path
+    is still whatever chugel.create_mission()'s placeholder left it as --
+    "(unconfirmed)" -- unless record_repository_state() has already run
+    for it (today, nothing automated calls that function -- see the M2
+    design's own finding 5). "(unconfirmed)" never resolves to a real
+    directory, so _resolve_worktree_identity() correctly returns None for
+    it, and this function's own fail-closed rule below (None on either
+    side -> occupied) means an AUTHORIZED mission with a still-placeholder
+    worktree_path is blocked by ANY other owning-state candidate, exactly
+    as M1's blanket rule always blocked it -- not a new restriction, a
+    faithful degrade to V1's own behavior for a mission whose own real
+    worktree identity genuinely isn't known yet. V2's concurrency benefit
+    only becomes observable once a mission's own worktree_path is a real,
+    resolvable path by the time it reaches an owning state -- wiring that
+    is out of scope here (a natural companion to the concurrent
+    supervisor work that will actually drive per-mission dispatch, not a
+    defect in this function).
+
+    Filesystem-identity-stability assumption (Emma Revision-2 P2, stated
+    explicitly): (st_dev, st_ino) is only a reliable distinct-identity
+    signal on a local, POSIX-conformant filesystem -- the same assumption
+    orchestrator/workspace.py's own fd-chain identity checks already rely
+    on (established, reviewed precedent, not a new risk this function
+    introduces). If mission worktrees are ever hosted somewhere that
+    violates this (some network/overlay/FUSE configurations do not
+    guarantee inode stability or uniqueness), both that module's and this
+    function's identity-based safety mechanisms would need
+    re-evaluation together.
+
+    Cost/DoS tradeoff (Emma Revision-2 P2, accepted and documented, not
+    silently absorbed): unlike M1, resolving a same-state-owning
+    candidate now costs one extra chugel.get_mission() read (to fetch
+    ITS repository.worktree_path -- list_missions()'s cheap listing does
+    not carry that field) plus one real os.open()/os.fstat() pair. Both
+    are bounded by the number of *owning-state* candidates -- realistically
+    a small, concurrent-mission-count number, never total mission count
+    (non-owning and unreadable candidates are still resolved via the
+    listing alone, exactly as before) -- matching this whole initiative's
+    established "minimal change over premature optimization" precedent
+    elsewhere in this codebase.
 
     Returns the other mission_id if repository_root is owned (or its
     status cannot be confirmed), None only when every other listing is
-    both readable and confirmed non-owning. `mission_id` itself is
+    both readable and confirmed non-owning or confirmed to occupy a
+    genuinely different, resolved real directory. `mission_id` itself is
     always excluded -- this checks for a DIFFERENT mission, never treats
     a mission's own current state as contention with itself."""
+    own_identity = _resolve_worktree_identity(own_worktree_path)
     for listing in chugel.list_missions():
         if listing["mission_id"] == mission_id:
             continue
         if not listing["readable"]:
             return listing["mission_id"]
-        if _mission_owns_repository_root(listing["mission_id"], listing["state"]):
+        if not _mission_owns_repository_root(listing["mission_id"], listing["state"]):
+            continue
+        try:
+            candidate_record = chugel.get_mission(listing["mission_id"])
+        except Exception:  # noqa: BLE001 -- fail-closed: cannot confirm the candidate's
+            # own real worktree identity, so cannot confirm it differs from ours; the
+            # unsafe direction here is the same one _mission_owns_repository_root()'s
+            # own BLOCKED-history read already refuses -- treating an unreadable
+            # record as somehow proven to occupy a DIFFERENT tree than ours.
             return listing["mission_id"]
+        candidate_identity = _resolve_worktree_identity(candidate_record["repository"]["worktree_path"])
+        if own_identity is None or candidate_identity is None:
+            return listing["mission_id"]
+        if own_identity == candidate_identity:
+            return listing["mission_id"]
+        # Both identities resolved, and they genuinely differ -- this
+        # candidate's real worktree is not the one this mission is about
+        # to touch; keep checking the remaining candidates.
     return None
+
+
+def _execution_root_is_canonical(repository_root: str, worktree_path: str) -> bool:
+    """Return True only when the executor and Mission Record name the same tree.
+
+    M2B never trusts the caller-supplied execution path independently of
+    Chugel's canonical repository binding.  Both paths must resolve through
+    the same no-follow identity primitive, and both must resolve to the same
+    directory.  Any missing, malformed, symlinked, swapped, or merely
+    different path fails closed before a runner or publish/merge executor is
+    called.
+    """
+    execution_identity = _resolve_worktree_identity(repository_root)
+    canonical_identity = _resolve_worktree_identity(worktree_path)
+    return (
+        execution_identity is not None
+        and canonical_identity is not None
+        and execution_identity == canonical_identity
+    )
 
 
 # Verification Hardening V1, Pillar 1 (contract checks) -- sixth
@@ -399,7 +542,13 @@ def advance(
         # here, before autonomous_runner.run_mission() ever runs -- never
         # after -- so a second mission is never even offered a dispatch
         # attempt while another one is confirmed already using it.
-        occupant = _mission_occupying_repository_root(mission_id)
+        canonical_root = record["repository"]["worktree_path"]
+        if not _execution_root_is_canonical(repository_root, canonical_root):
+            return CoordinatorReport(
+                "WORKSPACE_OCCUPIED", state,
+                reason="execution repository_root does not match the canonical mission worktree",
+            )
+        occupant = _mission_occupying_repository_root(mission_id, repository_root)
         if occupant is not None:
             return CoordinatorReport(
                 "WORKSPACE_OCCUPIED", state,
@@ -441,7 +590,18 @@ def advance(
         # _mission_occupying_repository_root()'s own mission_id check,
         # so this is a genuine check for a DIFFERENT occupant, not a
         # mission blocking its own continued progress.
-        occupant = _mission_occupying_repository_root(mission_id)
+        canonical_repository = record["repository"]
+        if not _execution_root_is_canonical(repository_root, canonical_repository["worktree_path"]):
+            return CoordinatorReport(
+                "WORKSPACE_OCCUPIED", state,
+                reason="execution repository_root does not match the canonical mission worktree",
+            )
+        if branch != canonical_repository["branch"]:
+            return CoordinatorReport(
+                "WORKSPACE_OCCUPIED", state,
+                reason="publication branch does not match the canonical mission branch",
+            )
+        occupant = _mission_occupying_repository_root(mission_id, repository_root)
         if occupant is not None:
             return CoordinatorReport(
                 "WORKSPACE_OCCUPIED", state,
@@ -478,7 +638,13 @@ def advance(
     if state == "MERGING":
         # Same workspace guard -- merge_executor.run() below does a real
         # `git`/`gh` merge against repository_root.
-        occupant = _mission_occupying_repository_root(mission_id)
+        canonical_root = record["repository"]["worktree_path"]
+        if not _execution_root_is_canonical(repository_root, canonical_root):
+            return CoordinatorReport(
+                "WORKSPACE_OCCUPIED", state,
+                reason="execution repository_root does not match the canonical mission worktree",
+            )
+        occupant = _mission_occupying_repository_root(mission_id, repository_root)
         if occupant is not None:
             return CoordinatorReport(
                 "WORKSPACE_OCCUPIED", state,

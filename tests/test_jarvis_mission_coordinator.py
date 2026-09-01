@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import tempfile
 import unittest
 import unittest.mock as mock
@@ -40,6 +41,8 @@ class CoordinatorTestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._original_missions_dir = chugel._MISSIONS_DIR
         chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+        self._repository_root = Path(self._tmpdir.name) / "repository"
+        self._repository_root.mkdir()
         self.adapters = {}
 
     def tearDown(self):
@@ -55,7 +58,7 @@ class CoordinatorTestCase(unittest.TestCase):
     def _mission_authorized(self):
         mid = self._mission_scope_awaiting()
         chugel.record_repository_state(mid, {
-            "worktree_path": "/tmp/synthetic-worktree", "branch": "overnight/synthetic",
+            "worktree_path": str(self._repository_root), "branch": "overnight/synthetic",
             "base_sha": "b" * 40, "isolation_confirmed": True,
         })
         chugel.decide_gate(mid, "scope_authorization", _scope_gate_approval())
@@ -64,7 +67,7 @@ class CoordinatorTestCase(unittest.TestCase):
 
     def _advance(self, mid, **overrides):
         kwargs = dict(
-            repository_root="/tmp/repo", branch="b", pr_title="t",
+            repository_root=str(self._repository_root), branch="overnight/synthetic", pr_title="t",
             ci_poll_timeout_seconds=5, ci_poll_interval_seconds=0.01,
         )
         kwargs.update(overrides)
@@ -208,7 +211,7 @@ class GateConsumptionTests(CoordinatorTestCase):
     def test_scope_gate_approved_transitions_to_authorized(self):
         mid = self._mission_scope_awaiting()
         chugel.record_repository_state(mid, {
-            "worktree_path": "/tmp/synthetic-worktree", "branch": "overnight/synthetic",
+            "worktree_path": str(self._repository_root), "branch": "overnight/synthetic",
             "base_sha": "b" * 40, "isolation_confirmed": True,
         })
         chugel.decide_gate(mid, "scope_authorization", _scope_gate_approval())
@@ -416,6 +419,37 @@ class WorkspaceGuardTests(CoordinatorTestCase):
     time), and must never deadlock two missions that both just got
     authorized at the same moment."""
 
+    def setUp(self):
+        super().setUp()
+        # M2B (Workspace Guard V2): a second, separate real tempdir --
+        # distinct from chugel._MISSIONS_DIR, which lives under the base
+        # CoordinatorTestCase tempdir -- for tests that need genuinely
+        # real, resolvable worktree directories to exercise
+        # _resolve_worktree_identity() against, rather than the fixed,
+        # deliberately-not-a-real-directory placeholder path
+        # ("/tmp/synthetic-worktree") every mission built via
+        # _mission_authorized()/_mission_scope_awaiting() already uses.
+        self._worktrees_tmpdir = tempfile.TemporaryDirectory()
+        self._worktrees_root = Path(self._worktrees_tmpdir.name)
+
+    def tearDown(self):
+        self._worktrees_tmpdir.cleanup()
+        super().tearDown()
+
+    def _mission_authorized_at(self, worktree_path):
+        """Same shape as CoordinatorTestCase._mission_authorized(), except
+        the worktree_path is caller-supplied instead of the fixed
+        "/tmp/synthetic-worktree" placeholder -- for tests that need a
+        real, resolvable (or deliberately unresolvable) directory."""
+        mid = self._mission_scope_awaiting()
+        chugel.record_repository_state(mid, {
+            "worktree_path": str(worktree_path), "branch": "overnight/synthetic",
+            "base_sha": "b" * 40, "isolation_confirmed": True,
+        })
+        chugel.decide_gate(mid, "scope_authorization", _scope_gate_approval())
+        chugel.transition(mid, "AUTHORIZED", actor="jose", reason="scope approved")
+        return mid
+
     def _mission_publish_awaiting(self):
         mid = self._mission_authorized()
         self.adapters.update({
@@ -481,7 +515,10 @@ class WorkspaceGuardTests(CoordinatorTestCase):
         stub is the positive proof the guard did not block."""
         stub = mock.Mock(return_value=mock.Mock(status="HUMAN_ACTION_REQUIRED", state="BUILDING", reason="stub"))
         with mock.patch("jarvis.mission_coordinator.autonomous_runner.run_mission", stub):
-            report = self._advance(mid)
+            report = self._advance(
+                mid,
+                repository_root=chugel.get_mission(mid)["repository"]["worktree_path"],
+            )
         return report, stub
 
     def test_occupied_mission_never_blocks_itself(self):
@@ -704,6 +741,267 @@ class WorkspaceGuardTests(CoordinatorTestCase):
         stub.assert_not_called()
         self.assertEqual("WORKSPACE_OCCUPIED", report.status)
         self.assertIn(corrupt_id, report.reason)
+
+    # -- M2B (Workspace Guard V2): real-filesystem-identity comparison ----
+
+    def _mission_authorized_with_placeholder_repository(self):
+        """AUTHORIZED without ever calling record_repository_state() --
+        the schema/validator's own evidence checker for the AUTHORIZED
+        transition (_evidence_authorized in orchestrator/validator.py)
+        requires only that scope_authorization was approved, never that
+        repository state has been recorded; isolation_confirmed is only
+        required starting at BUILDING. So this is a real, reachable
+        Mission Record shape: an AUTHORIZED mission whose own
+        repository.worktree_path is still chugel's own placeholder,
+        "(unconfirmed)" (_default_placeholder_repository())."""
+        mid = self._mission_scope_awaiting()
+        chugel.decide_gate(mid, "scope_authorization", _scope_gate_approval())
+        chugel.transition(mid, "AUTHORIZED", actor="jose", reason="scope approved")
+        return mid
+
+    def test_two_missions_with_genuinely_different_real_worktrees_do_not_block_each_other(self):
+        """The new capability V2 adds: two owning-state missions no
+        longer collide just because both are in an owning state -- only
+        if their real worktree identities actually collide."""
+        dir_a = self._worktrees_root / "mission-a"
+        dir_a.mkdir()
+        dir_b = self._worktrees_root / "mission-b"
+        dir_b.mkdir()
+        occupant = self._mission_authorized_at(dir_a)
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        second = self._mission_authorized_at(dir_b)
+        report, stub = self._advance_with_stubbed_dispatch(second)
+        stub.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_different_path_strings_via_ordinary_traversal_to_same_real_dir_collide(self):
+        """Two DIFFERENT path strings -- no symlink anywhere -- that both
+        resolve, via ordinary '..'-traversal, to the identical real
+        directory. This must be caught by the identity-EQUALITY branch
+        (matching (st_dev, st_ino)), not the None-resolution branch --
+        asserted directly below, not merely inferred from the final
+        WORKSPACE_OCCUPIED report."""
+        real_dir = self._worktrees_root / "shared-target"
+        real_dir.mkdir()
+        sibling = self._worktrees_root / "sibling"
+        sibling.mkdir()
+        alt_path = str(sibling / ".." / "shared-target")
+        self.assertNotEqual(str(real_dir), alt_path)  # genuinely different strings
+
+        occupant = self._mission_authorized_at(real_dir)
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        second = self._mission_authorized_at(alt_path)
+
+        own_identity = mission_coordinator._resolve_worktree_identity(alt_path)
+        candidate_identity = mission_coordinator._resolve_worktree_identity(str(real_dir))
+        self.assertIsNotNone(own_identity)
+        self.assertIsNotNone(candidate_identity)
+        self.assertEqual(own_identity, candidate_identity)  # the equality branch, not None
+
+        report = self._advance(second, repository_root=alt_path)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+
+    def test_symlink_aliasing_another_missions_real_worktree_collides_via_none_branch(self):
+        """A symlink at one mission's own worktree_path pointing at
+        another mission's real directory -- O_NOFOLLOW refuses to
+        traverse it, so this mission's own identity resolves to None,
+        and the guard's fail-closed rule (None on either side ->
+        occupied) treats it as colliding via the None branch, never by
+        silently resolving through the symlink."""
+        real_dir = self._worktrees_root / "occupant-real"
+        real_dir.mkdir()
+        occupant = self._mission_authorized_at(real_dir)
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+
+        alias = self._worktrees_root / "second-alias"
+        os.symlink(real_dir, alias)
+        second = self._mission_authorized_at(alias)
+
+        self.assertIsNone(mission_coordinator._resolve_worktree_identity(str(alias)))  # never followed
+
+        report = self._advance(second, repository_root=str(alias))
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn("does not match", report.reason)
+
+    def test_one_resolvable_one_missing_worktree_fails_closed_as_colliding(self):
+        """The occupant's own worktree_path names a directory that was
+        never created (deleted/missing) -- unresolvable. Fail-closed:
+        treated as colliding even though the second mission's own real
+        worktree is genuinely resolvable and (were the occupant's path
+        also resolvable) might well prove to be a different directory."""
+        missing_dir = self._worktrees_root / "never-created"
+        occupant = self._mission_authorized_at(missing_dir)
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+
+        real_dir = self._worktrees_root / "second-real"
+        real_dir.mkdir()
+        second = self._mission_authorized_at(real_dir)
+
+        self.assertIsNone(mission_coordinator._resolve_worktree_identity(str(missing_dir)))
+
+        report = self._advance(second, repository_root=str(real_dir))
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+
+    def test_authorized_mission_with_placeholder_worktree_path_is_still_blocked_v1_style(self):
+        """Emma Revision-2 P1 regression pin: an AUTHORIZED mission whose
+        own worktree_path is still the literal schema placeholder
+        "(unconfirmed)" (record_repository_state() never having run for
+        it) must still be reported as blocked by any real, unrelated
+        owning-state candidate elsewhere -- byte-identical to V1's own
+        blanket "any owning-state candidate blocks" rule, not a new
+        restriction and not a case where V2's own-identity-is-None
+        somehow makes it MORE permissive."""
+        real_dir = self._worktrees_root / "genuinely-different"
+        real_dir.mkdir()
+        occupant = self._mission_authorized_at(real_dir)
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+
+        second = self._mission_authorized_with_placeholder_repository()
+        self.assertEqual("(unconfirmed)", chugel.get_mission(second)["repository"]["worktree_path"])
+
+        report = self._advance(second)
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn("does not match", report.reason)
+        self.assertEqual("AUTHORIZED", chugel.get_mission(second)["state"])  # no side effect
+
+    def test_m1_fleet_shape_shared_real_worktree_path_is_still_mutually_exclusive(self):
+        """Regression pin for the exact current M1 fleet shape: multiple
+        owning-state missions that all share the literal SAME real
+        worktree path (today's production reality, since nothing yet
+        varies it -- see the M2 design's own finding 5). Behavior must
+        be byte-identical to what V1 already did: still mutually
+        exclusive, this time via the identity-equality branch rather
+        than the (also-present-in-this-codebase) unresolvable-placeholder
+        None branch the other WorkspaceGuardTests already cover."""
+        shared_dir = self._worktrees_root / "shared-fleet-path"
+        shared_dir.mkdir()
+        occupant = self._mission_authorized_at(shared_dir)
+        chugel.transition(occupant, "BUILDING", actor="chugel", reason="x")
+        second = self._mission_authorized_at(shared_dir)
+
+        report = self._advance(second, repository_root=str(shared_dir))
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn(occupant, report.reason)
+        self.assertEqual("AUTHORIZED", chugel.get_mission(second)["state"])
+
+    def test_build_dispatch_refuses_execution_root_different_from_canonical_worktree(self):
+        mid = self._mission_authorized()
+        different_root = self._worktrees_root / "different-build-root"
+        different_root.mkdir()
+        runner = mock.Mock()
+        with mock.patch("jarvis.mission_coordinator.autonomous_runner.run_mission", runner):
+            report = self._advance(mid, repository_root=str(different_root))
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn("does not match", report.reason)
+        runner.assert_not_called()
+        self.assertEqual("AUTHORIZED", chugel.get_mission(mid)["state"])
+
+    def test_publish_refuses_execution_root_different_from_canonical_worktree(self):
+        mid = self._mission_publishing()
+        different_root = self._worktrees_root / "different-publish-root"
+        different_root.mkdir()
+        publisher = mock.Mock()
+        with mock.patch("jarvis.mission_coordinator.publish_executor.run", publisher):
+            report = self._advance(mid, repository_root=str(different_root))
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn("does not match", report.reason)
+        publisher.assert_not_called()
+        self.assertEqual("PUBLISHING", chugel.get_mission(mid)["state"])
+
+    def test_merge_refuses_execution_root_different_from_canonical_worktree(self):
+        mid = self._mission_merging()
+        different_root = self._worktrees_root / "different-merge-root"
+        different_root.mkdir()
+        merger = mock.Mock()
+        with mock.patch("jarvis.mission_coordinator.merge_executor.run", merger):
+            report = self._advance(mid, repository_root=str(different_root))
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn("does not match", report.reason)
+        merger.assert_not_called()
+        self.assertEqual("MERGING", chugel.get_mission(mid)["state"])
+
+    def test_publish_refuses_branch_different_from_canonical_binding(self):
+        mid = self._mission_publishing()
+        publisher = mock.Mock()
+        with mock.patch("jarvis.mission_coordinator.publish_executor.run", publisher):
+            report = self._advance(mid, branch="other/branch")
+        self.assertEqual("WORKSPACE_OCCUPIED", report.status)
+        self.assertIn("branch does not match", report.reason)
+        publisher.assert_not_called()
+
+    def test_matching_build_root_reaches_runner(self):
+        mid = self._mission_authorized()
+        report, runner = self._advance_with_stubbed_dispatch(mid)
+        runner.assert_called_once()
+        self.assertNotEqual("WORKSPACE_OCCUPIED", report.status)
+
+    def test_matching_publish_root_and_branch_reach_publisher(self):
+        mid = self._mission_publishing()
+        publisher = mock.Mock(return_value=mock.Mock(
+            status="BLOCKED", state="PUBLISHING", reason="stub",
+        ))
+        with mock.patch("jarvis.mission_coordinator.publish_executor.run", publisher):
+            report = self._advance(mid)
+        publisher.assert_called_once()
+        self.assertEqual("BLOCKED", report.status)
+
+    def test_matching_merge_root_reaches_merger(self):
+        mid = self._mission_merging()
+        merger = mock.Mock(return_value=mock.Mock(
+            status="BLOCKED", state="MERGING", reason="stub",
+        ))
+        with mock.patch("jarvis.mission_coordinator.merge_executor.run", merger):
+            report = self._advance(mid)
+        merger.assert_called_once()
+        self.assertEqual("BLOCKED", report.status)
+
+
+class WorktreeIdentityResolutionTests(unittest.TestCase):
+    """_resolve_worktree_identity() in isolation -- real filesystem only,
+    no mocking of os.open/os.fstat: this is exactly the primitive the
+    safety property depends on, so it is exercised against a real
+    tempfile.TemporaryDirectory(), matching this whole codebase's
+    testing philosophy for filesystem-touching code."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_real_directory_resolves_to_its_real_identity(self):
+        real_dir = self._root / "real"
+        real_dir.mkdir()
+        identity = mission_coordinator._resolve_worktree_identity(str(real_dir))
+        self.assertIsNotNone(identity)
+        st = os.stat(real_dir)
+        self.assertEqual((st.st_dev, st.st_ino), identity)
+
+    def test_missing_path_resolves_to_none(self):
+        missing = self._root / "does-not-exist"
+        self.assertIsNone(mission_coordinator._resolve_worktree_identity(str(missing)))
+
+    def test_symlink_at_the_path_resolves_to_none_never_followed(self):
+        real_dir = self._root / "real"
+        real_dir.mkdir()
+        link = self._root / "link"
+        os.symlink(real_dir, link)
+        self.assertIsNone(mission_coordinator._resolve_worktree_identity(str(link)))
+
+    def test_plain_file_not_a_directory_resolves_to_none(self):
+        plain_file = self._root / "file.txt"
+        plain_file.write_text("not a directory", encoding="utf-8")
+        self.assertIsNone(mission_coordinator._resolve_worktree_identity(str(plain_file)))
+
+    def test_never_raises_on_a_completely_bogus_path(self):
+        # NUL bytes make open() raise ValueError rather than OSError on
+        # some platforms -- this primitive's contract is "never raises,"
+        # so even a pathologically malformed string must come back None,
+        # not propagate.
+        self.assertIsNone(mission_coordinator._resolve_worktree_identity("not\x00a\x00path"))
 
 
 class VocabularioCerradoDeHumanGatesStatusTests(CoordinatorTestCase):
