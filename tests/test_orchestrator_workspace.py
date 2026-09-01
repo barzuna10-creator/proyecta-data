@@ -32,6 +32,28 @@ def _run(*args, cwd):
     return result.stdout.strip()
 
 
+def _replace_with_a_genuinely_different_directory(path: Path) -> None:
+    """Simulates 'this path's real, physical identity changed' for a
+    test -- WITHOUT relying on rmtree()-then-mkdir() at the same path,
+    which is platform-dependent and unreliable: on at least one real
+    Linux filesystem (confirmed by a genuine CI failure on this exact
+    technique, not merely theorized), a freed inode can be immediately
+    reallocated to a directory created moments later at the same path,
+    giving the "replacement" the SAME (st_dev, st_ino) as the original --
+    silently defeating the very identity-mismatch scenario a test using
+    that technique means to simulate. This allocates the replacement
+    directory at a SEPARATE path first (getting its own, unrelated inode
+    while the original still exists, before any removal happens at all)
+    and only then removes the original and renames the pre-existing
+    replacement into place -- a genuinely different identity, reliably,
+    regardless of any allocator's own reuse behavior or timing."""
+    import shutil as _shutil
+    swap = path.parent / f"{path.name}.swap-{uuid.uuid4()}"
+    swap.mkdir()
+    _shutil.rmtree(path)
+    swap.rename(path)
+
+
 def _init_base_repo(tmp: Path) -> tuple[Path, str]:
     base = tmp / "base"
     base.mkdir()
@@ -547,9 +569,7 @@ class ReasonCodeExhaustivenessTests(unittest.TestCase):
             def _tamper_after_add(argv, *args, **kwargs):
                 result = real_run(argv, *args, **kwargs)
                 if "add" in argv and result.returncode == 0:
-                    import shutil as _shutil
-                    _shutil.rmtree(path4)
-                    path4.mkdir()
+                    _replace_with_a_genuinely_different_directory(path4)
                 return result
 
             with mock.patch("subprocess.run", side_effect=_tamper_after_add):
@@ -682,17 +702,15 @@ class RemovalRaceAdversarialTests(WorkspaceTestCase):
         def _tamper_on_second_call(resolved_base_root, mission_id_arg):
             call_count["n"] += 1
             if call_count["n"] == 2:
-                # Between our own first and second confirmation: delete
+                # Between our own first and second confirmation: replace
                 # the real (non-empty, real-checkout-content) directory
-                # and recreate a DIFFERENT real, empty directory in its
-                # place -- a different inode, not a symlink, so this
-                # specifically tests the identity comparison, not the
-                # symlink check. shutil.rmtree here is the TEST'S own
-                # simulated-attacker action, never the module's own code
-                # (which never performs manual cleanup of any kind).
-                import shutil as _shutil
-                _shutil.rmtree(path)
-                path.mkdir()
+                # with a DIFFERENT real, empty directory -- a genuinely
+                # different identity, not a symlink, so this specifically
+                # tests the identity comparison, not the symlink check.
+                # This is the TEST's own simulated-attacker action,
+                # never the module's own code (which never performs
+                # manual cleanup of any kind).
+                _replace_with_a_genuinely_different_directory(path)
             return real_capture(resolved_base_root, mission_id_arg)
 
         with mock.patch.object(workspace, "_capture_leaf_identity", side_effect=_tamper_on_second_call), \
@@ -864,9 +882,7 @@ class ProvisioningRaceAdversarialTests(WorkspaceTestCase):
                 # git worktree add just genuinely succeeded -- tamper
                 # with the destination's identity before this module's
                 # own post-add fd-based re-check runs.
-                import shutil
-                shutil.rmtree(path)
-                path.mkdir()  # a different, fresh directory -- different inode
+                _replace_with_a_genuinely_different_directory(path)
             return result
 
         with mock.patch("subprocess.run", side_effect=_patched_run):
