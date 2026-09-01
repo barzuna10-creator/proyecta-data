@@ -39,13 +39,20 @@ class SupervisorTestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._original_missions_dir = chugel._MISSIONS_DIR
         chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+        self._repository_root = Path(self._tmpdir.name) / "repository"
+        self._repository_root.mkdir()
 
     def tearDown(self):
         chugel._MISSIONS_DIR = self._original_missions_dir
         self._tmpdir.cleanup()
 
     def _supervisor(self):
-        return MissionSupervisor(adapters={}, advance_kwargs=_ADVANCE_KWARGS)
+        kwargs = dict(_ADVANCE_KWARGS)
+        kwargs.update(
+            repository_root=str(self._repository_root),
+            branch="overnight/synthetic",
+        )
+        return MissionSupervisor(adapters={}, advance_kwargs=kwargs)
 
 
 class StateClassificationTests(unittest.TestCase):
@@ -380,7 +387,7 @@ class GateRecoveryCrashWindowTests(SupervisorTestCase):
         not a new authorization."""
         mid = self._scope_awaiting_mission()
         chugel.record_repository_state(mid, {
-            "worktree_path": "/tmp/synthetic-worktree", "branch": "overnight/synthetic",
+            "worktree_path": str(self._repository_root), "branch": "overnight/synthetic",
             "base_sha": "b" * 40, "isolation_confirmed": True,
         })
         chugel.decide_gate(mid, "scope_authorization", _scope_gate_approval())

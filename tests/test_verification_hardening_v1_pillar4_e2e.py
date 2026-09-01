@@ -115,6 +115,8 @@ class Pillar4E2ETestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._original_missions_dir = chugel._MISSIONS_DIR
         chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+        self._repository_root = Path(self._tmpdir.name) / "repository"
+        self._repository_root.mkdir()
 
     def tearDown(self):
         chugel._MISSIONS_DIR = self._original_missions_dir
@@ -125,7 +127,9 @@ class Pillar4E2ETestCase(unittest.TestCase):
         no attribute, thread, or object is ever shared with a previous
         call's return value. This IS the "restart" this file's tests
         inject."""
-        return MissionSupervisor(adapters=adapters, advance_kwargs=dict(_ADVANCE_KWARGS))
+        kwargs = dict(_ADVANCE_KWARGS)
+        kwargs["repository_root"] = str(self._repository_root)
+        return MissionSupervisor(adapters=adapters, advance_kwargs=kwargs)
 
     def _notify_and_wait(self, supervisor: MissionSupervisor) -> None:
         supervisor.notify()
@@ -138,7 +142,7 @@ class Pillar4E2ETestCase(unittest.TestCase):
         m = _create_intake_mission("pillar4 e2e mission")
         mid = m["mission_id"]
         chugel.record_repository_state(mid, {
-            "worktree_path": "/tmp/pillar4-e2e-synthetic-worktree",
+            "worktree_path": str(self._repository_root),
             "branch": "overnight/pillar4-e2e",
             "base_sha": "b" * 40,
             "isolation_confirmed": True,
