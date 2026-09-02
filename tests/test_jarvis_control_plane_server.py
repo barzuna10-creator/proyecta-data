@@ -9,6 +9,7 @@ import json
 import threading
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 import urllib.error
 import urllib.request
@@ -26,9 +27,13 @@ class ControlPlaneServerTestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._original_missions_dir = chugel._MISSIONS_DIR
         chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+        self.workspace_root = Path(self._tmpdir.name).resolve() / "workspace"
+        self.workspace_root.mkdir()
+        subprocess.run(["git", "init"], cwd=self.workspace_root, check=True, capture_output=True)
         config = ControlPlaneConfig(
             host="127.0.0.1", port=0, token=_TOKEN,
             store_root=str(Path(self._tmpdir.name) / "jarvis"),
+            mission_repository_root=str(self.workspace_root),
         )
         self.server = build_server(config)
         self.port = self.server.server_address[1]
@@ -1025,7 +1030,7 @@ class ObjectiveDecompositionFlowTests(ControlPlaneServerTestCase):
         self.assertIsNone(body["gate"])
         self.assertEqual((), self.server.store.list_objective_ids())
 
-    def test_each_decomposed_draft_is_independently_authorizable(self):
+    def test_decomposed_draft_without_reviewed_repository_context_fails_closed(self):
         items = (self._item("Item A"), self._item("Item B"))
         with self._patch_converse_with_decomposition("Here's a breakdown.", "OBJECTIVE", items):
             _, body = self._request("POST", "/v1/conversation", {"message": "improve module X"})
@@ -1036,8 +1041,8 @@ class ObjectiveDecompositionFlowTests(ControlPlaneServerTestCase):
             "action": "authorize", "confirmation": "I authorize this action now",
             "digest": envelope.digest,
         })
-        self.assertEqual(200, status)
-        self.assertEqual(1, len(chugel.list_missions()))
+        self.assertEqual(409, status)
+        self.assertEqual(0, len(chugel.list_missions()))
         # The second draft remains completely untouched -- no mission,
         # no authorization effect, independent of the first.
         second_draft_id = body["decomposition"][1]["id"]

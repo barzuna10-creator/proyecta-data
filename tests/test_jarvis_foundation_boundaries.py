@@ -36,7 +36,9 @@ COORDINATOR_CHUGEL_MODULE = "mission_coordinator.py"
 # before real dispatch/publish/merge work against it -- never writes
 # anything, same read-only nature list_missions() already has everywhere
 # else it is used (jarvis.mission_query's own exact-two-calls contract).
-ALLOWED_COORDINATOR_CHUGEL_CALLS = {"get_mission", "transition", "list_missions"}
+ALLOWED_COORDINATOR_CHUGEL_CALLS = {
+    "get_mission", "transition", "list_missions", "record_repository_state",
+}
 KNOWLEDGE_MODULES = {
     "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",
     "jarvis.learning_projection", "jarvis.knowledge_retrieval", "jarvis.repository_freshness",
@@ -62,7 +64,8 @@ def _chugel_boundary_violations(filename: str, source: str) -> tuple[str, ...]:
     """Statically reject Chugel access outside the three disclosed seams:
     mission_query.py (read-only, exact two calls), mission_write.py
     (create_mission/decide_gate/transition/get_mission), and
-    mission_coordinator.py (get_mission only)."""
+    mission_coordinator.py (lifecycle reads/transitions plus the single
+    repository-binding write established by M2C)."""
     tree = ast.parse(source, filename=filename)
     if filename == "mission_query.py":
         allowed_module, allowed_calls, exact = True, ALLOWED_CHUGEL_CALLS, True
@@ -141,6 +144,19 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
                 (),
                 path,
             )
+
+    def test_only_mission_workspace_imports_orchestrator_workspace(self):
+        for path in (ROOT / "jarvis").glob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            accesses = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "orchestrator":
+                    accesses.extend(alias.name for alias in node.names if alias.name == "workspace")
+                if isinstance(node, ast.Import) and any(alias.name == "orchestrator.workspace" for alias in node.names):
+                    accesses.append("workspace")
+            if accesses:
+                self.assertEqual("mission_workspace.py", path.name)
 
     def test_chugel_boundary_rejects_adversarial_import_and_call_forms(self):
         cases = {

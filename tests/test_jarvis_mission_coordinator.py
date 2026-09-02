@@ -16,6 +16,7 @@ from pathlib import Path
 
 import orchestrator.chugel as chugel
 from jarvis import mission_coordinator
+from jarvis.mission_workspace import MissionWorkspaceBinding
 from orchestrator.autonomous_runner import run_mission
 from tests.test_orchestrator_autonomous_runner import (
     _FakeAdapter,
@@ -130,6 +131,30 @@ class MergeAwaitingRepairIntegrationTests(CoordinatorTestCase):
         self.assertEqual(report.status, "GATE_REQUIRED")
         self.assertEqual(report.gate_name, "merge_authorization")
         self.assertEqual(chugel.get_mission(mid)["publish"]["commit_sha"], _HEAD_SHA)
+
+    def test_manager_enabled_legacy_missing_sha_repairs_before_exact_head_check(self):
+        mid = self._mission_authorized()
+        self.adapters.update({
+            "codex": _FakeAdapter([_emilio_completed_template(attempt=0)]),
+            "claude": _FakeAdapter([_emma_completed_template(attempt=0, verdict="PASS")]),
+        })
+        run_mission(mid, self.adapters, max_total_attempts=4)
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="x")
+        chugel.record_publish_pr(mid, "https://example.invalid/pr/1", 1)
+        chugel.transition(mid, "CI_PENDING", actor="chugel", reason="x")
+        chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="x")
+        record = chugel.get_mission(mid)
+        binding = MissionWorkspaceBinding(
+            record["repository"]["worktree_path"], record["repository"]["branch"],
+            record["repository"]["base_sha"], True, _HEAD_SHA,
+        )
+        manager = mock.Mock()
+        manager.verify.return_value = binding
+        with mock.patch("orchestrator.publish_identity_repair._live_pr_head_sha", return_value=_HEAD_SHA):
+            report = self._advance(mid, workspace_manager=manager)
+        self.assertEqual("GATE_REQUIRED", report.status, report.reason)
+        self.assertEqual(_HEAD_SHA, chugel.get_mission(mid)["publish"]["commit_sha"])
+        self.assertGreaterEqual(manager.verify.call_count, 2)
 
 
 class IntakeAdvanceTests(CoordinatorTestCase):
@@ -406,6 +431,33 @@ class ExecutiveSummaryTests(CoordinatorTestCase):
         self.assertIn("STOPPED: PUBLISH_AWAITING_AUTHORIZATION", summary)
         self.assertIn("a.py", summary)  # from _builder_evidence()'s changed_files fixture
         self.assertIn("PASS", summary)
+
+
+class M2CWorkspaceEstablishmentTests(CoordinatorTestCase):
+    def test_authorized_mission_is_provisioned_recorded_reread_then_dispatched(self):
+        mid = self._mission_scope_awaiting()
+        chugel.decide_gate(mid, "scope_authorization", _scope_gate_approval())
+        chugel.transition(mid, "AUTHORIZED", actor="jose", reason="scope approved")
+        worktree = Path(self._tmpdir.name) / "mission-worktree"
+        worktree.mkdir()
+        binding = MissionWorkspaceBinding(
+            str(worktree), f"mission/{mid}", "0" * 40, True, "0" * 40,
+        )
+        manager = mock.Mock()
+        manager.ensure.return_value = binding
+        manager.verify.return_value = binding
+        runner_result = mock.Mock(status="HUMAN_ACTION_REQUIRED", state="AUTHORIZED", reason="bounded stop")
+        with mock.patch.object(mission_coordinator.autonomous_runner, "run_mission", return_value=runner_result) as run, \
+             mock.patch.object(mission_coordinator, "_execution_root_is_canonical", return_value=True):
+            report = mission_coordinator.advance(
+                mid, {}, repository_root="ignored", branch="ignored", pr_title="t",
+                workspace_manager=manager,
+            )
+        self.assertEqual("HUMAN_ACTION_REQUIRED", report.status, report.reason)
+        manager.ensure.assert_called_once()
+        manager.verify.assert_called_once()
+        self.assertTrue(chugel.get_mission(mid)["repository"]["isolation_confirmed"])
+        run.assert_called_once()
 
 
 class WorkspaceGuardTests(CoordinatorTestCase):

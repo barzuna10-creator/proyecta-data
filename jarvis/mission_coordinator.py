@@ -59,6 +59,7 @@ from orchestrator import autonomous_runner, chugel, merge_executor, publish_exec
 from orchestrator import publish_identity_repair
 from orchestrator.agent_invocation import InvocationNotAuthorized
 from orchestrator.validator import GATE_STATUSES
+from jarvis.mission_workspace import MissionWorkspaceError, MissionWorkspaceManager
 
 _GATE_STATES = frozenset({
     "SCOPE_AWAITING_AUTHORIZATION", "PUBLISH_AWAITING_AUTHORIZATION", "MERGE_AWAITING_AUTHORIZATION",
@@ -506,9 +507,41 @@ def advance(
     ci_poll_timeout_seconds: float = DEFAULT_CI_POLL_TIMEOUT_SECONDS,
     ci_poll_interval_seconds: float = 30.0,
     build_review_deadline: float | None = None,
+    workspace_manager: MissionWorkspaceManager | None = None,
 ) -> CoordinatorReport:
     record = chugel.get_mission(mission_id)
     state = record["state"]
+
+    if workspace_manager is not None and state in (_REPOSITORY_ROOT_OWNING_STATES | {"AUTHORIZED"}):
+        try:
+            if state == "AUTHORIZED" and record["repository"].get("isolation_confirmed") is False:
+                binding = workspace_manager.ensure(mission_id, record["repository"])
+                chugel.record_repository_state(mission_id, {
+                    "worktree_path": binding.worktree_path,
+                    "branch": binding.branch,
+                    "base_sha": binding.base_sha,
+                    "isolation_confirmed": True,
+                })
+                record = chugel.get_mission(mission_id)
+            binding = workspace_manager.verify(mission_id, record["repository"])
+        except (MissionWorkspaceError, Exception) as exc:
+            return CoordinatorReport("WORKSPACE_OCCUPIED", state, reason=f"workspace verification failed: {exc.__class__.__name__}")
+        repository_root = binding.worktree_path
+        branch = binding.branch
+        publish_sha = (record.get("publish") or {}).get("commit_sha")
+        if state == "MERGE_AWAITING_AUTHORIZATION" and not publish_sha:
+            publish_identity_repair.repair_if_needed(mission_id, gh_executable=gh_executable)
+            record = chugel.get_mission(mission_id)
+            if record["state"] == "BLOCKED":
+                return CoordinatorReport("BLOCKED", "BLOCKED", reason=_last_transition_reason(record))
+            binding = workspace_manager.verify(mission_id, record["repository"])
+            publish_sha = (record.get("publish") or {}).get("commit_sha")
+        if state in {"AUTHORIZED", "BUILDING", "VERIFYING", "AWAITING_REVIEW", "REVIEWING", "CHANGES_REQUIRED", "CORRECTING"}:
+            if binding.head_sha != record["repository"]["base_sha"]:
+                return CoordinatorReport("WORKSPACE_OCCUPIED", state, reason="build/review workspace HEAD differs from base_sha")
+        elif state in {"CI_PENDING", "MERGE_AWAITING_AUTHORIZATION", "MERGING"}:
+            if not publish_sha or binding.head_sha != publish_sha:
+                return CoordinatorReport("WORKSPACE_OCCUPIED", state, reason="publication workspace HEAD differs from canonical publish SHA")
 
     # Shared by every branch below that recurses after completing a
     # mechanical step -- re-derives the next action from the freshly-
@@ -521,7 +554,7 @@ def advance(
                         pr_title=pr_title, git_executable=git_executable, gh_executable=gh_executable,
                         ci_poll_timeout_seconds=ci_poll_timeout_seconds,
                         ci_poll_interval_seconds=ci_poll_interval_seconds,
-                        build_review_deadline=build_review_deadline)
+                        build_review_deadline=build_review_deadline, workspace_manager=workspace_manager)
 
     if state == "INTAKE":
         # The one transition this function ever makes without a human
@@ -574,7 +607,7 @@ def advance(
                             pr_title=pr_title, git_executable=git_executable, gh_executable=gh_executable,
                             ci_poll_timeout_seconds=ci_poll_timeout_seconds,
                             ci_poll_interval_seconds=ci_poll_interval_seconds,
-                            build_review_deadline=build_review_deadline)
+                            build_review_deadline=build_review_deadline, workspace_manager=workspace_manager)
         return CoordinatorReport("HUMAN_ACTION_REQUIRED", result.state, reason=result.reason)
 
     if state == "PUBLISH_AWAITING_AUTHORIZATION":
@@ -618,7 +651,7 @@ def advance(
                             pr_title=pr_title, git_executable=git_executable, gh_executable=gh_executable,
                             ci_poll_timeout_seconds=ci_poll_timeout_seconds,
                             ci_poll_interval_seconds=ci_poll_interval_seconds,
-                            build_review_deadline=build_review_deadline)
+                            build_review_deadline=build_review_deadline, workspace_manager=workspace_manager)
         return CoordinatorReport("BLOCKED", result.state, reason=result.reason)
 
     if state == "MERGE_AWAITING_AUTHORIZATION":

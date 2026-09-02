@@ -180,8 +180,10 @@ def materialize_reviewed_commit(
     base_sha: str,
     *,
     git_executable: str = "git",
-) -> None:
-    """Precondition: state == PUBLISHING (checked by the caller,
+) -> str:
+    """Return the freshly observed canonical worktree HEAD.
+
+    Precondition: state == PUBLISHING (checked by the caller,
     publish_executor.run(), not here). Performs no Chugel transition on
     the happy path; raises MaterializeCommitError on any failure, which
     the caller's existing except-block turns into BLOCKED."""
@@ -202,7 +204,12 @@ def materialize_reviewed_commit(
             raise MaterializeCommitError(
                 f"reviewed commit {expected_sha!r} is not reachable in this worktree"
             )
-        return  # already a real commit; nothing to materialize
+        current = _head_sha(repository_root, git_executable=git_executable)
+        if current != expected_sha:
+            raise MaterializeCommitError(
+                "reviewed commit is reachable but is not the mission worktree HEAD"
+            )
+        return current
 
     expected_hash = artifact.get("patch_sha256")
     if not expected_hash:
@@ -217,7 +224,7 @@ def materialize_reviewed_commit(
         # (and possibly crashed before the subsequent push).
         already = _diff_sha256(repository_root, base_sha, git_executable=git_executable)
         if already == expected_hash:
-            return  # already materialized -- no-op
+            return current_head
         raise MaterializeCommitError(
             "worktree HEAD has diverged from the mission's recorded base_sha "
             "in a way that does not match the reviewed patch -- refusing to guess"
@@ -253,3 +260,4 @@ def materialize_reviewed_commit(
             "post-commit diff no longer matches the independently reviewed "
             "patch_sha256 -- refusing to proceed"
         )
+    return _head_sha(repository_root, git_executable=git_executable)

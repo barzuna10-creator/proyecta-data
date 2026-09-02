@@ -61,6 +61,21 @@ class PublishExecutorTestCase(unittest.TestCase):
 
 
 class CheckBeforeCreateTests(PublishExecutorTestCase):
+    def test_publish_identity_is_durable_before_first_push(self):
+        mid = self._mission_publish_awaiting_authorization()
+        def fail_after_asserting_identity(*args, **kwargs):
+            self.assertEqual("a" * 40, chugel.get_mission(mid)["publish"]["commit_sha"])
+            raise publish_executor.PublishExecutorError("synthetic push crash")
+        with mock.patch.object(
+            publish_commit_materializer, "materialize_reviewed_commit", return_value="a" * 40,
+        ), mock.patch.object(publish_executor, "_git_push", side_effect=fail_after_asserting_identity):
+            result = publish_executor.run(
+                mid, repository_root="/tmp/repo", branch="b", pr_title="t",
+                ci_poll_timeout_seconds=5, ci_poll_interval_seconds=0.01,
+            )
+        self.assertEqual("HUMAN_ACTION_REQUIRED", result.status)
+        self.assertEqual("a" * 40, chugel.get_mission(mid)["publish"]["commit_sha"])
+
     def test_creates_pr_when_none_exists(self):
         mid = self._mission_publish_awaiting_authorization()
         calls = [
@@ -71,8 +86,9 @@ class CheckBeforeCreateTests(PublishExecutorTestCase):
             _json_result({"state": "OPEN", "headRefOid": "a" * 40, "mergeable": "MERGEABLE",
                           "mergeStateStatus": "CLEAN", "statusCheckRollup": [
                               {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}),  # gh pr view (CI poll)
+            _ok_result(b"a" * 40 + b"\n"),
         ]
-        with mock.patch.object(publish_commit_materializer, "_run", return_value=_ok_result()), \
+        with mock.patch.object(publish_commit_materializer, "materialize_reviewed_commit", return_value="a" * 40), \
              mock.patch.object(publish_executor, "_run", side_effect=calls):
             result = publish_executor.run(
                 mid, repository_root="/tmp/repo", branch="b", pr_title="t",
@@ -95,8 +111,9 @@ class CheckBeforeCreateTests(PublishExecutorTestCase):
             _json_result({"state": "OPEN", "headRefOid": "a" * 40, "mergeable": "MERGEABLE",
                           "mergeStateStatus": "CLEAN", "statusCheckRollup": [
                               {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}),
+            _ok_result(b"a" * 40 + b"\n"),
         ]
-        with mock.patch.object(publish_commit_materializer, "_run", return_value=_ok_result()), \
+        with mock.patch.object(publish_commit_materializer, "materialize_reviewed_commit", return_value="a" * 40), \
              mock.patch.object(publish_executor, "_run", side_effect=calls) as run_mock:
             result = publish_executor.run(
                 mid, repository_root="/tmp/repo", branch="b", pr_title="t",
@@ -113,7 +130,7 @@ class CheckBeforeCreateTests(PublishExecutorTestCase):
             _ok_result(),  # git push
             _json_result([{"number": 3, "url": "https://example.invalid/pr/3", "state": "CLOSED"}]),
         ]
-        with mock.patch.object(publish_commit_materializer, "_run", return_value=_ok_result()), \
+        with mock.patch.object(publish_commit_materializer, "materialize_reviewed_commit", return_value="a" * 40), \
              mock.patch.object(publish_executor, "_run", side_effect=calls) as run_mock:
             result = publish_executor.run(
                 mid, repository_root="/tmp/repo", branch="b", pr_title="t",
@@ -136,6 +153,8 @@ class CiTimeoutTests(PublishExecutorTestCase):
 
         def side_effect(*args, **kwargs):
             argv = args[0]
+            if argv[1:3] == ["rev-parse", "HEAD"]:
+                return _ok_result(b"a" * 40 + b"\n")
             if argv[1] == "push":
                 return _ok_result()
             if "list" in argv:
@@ -147,7 +166,7 @@ class CiTimeoutTests(PublishExecutorTestCase):
                 return _ok_result(b"https://example.invalid/pr/1\n")
             return pending_view
 
-        with mock.patch.object(publish_commit_materializer, "_run", return_value=_ok_result()), \
+        with mock.patch.object(publish_commit_materializer, "materialize_reviewed_commit", return_value="a" * 40), \
              mock.patch.object(publish_executor, "_run", side_effect=side_effect):
             result = publish_executor.run(
                 mid, repository_root="/tmp/repo", branch="b", pr_title="t",

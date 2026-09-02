@@ -137,3 +137,22 @@ source text as quoted data, never instructions. Display provenance and
 freshness. A context bundle is ephemeral and non-authoritative: it cannot create
 or authorize a MissionDraft, mutate Chugel, promote knowledge, or attribute a
 decision to José.
+
+## M2C concurrent mission supervision
+
+1. Every executable mission preserves its reviewed exact base SHA and receives
+   only the deterministic `missions/<mission-id>` worktree and
+   `mission/<mission-id>` branch. Provisioning occurs only after the separately
+   persisted scope approval; verification never grants or infers a gate.
+2. One POSIX, nonblocking process lease under the trusted base repository's real
+   `.git` directory owns workspace coordination. Failure to acquire or validate
+   it stops execution before adapters or Git mutations.
+3. Concurrent scheduling is bounded (1..8), event-driven and derived afresh from
+   Chugel. It stores no durable queue, never overlaps the same mission, and gives
+   each mission a freshly constructed subscription-only adapter mapping.
+4. Publication records the exact reviewed/materialized local HEAD before push or
+   PR creation. Local HEAD, canonical `publish.commit_sha`, and live PR head must
+   remain equal through CI and merge authorization; disagreement fails closed.
+5. Each mission retains its own gates, budgets, evidence, failure and workspace.
+   Concurrency never creates blanket authorization, cross-mission mutation,
+   automatic BLOCKED recovery, deployment authority, or a second state engine.

@@ -410,7 +410,7 @@ class PruebaRegistroAtomicoDeCommitPublicado(ChugelTestCase):
 
     def test_estado_incorrecto_y_terminal_fallan_sin_escribir(self):
         publishing = _mission_at_publishing()
-        variants = [publishing]
+        variants = []
         ci_pending = copy.deepcopy(publishing)
         ci_pending["state"] = "CI_PENDING"
         variants.append(ci_pending)
@@ -429,6 +429,14 @@ class PruebaRegistroAtomicoDeCommitPublicado(ChugelTestCase):
             ):
                 chugel.record_publish_commit(record["mission_id"], "c" * 40)
             write.assert_not_called()
+
+    def test_publishing_accepts_first_immutable_identity(self):
+        record = _mission_at_publishing()
+        with mock.patch.object(chugel, "_read_mission_record", return_value=record), \
+             mock.patch.object(chugel, "_write_mission_record") as write:
+            updated = chugel.record_publish_commit(record["mission_id"], "c" * 40)
+        self.assertEqual(updated["publish"]["commit_sha"], "c" * 40)
+        write.assert_called_once()
 
     def test_identidad_duplicada_o_conflictiva_es_inmutable(self):
         record = _mission_at_merge_awaiting_without_publish_identity()

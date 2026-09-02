@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -72,6 +73,8 @@ from jarvis.mission_authorization_bridge import (
 )
 from jarvis.mission_context import draft_briefing
 from jarvis.mission_supervisor import MissionSupervisor
+from jarvis.mission_workspace import MissionWorkspaceManager
+from orchestrator.workspace import acquire_workspace_supervisor_lease
 from jarvis.models import (
     AuthorizationIntent, DraftChanges, MissionDefinitionDraft, MissionDraft,
     Objective, ObjectiveDecompositionEntry,
@@ -150,6 +153,8 @@ class ControlPlaneConfig:
         zentra_backend_root: str | None = None, zentra_frontend_root: str | None = None,
         mission_repository_root: str | None = None, mission_branch: str | None = None,
         mission_pr_title: str | None = None, git_executable: str = "git", gh_executable: str = "gh",
+        mission_concurrency: int = 2, build_review_deadline: float = 3600.0,
+        ci_poll_timeout_seconds: float = 1800.0, ci_poll_interval_seconds: float = 30.0,
     ):
         if host not in _LOOPBACK_HOSTS:
             raise ValueError("Control Plane must bind to a loopback host")
@@ -185,6 +190,15 @@ class ControlPlaneConfig:
         self.mission_pr_title = mission_pr_title
         self.git_executable = git_executable
         self.gh_executable = gh_executable
+        if isinstance(mission_concurrency, bool) or not 1 <= mission_concurrency <= 8:
+            raise ValueError("CONTROL_PLANE_MISSION_CONCURRENCY must be 1..8")
+        durations = (build_review_deadline, ci_poll_timeout_seconds, ci_poll_interval_seconds)
+        if any(not math.isfinite(value) or value <= 0 for value in durations):
+            raise ValueError("mission timeouts must be finite positive numbers")
+        self.mission_concurrency = mission_concurrency
+        self.build_review_deadline = build_review_deadline
+        self.ci_poll_timeout_seconds = ci_poll_timeout_seconds
+        self.ci_poll_interval_seconds = ci_poll_interval_seconds
 
 
 def load_config(env: dict | None = None) -> ControlPlaneConfig:
@@ -201,6 +215,13 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
     store_root = env.get("CONTROL_PLANE_STORE_ROOT")
     if not store_root:
         raise ValueError("CONTROL_PLANE_STORE_ROOT is required")
+    try:
+        concurrency = int(env.get("CONTROL_PLANE_MISSION_CONCURRENCY", "2"))
+        build_deadline = float(env.get("CONTROL_PLANE_BUILD_REVIEW_DEADLINE_SECONDS", "3600"))
+        ci_timeout = float(env.get("CONTROL_PLANE_CI_TIMEOUT_SECONDS", "1800"))
+        ci_interval = float(env.get("CONTROL_PLANE_CI_POLL_INTERVAL_SECONDS", "30"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("mission concurrency/timeouts are invalid") from exc
     return ControlPlaneConfig(
         host=host, port=port, token=token, store_root=store_root,
         knowledge_store_root=env.get("CONTROL_PLANE_KNOWLEDGE_STORE_ROOT") or None,
@@ -212,6 +233,8 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
         mission_pr_title=env.get("CONTROL_PLANE_MISSION_PR_TITLE") or None,
         git_executable=env.get("CONTROL_PLANE_GIT_EXECUTABLE") or "git",
         gh_executable=env.get("CONTROL_PLANE_GH_EXECUTABLE") or "gh",
+        mission_concurrency=concurrency, build_review_deadline=build_deadline,
+        ci_poll_timeout_seconds=ci_timeout, ci_poll_interval_seconds=ci_interval,
     )
 
 
@@ -220,6 +243,14 @@ class _ApiError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class _ControlPlaneHTTPServer(ThreadingHTTPServer):
+    def server_close(self) -> None:
+        supervisor = getattr(self, "supervisor", None)
+        if supervisor is not None:
+            supervisor.close()
+        super().server_close()
 
 
 def _stub_mission_draft(draft_id: str, objective: str) -> MissionDraft:
@@ -825,7 +856,9 @@ def _handle_authorize(store: FileJarvisStore, supervisor: MissionSupervisor, gat
             "decision_ref": f"control-plane-draft-authorization:{gate_id}:{revision}:{digest}",
         }
         try:
-            result = close_draft_authorization(store, intent, decision)
+            result = close_draft_authorization(
+                store, intent, decision, workspace_base_root=supervisor.workspace_base_root,
+            )
         except DraftAuthorizationRefused as exc:
             raise _ApiError(409, "; ".join(reason.code for reason in exc.reasons)) from exc
         except (DraftAuthorizationAttributionError, DraftAuthorizationDivergenceError) as exc:
@@ -1015,7 +1048,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def build_server(config: ControlPlaneConfig) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((config.host, config.port), _Handler)
+    server = _ControlPlaneHTTPServer((config.host, config.port), _Handler)
     server.config = config  # type: ignore[attr-defined]
     server.store = FileJarvisStore(config.store_root)  # type: ignore[attr-defined]
     # Constructed once at startup, not per-request: a misconfigured path
@@ -1063,14 +1096,26 @@ def build_server(config: ControlPlaneConfig) -> ThreadingHTTPServer:
     # every existing control-plane test free of any real Emilio/Emma
     # invocation, and must stay true now that notify() is wired in.
     real_adapters = config.mission_repository_root is not None
+    lease = None
+    manager = None
+    if real_adapters:
+        base_root = Path(config.mission_repository_root)
+        lease = acquire_workspace_supervisor_lease(base_root)
+        manager = MissionWorkspaceManager(base_root, git_executable=config.git_executable, lease=lease)
     server.supervisor = MissionSupervisor(  # type: ignore[attr-defined]
-        adapters=build_cli_subscription_adapters() if real_adapters else {},
+        adapter_factory=build_cli_subscription_adapters if real_adapters else (lambda: {}),
+        max_concurrency=config.mission_concurrency if real_adapters else 1,
+        lease=lease,
         advance_kwargs=dict(
             repository_root=config.mission_repository_root or str(Path.cwd()),
             branch=config.mission_branch or "overnight/mission",
             pr_title=config.mission_pr_title or "Mission",
             git_executable=config.git_executable,
             gh_executable=config.gh_executable,
+            workspace_manager=manager,
+            build_review_deadline=config.build_review_deadline,
+            ci_poll_timeout_seconds=config.ci_poll_timeout_seconds,
+            ci_poll_interval_seconds=config.ci_poll_interval_seconds,
         ),
     )
     return server
