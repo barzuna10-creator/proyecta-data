@@ -151,9 +151,24 @@ class PublishCommitMaterializerTestCase(unittest.TestCase):
                     "patch_path": None, "patch_sha256": None, "patch_byte_size": None}
         mid = self._mission_with_pass_verdict(artifact, base_sha)
 
-        materialize_reviewed_commit(mid, str(self._repo), base_sha)
+        observed = materialize_reviewed_commit(mid, str(self._repo), base_sha)
 
         self.assertEqual(_head(self._repo), head_sha)  # no new commit was made
+        self.assertEqual(head_sha, observed)
+
+    def test_commit_mode_reachable_but_off_head_is_refused_without_repointing(self):
+        base_sha = _init_repo(self._repo)
+        (self._repo / "a.txt").write_text("changed\n")
+        _git(self._repo, "add", "-A")
+        _git(self._repo, "commit", "-q", "-m", "reviewed")
+        reviewed_sha = _head(self._repo)
+        artifact = {"mode": "commit", "commit_sha": reviewed_sha,
+                    "patch_path": None, "patch_sha256": None, "patch_byte_size": None}
+        mid = self._mission_with_pass_verdict(artifact, base_sha)
+        _git(self._repo, "checkout", "--detach", base_sha)
+        with self.assertRaises(MaterializeCommitError):
+            materialize_reviewed_commit(mid, str(self._repo), base_sha)
+        self.assertEqual(base_sha, _head(self._repo))
 
     def test_commit_mode_unreachable_raises(self):
         base_sha = _init_repo(self._repo)
@@ -176,10 +191,11 @@ class PublishCommitMaterializerTestCase(unittest.TestCase):
                     "patch_sha256": expected_hash, "patch_byte_size": 42}
         mid = self._mission_with_pass_verdict(artifact, base_sha)
 
-        materialize_reviewed_commit(mid, str(self._repo), base_sha)
+        observed = materialize_reviewed_commit(mid, str(self._repo), base_sha)
 
         head_sha = _head(self._repo)
         self.assertNotEqual(head_sha, base_sha)
+        self.assertEqual(head_sha, observed)
         log = subprocess.run(
             ["git", "log", "--oneline", f"{base_sha}..HEAD"], cwd=self._repo,
             check=True, stdout=subprocess.PIPE,
@@ -363,13 +379,15 @@ class PublishCommitMaterializerTestCase(unittest.TestCase):
                     "patch_sha256": expected_hash, "patch_byte_size": 42}
         mid = self._mission_with_pass_verdict(artifact, base_sha)
 
-        materialize_reviewed_commit(mid, str(self._repo), base_sha)
+        observed_first = materialize_reviewed_commit(mid, str(self._repo), base_sha)
         head_after_first = _head(self._repo)
+        self.assertEqual(head_after_first, observed_first)
 
-        materialize_reviewed_commit(mid, str(self._repo), base_sha)  # simulated restart
+        observed = materialize_reviewed_commit(mid, str(self._repo), base_sha)  # simulated restart
         head_after_second = _head(self._repo)
 
         self.assertEqual(head_after_first, head_after_second)  # no second commit
+        self.assertEqual(head_after_second, observed)
 
 
 if __name__ == "__main__":

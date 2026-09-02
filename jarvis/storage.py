@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
@@ -87,6 +88,11 @@ class AuthorizationEffectMismatch(JarvisStorageError):
     pass
 
 
+class AuthorizationDecisionMismatch(JarvisStorageError):
+    """The immutable decision bound to an intent is absent, corrupt or different."""
+    pass
+
+
 class _ProposalAlreadyRecorded(JarvisStorageError):
     """Internal-only duplicate-create signal, caught within the same
     method that raises it -- never escapes record_proposal()."""
@@ -119,7 +125,7 @@ class JarvisStore(Protocol):
     def get_draft(self, draft_id: str, revision: int) -> DraftEnvelope: ...
     def get_latest_draft(self, draft_id: str) -> DraftEnvelope: ...
     def list_draft_revisions(self, draft_id: str) -> tuple[int, ...]: ...
-    def record_authorization_intent(self, intent: AuthorizationIntent) -> str: ...
+    def record_authorization_intent(self, intent: AuthorizationIntent, *, decision: dict | None = None) -> str: ...
 
 
 def _validate_draft_id(draft_id: str) -> None:
@@ -135,6 +141,36 @@ def _validate_objective_id(objective_id: str) -> None:
 def _validate_revision(revision: int) -> None:
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         raise ValueError("revision must be a positive integer")
+
+
+def _authorization_decision(decision: dict) -> dict:
+    if not isinstance(decision, dict) or set(decision) != {"decided_by", "decided_at", "decision_ref"}:
+        raise AuthorizationDecisionMismatch("authorization decision fields are not canonical")
+    if decision.get("decided_by") != "jose":
+        raise AuthorizationDecisionMismatch("authorization decision is not attributed to jose")
+    decided_at = decision.get("decided_at")
+    try:
+        parsed = datetime.datetime.strptime(decided_at, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError) as exc:
+        raise AuthorizationDecisionMismatch("authorization decision timestamp is invalid") from exc
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != decided_at:
+        raise AuthorizationDecisionMismatch("authorization decision timestamp is not canonical UTC")
+    decision_ref = decision.get("decision_ref")
+    if not isinstance(decision_ref, str) or not decision_ref or any(ord(c) < 0x20 for c in decision_ref):
+        raise AuthorizationDecisionMismatch("authorization decision ref is invalid")
+    return {
+        "decided_by": "jose", "decided_at": decided_at, "decision_ref": decision_ref,
+    }
+
+
+def _authorization_decision_digest(intent_id: str, intent_value: dict, decision: dict) -> str:
+    content = {
+        "authorization_intent_id": intent_id,
+        "intent": intent_value,
+        "authorization_decision": decision,
+    }
+    rendered = json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(rendered).hexdigest()
 
 
 def _validate_and_chmod_directory(path: Path) -> None:
@@ -256,19 +292,28 @@ class FileJarvisStore:
             raise DraftNotFound(draft_id)
         return self.get_draft(draft_id, revisions[-1])
 
-    def record_authorization_intent(self, intent: AuthorizationIntent) -> str:
+    def record_authorization_intent(
+        self, intent: AuthorizationIntent, *, decision: dict | None = None,
+    ) -> str:
         intent_id = authorization_intent_id(intent)
+        intent_value = {
+            "draft_id": intent.draft_id,
+            "revision": intent.revision,
+            "digest_algorithm": intent.digest_algorithm,
+            "digest": intent.digest,
+        }
         payload = {
             "authorization_intent_id": intent_id,
             "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "intent": {
-                "draft_id": intent.draft_id,
-                "revision": intent.revision,
-                "digest_algorithm": intent.digest_algorithm,
-                "digest": intent.digest,
-            },
+            "intent": intent_value,
             "effect": "none_phase_0",
         }
+        if decision is not None:
+            canonical_decision = _authorization_decision(decision)
+            payload["authorization_decision"] = canonical_decision
+            payload["authorization_decision_digest"] = _authorization_decision_digest(
+                intent_id, intent_value, canonical_decision,
+            )
         rendered = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self._atomic_create(
             self._intents / f"{intent_id}.json",
@@ -276,6 +321,26 @@ class FileJarvisStore:
             duplicate_error=AuthorizationIntentAlreadyRecorded,
         )
         return intent_id
+
+    def get_authorization_intent_decision(self, intent_id: str) -> dict | None:
+        if _DIGEST.fullmatch(intent_id) is None:
+            raise ValueError("intent_id must be a lowercase SHA-256 hex digest")
+        value = self._read_json(self._intents / f"{intent_id}.json")
+        decision = value.get("authorization_decision")
+        digest = value.get("authorization_decision_digest")
+        if decision is None and digest is None:
+            return None
+        try:
+            canonical = _authorization_decision(decision)
+            intent_value = value["intent"]
+            if value["authorization_intent_id"] != intent_id or not isinstance(intent_value, dict):
+                raise AuthorizationDecisionMismatch("authorization intent identity diverges")
+            expected = _authorization_decision_digest(intent_id, intent_value, canonical)
+        except (KeyError, TypeError, AuthorizationDecisionMismatch) as exc:
+            raise StoredArtifactCorrupt("authorization decision record is malformed") from exc
+        if not isinstance(digest, str) or not hmac.compare_digest(digest, expected):
+            raise StoredArtifactCorrupt("authorization decision digest mismatch")
+        return dict(canonical)
 
     def record_proposal(self, proposal_id: str, content_digest: str, draft_id: str) -> str:
         """proposal_id is a durable idempotency key over a request, never

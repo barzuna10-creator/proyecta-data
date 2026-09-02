@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -949,6 +950,141 @@ class ProvisioningRaceAdversarialTests(WorkspaceTestCase):
         self.assertEqual(1, listing.count(str(final_path)))
         self.assertEqual(self.base_sha, _run("rev-parse", "HEAD", cwd=final_path))
         self.assertEqual(derive_branch_name(mid), _run("branch", "--show-current", cwd=final_path))
+
+
+class SupervisorLeaseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name).resolve() / "repo"
+        self.base.mkdir()
+        _run("init", cwd=self.base)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_exclusive_non_reentrant_and_persistent_0600(self):
+        first = workspace.acquire_workspace_supervisor_lease(self.base)
+        self.assertEqual(0o600, first.path.stat().st_mode & 0o777)
+        with self.assertRaises(workspace.WorkspaceLeaseError):
+            workspace.acquire_workspace_supervisor_lease(self.base)
+        path = first.path
+        first.close()
+        self.assertTrue(path.exists())
+        second = workspace.acquire_workspace_supervisor_lease(self.base)
+        second.close()
+
+    def test_symlink_lock_fails_closed(self):
+        target = Path(self.tmp.name) / "foreign"
+        target.write_text("x", encoding="utf-8")
+        (self.base / ".git" / "jarvis-workspace-supervisor.lock").symlink_to(target)
+        with self.assertRaises(workspace.WorkspaceLeaseError):
+            workspace.acquire_workspace_supervisor_lease(self.base)
+
+    def test_hardlinked_lock_is_refused_without_chmodding_target(self):
+        target = Path(self.tmp.name) / "foreign"
+        target.write_text("x", encoding="utf-8")
+        target.chmod(0o644)
+        os.link(target, self.base / ".git" / "jarvis-workspace-supervisor.lock")
+        with self.assertRaises(workspace.WorkspaceLeaseError):
+            workspace.acquire_workspace_supervisor_lease(self.base)
+        self.assertEqual(0o644, target.stat().st_mode & 0o777)
+
+    def test_existing_permissive_lock_is_refused_without_repair(self):
+        lock_path = self.base / ".git" / "jarvis-workspace-supervisor.lock"
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o644)
+        with self.assertRaises(workspace.WorkspaceLeaseError):
+            workspace.acquire_workspace_supervisor_lease(self.base)
+        self.assertEqual(0o644, lock_path.stat().st_mode & 0o777)
+
+    def test_symlinked_or_noncanonical_base_root_is_refused(self):
+        alias = Path(self.tmp.name).resolve() / "alias"
+        alias.symlink_to(self.base, target_is_directory=True)
+        for unsafe in (alias, Path("relative/repo"), self.base / ".." / "repo"):
+            with self.subTest(path=unsafe), self.assertRaises(workspace.WorkspaceLeaseError):
+                workspace.acquire_workspace_supervisor_lease(unsafe)
+
+    def test_kernel_releases_lease_after_process_death(self):
+        code = (
+            "import sys,time; from pathlib import Path; "
+            "from orchestrator.workspace import acquire_workspace_supervisor_lease; "
+            "lease=acquire_workspace_supervisor_lease(Path(sys.argv[1])); "
+            "print('held', flush=True); time.sleep(30)"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", code, str(self.base)],
+            cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertEqual("held", child.stdout.readline().strip())
+            with self.assertRaises(workspace.WorkspaceLeaseError):
+                workspace.acquire_workspace_supervisor_lease(self.base)
+            child.kill()
+            child.wait(timeout=5)
+            child.communicate(timeout=1)
+            lease = workspace.acquire_workspace_supervisor_lease(self.base)
+            lease.close()
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            if child.stdout is not None and not child.stdout.closed:
+                child.stdout.close()
+            if child.stderr is not None and not child.stderr.closed:
+                child.stderr.close()
+
+    def test_unlinking_lock_path_cannot_create_a_second_lease(self):
+        first = workspace.acquire_workspace_supervisor_lease(self.base)
+        try:
+            first.path.unlink()
+            with self.assertRaises(workspace.WorkspaceLeaseError):
+                workspace.acquire_workspace_supervisor_lease(self.base)
+            with self.assertRaises(workspace.WorkspaceLeaseError):
+                workspace.validate_workspace_supervisor_lease(first, self.base)
+        finally:
+            first.close()
+
+    def test_replacing_git_directory_cannot_create_a_second_lease(self):
+        first = workspace.acquire_workspace_supervisor_lease(self.base)
+        original_git = self.base / ".git-held"
+        (self.base / ".git").rename(original_git)
+        (self.base / ".git").mkdir()
+        try:
+            with self.assertRaises(workspace.WorkspaceLeaseError):
+                workspace.acquire_workspace_supervisor_lease(self.base)
+            with self.assertRaises(workspace.WorkspaceLeaseError):
+                workspace.validate_workspace_supervisor_lease(first, self.base)
+        finally:
+            (self.base / ".git").rmdir()
+            original_git.rename(self.base / ".git")
+            first.close()
+
+    def test_unsupported_platform_fails_closed(self):
+        with mock.patch.object(workspace, "fcntl", None), self.assertRaises(workspace.WorkspaceLeaseError):
+            workspace.acquire_workspace_supervisor_lease(self.base)
+
+
+class NeutralVerifierTests(unittest.TestCase):
+    def test_verifier_allows_head_to_advance_but_requires_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "repo"
+            base.mkdir()
+            _run("init", cwd=base)
+            _run("config", "user.email", "test@example.invalid", cwd=base)
+            _run("config", "user.name", "Test", cwd=base)
+            (base / "a").write_text("a", encoding="utf-8")
+            _run("add", "a", cwd=base)
+            _run("commit", "-m", "base", cwd=base)
+            sha = _run("rev-parse", "HEAD", cwd=base)
+            mid = str(uuid.uuid4())
+            path = provision_mission_worktree(mid, base_root=base, base_sha=sha)
+            (path / "b").write_text("b", encoding="utf-8")
+            _run("add", "b", cwd=path)
+            _run("commit", "-m", "advance", cwd=path)
+            entry = workspace.verify_mission_worktree(mid, base_root=base)
+            self.assertNotEqual(sha, entry.head)
+            self.assertEqual(derive_branch_name(mid), entry.branch)
 
 
 if __name__ == "__main__":

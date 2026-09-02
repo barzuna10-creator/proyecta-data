@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from jarvis import mission_coordinator, mission_query
@@ -119,9 +120,19 @@ class MissionSupervisor:
     the actual work always happens on this supervisor's own background
     worker thread, of which at most one is ever alive at a time."""
 
-    def __init__(self, *, adapters: dict, advance_kwargs: dict):
-        self._adapters = adapters
+    def __init__(self, *, adapters: dict | None = None, adapter_factory=None, advance_kwargs: dict,
+                 max_concurrency: int = 1, lease=None):
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or not 1 <= max_concurrency <= 8:
+            raise ValueError("max_concurrency must be an integer from 1 through 8")
+        if adapter_factory is not None and adapters is not None:
+            raise ValueError("provide adapter_factory or adapters, not both")
+        self._adapter_factory = adapter_factory or (lambda: dict(adapters or {}))
         self._advance_kwargs = dict(advance_kwargs)
+        self._max_concurrency = max_concurrency
+        self._lease = lease
+        self._pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="mission-worker")
+        self._inflight: set[str] = set()
+        self._closed = False
         self._wake = threading.Event()
         self._worker_lock = threading.Lock()
         self._worker: threading.Thread | None = None
@@ -168,6 +179,11 @@ class MissionSupervisor:
         # empty and the loop's existing termination condition applies.
         self._stalled: set[str] = set()
 
+    @property
+    def workspace_base_root(self):
+        manager = self._advance_kwargs.get("workspace_manager")
+        return manager.base_root if manager is not None else None
+
     def notify(self) -> None:
         """Coalescing wake: safe to call any number of times, from any
         number of threads, concurrently or not. Guarantees that after
@@ -177,8 +193,10 @@ class MissionSupervisor:
         method itself uses -- confirmed still responsible for observing
         this wake before it could exit. See _worker_running's docstring
         for why this is not simply threading.Thread.is_alive()."""
-        self._wake.set()
         with self._worker_lock:
+            if self._closed:
+                raise RuntimeError("mission supervisor is closed")
+            self._wake.set()
             if not self._worker_running:
                 self._worker_running = True
                 self._worker = threading.Thread(target=self._run, daemon=True, name="mission-supervisor")
@@ -282,24 +300,56 @@ class MissionSupervisor:
             # attempt; nothing here is treated as a reason to give up
             # permanently the way a per-mission failure below is.
             return DrainOutcome((), ((("<list_missions>"), exc),))
-        for listing in listings:
+        candidates = []
+        for listing in sorted(listings, key=lambda item: (item.updated_at or "", item.mission_id)):
             if not listing.readable or listing.state not in AUTO_ADVANCE_ELIGIBLE_STATES:
                 continue
             if listing.mission_id in self._stalled:
                 continue
-            try:
-                report = mission_coordinator.advance(listing.mission_id, self._adapters, **self._advance_kwargs)
-            except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
+            if listing.mission_id in self._inflight:
+                continue
+            candidates.append(listing.mission_id)
+
+        pending = {}
+        while candidates or pending:
+            while candidates and len(pending) < self._max_concurrency:
+                with self._worker_lock:
+                    if self._closed:
+                        candidates.clear()
+                        break
+                    mission_id = candidates.pop(0)
+                    self._inflight.add(mission_id)
+                    try:
+                        adapters = self._adapter_factory()
+                        future = self._pool.submit(
+                            mission_coordinator.advance, mission_id, adapters,
+                            **self._advance_kwargs,
+                        )
+                    except Exception as exc:  # fail only this reserved mission
+                        self._inflight.discard(mission_id)
+                        self._stalled.add(mission_id)
+                        errors.append((mission_id, exc))
+                        continue
+                pending[future] = mission_id
+            if not pending:
+                break
+            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in done:
+                mission_id = pending.pop(future)
+                self._inflight.discard(mission_id)
+                try:
+                    report = future.result()
+                except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
                 # A structural failure to advance this mission at all --
                 # never transient by construction here (no retry/backoff
                 # is this module's to add, see requirement 5), so this
                 # mission is stalled exactly like a HUMAN_ACTION_REQUIRED
                 # report below: never resubmitted by this supervisor
                 # instance again.
-                self._stalled.add(listing.mission_id)
-                errors.append((listing.mission_id, exc))
-                continue
-            if report.status == "HUMAN_ACTION_REQUIRED":
+                    self._stalled.add(mission_id)
+                    errors.append((mission_id, exc))
+                    continue
+                if report.status == "HUMAN_ACTION_REQUIRED":
                 # advance()'s own state stays inside AUTO_ADVANCE_ELIGIBLE_STATES
                 # for this report (Chugel has no distinct persisted state
                 # for it) -- without this, the next pass would find the
@@ -307,6 +357,18 @@ class MissionSupervisor:
                 # 5: once here, only a fresh process start (recover_on_startup())
                 # attempts it again -- never this running supervisor on its
                 # own.
-                self._stalled.add(listing.mission_id)
-            reports.append((listing.mission_id, report))
+                    self._stalled.add(mission_id)
+                reports.append((mission_id, report))
         return DrainOutcome(tuple(reports), tuple(errors))
+
+    def close(self) -> None:
+        with self._worker_lock:
+            if self._closed:
+                return
+            self._closed = True
+            worker = self._worker
+        if worker is not None and worker is not threading.current_thread():
+            worker.join()
+        self._pool.shutdown(wait=True, cancel_futures=True)
+        if self._lease is not None:
+            self._lease.close()

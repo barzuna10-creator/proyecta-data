@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock as mock
 from pathlib import Path
@@ -731,6 +732,143 @@ class CoordinatorReportStatusExhaustivenessTests(SupervisorTestCase):
             mission_coordinator.COORDINATOR_REPORT_STATUSES,
             tested_never_stalls | {"HUMAN_ACTION_REQUIRED"},
         )
+
+
+class ConcurrentSupervisorTests(unittest.TestCase):
+    def test_two_missions_overlap_and_never_share_adapter_mapping(self):
+        listings = [
+            mock.Mock(readable=True, state="AUTHORIZED", mission_id=f"00000000-0000-4000-8000-{i:012d}", updated_at=f"2026-01-01T00:00:0{i}Z")
+            for i in range(2)
+        ]
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+        adapter_ids = []
+
+        def advance(mid, adapters, **kwargs):
+            nonlocal active, peak
+            with lock:
+                adapter_ids.append(id(adapters))
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return mission_coordinator.CoordinatorReport("GATE_REQUIRED", "PUBLISH_AWAITING_AUTHORIZATION")
+
+        supervisor = MissionSupervisor(
+            adapter_factory=lambda: {"unique": object()}, advance_kwargs=_ADVANCE_KWARGS,
+            max_concurrency=2,
+        )
+        with mock.patch.object(mission_query, "list_missions", return_value=listings), \
+             mock.patch.object(mission_coordinator, "advance", side_effect=advance):
+            outcome = supervisor._drain_pass()
+        supervisor.close()
+        self.assertEqual(2, peak)
+        self.assertEqual(2, len(set(adapter_ids)))
+        self.assertEqual(2, len(outcome.reports))
+
+    def test_close_rejects_new_notify_and_waits_for_active_work(self):
+        listing = mock.Mock(readable=True, state="AUTHORIZED", mission_id="00000000-0000-4000-8000-000000000001", updated_at="2026-01-01T00:00:00Z")
+        started = threading.Event()
+        release = threading.Event()
+        def advance(*args, **kwargs):
+            started.set()
+            release.wait(2)
+            return mission_coordinator.CoordinatorReport("GATE_REQUIRED", "PUBLISH_AWAITING_AUTHORIZATION")
+        supervisor = MissionSupervisor(adapters={}, advance_kwargs=_ADVANCE_KWARGS)
+        with mock.patch.object(mission_query, "list_missions", return_value=[listing]), \
+             mock.patch.object(mission_coordinator, "advance", side_effect=advance):
+            supervisor.notify()
+            self.assertTrue(started.wait(1))
+            closer = threading.Thread(target=supervisor.close)
+            closer.start()
+            time.sleep(0.02)
+            self.assertTrue(closer.is_alive())
+            release.set()
+            closer.join(2)
+        with self.assertRaises(RuntimeError):
+            supervisor.notify()
+
+    def test_adapter_factory_failure_rolls_back_reservation_and_other_mission_progresses(self):
+        listings = [
+            mock.Mock(readable=True, state="AUTHORIZED", mission_id=f"00000000-0000-4000-8000-{i:012d}", updated_at=f"2026-01-01T00:00:0{i}Z")
+            for i in range(2)
+        ]
+        calls = 0
+        def factory():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("factory unavailable")
+            return {}
+        supervisor = MissionSupervisor(
+            adapter_factory=factory, advance_kwargs=_ADVANCE_KWARGS, max_concurrency=1,
+        )
+        report = mission_coordinator.CoordinatorReport("GATE_REQUIRED", "PUBLISH_AWAITING_AUTHORIZATION")
+        with mock.patch.object(mission_query, "list_missions", return_value=listings), \
+             mock.patch.object(mission_coordinator, "advance", return_value=report) as advance:
+            outcome = supervisor._drain_pass()
+        supervisor.close()
+        self.assertEqual((listings[0].mission_id,), tuple(mid for mid, _ in outcome.errors))
+        self.assertEqual([listings[1].mission_id], [call.args[0] for call in advance.call_args_list])
+        self.assertEqual(set(), supervisor._inflight)
+        self.assertIn(listings[0].mission_id, supervisor._stalled)
+
+    def test_submit_failure_rolls_back_reservation_and_other_mission_progresses(self):
+        listings = [
+            mock.Mock(readable=True, state="AUTHORIZED", mission_id=f"00000000-0000-4000-8000-{i:012d}", updated_at=f"2026-01-01T00:00:0{i}Z")
+            for i in range(2)
+        ]
+        supervisor = MissionSupervisor(adapters={}, advance_kwargs=_ADVANCE_KWARGS)
+        original_submit = supervisor._pool.submit
+        calls = 0
+        def submit(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("executor rejected submission")
+            return original_submit(*args, **kwargs)
+        report = mission_coordinator.CoordinatorReport("GATE_REQUIRED", "PUBLISH_AWAITING_AUTHORIZATION")
+        with mock.patch.object(mission_query, "list_missions", return_value=listings), \
+             mock.patch.object(mission_coordinator, "advance", return_value=report) as advance, \
+             mock.patch.object(supervisor._pool, "submit", side_effect=submit):
+            outcome = supervisor._drain_pass()
+        supervisor.close()
+        self.assertEqual((listings[0].mission_id,), tuple(mid for mid, _ in outcome.errors))
+        self.assertEqual([listings[1].mission_id], [call.args[0] for call in advance.call_args_list])
+        self.assertEqual(set(), supervisor._inflight)
+
+    def test_close_does_not_submit_candidates_waiting_behind_active_work(self):
+        listings = [
+            mock.Mock(readable=True, state="AUTHORIZED", mission_id=f"00000000-0000-4000-8000-{i:012d}", updated_at=f"2026-01-01T00:00:0{i}Z")
+            for i in range(3)
+        ]
+        started = threading.Event()
+        release = threading.Event()
+        adapter_calls = 0
+        def factory():
+            nonlocal adapter_calls
+            adapter_calls += 1
+            return {}
+        def advance(*args, **kwargs):
+            started.set()
+            release.wait(2)
+            return mission_coordinator.CoordinatorReport("GATE_REQUIRED", "PUBLISH_AWAITING_AUTHORIZATION")
+        supervisor = MissionSupervisor(
+            adapter_factory=factory, advance_kwargs=_ADVANCE_KWARGS, max_concurrency=1,
+        )
+        with mock.patch.object(mission_query, "list_missions", return_value=listings), \
+             mock.patch.object(mission_coordinator, "advance", side_effect=advance) as advance_mock:
+            supervisor.notify()
+            self.assertTrue(started.wait(1))
+            closer = threading.Thread(target=supervisor.close)
+            closer.start()
+            time.sleep(0.02)
+            release.set()
+            closer.join(2)
+        self.assertEqual(1, adapter_calls)
+        self.assertEqual(1, advance_mock.call_count)
 
 
 if __name__ == "__main__":

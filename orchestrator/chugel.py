@@ -1070,8 +1070,8 @@ def record_publish_commit(mission_id: str, commit_sha: str) -> dict:
 
     This operation records identity only; it never runs git, pushes, creates
     or updates a pull request, or grants merge authorization. Publication is
-    eligible only while the mission awaits merge authorization, after the
-    publication/CI lifecycle has completed. The first canonical SHA becomes
+    eligible either in PUBLISHING before any remote effect, or in
+    MERGE_AWAITING_AUTHORIZATION for legacy crash repair. The first canonical SHA becomes
     immutable, so neither a duplicate call nor a conflicting caller-controlled
     value can rewrite the identity later.
 
@@ -1084,10 +1084,10 @@ def record_publish_commit(mission_id: str, commit_sha: str) -> dict:
 
     with _mission_lock(mission_id):
         record = _read_mission_record(mission_id)
-        if record.get("state") != "MERGE_AWAITING_AUTHORIZATION":
+        if record.get("state") not in {"PUBLISHING", "MERGE_AWAITING_AUTHORIZATION"}:
             raise ValueError(
                 f"mission {mission_id}: publication identity may only be recorded in "
-                f"state 'MERGE_AWAITING_AUTHORIZATION', got {record.get('state')!r}"
+                f"state 'PUBLISHING' or 'MERGE_AWAITING_AUTHORIZATION', got {record.get('state')!r}"
             )
         existing_sha = (record.get("publish") or {}).get("commit_sha")
         if existing_sha is not None:

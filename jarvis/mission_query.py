@@ -32,6 +32,47 @@ class MissionListing:
     error_code: str | None
 
 
+@dataclass(frozen=True)
+class MissionAuthorizationBinding:
+    definition: tuple[tuple[str, object], ...]
+    repository_base_sha: str
+    repository_branch: str
+
+
+def get_mission_authorization_binding(mission_id: str) -> MissionAuthorizationBinding:
+    """Detached allow-listed projection for authorization-effect retries."""
+    try:
+        record = chugel.get_mission(mission_id)
+        version = record["mission_definition_history"][0]
+        keys = (
+            "version", "outcome", "scope", "non_goals", "acceptance_criteria",
+            "source", "based_on_proposal_id", "authorized_by", "authorized_at",
+            "authorization_decision_ref",
+        )
+        detached = []
+        for key in keys:
+            value = version[key]
+            if isinstance(value, list):
+                value = tuple(value)
+            elif not isinstance(value, (str, int, bool, type(None))):
+                raise TypeError(key)
+            detached.append((key, value))
+        repository = record["repository"]
+        return MissionAuthorizationBinding(
+            definition=tuple(detached),
+            repository_base_sha=repository["base_sha"],
+            repository_branch=repository["branch"],
+        )
+    except chugel.MissionNotFound as exc:
+        raise MissionQueryError("MISSION_NOT_FOUND") from exc
+    except (chugel.MissionRecordCorrupt, chugel.MissionRecordInvalid) as exc:
+        raise MissionQueryError("MISSION_RECORD_INVALID") from exc
+    except chugel.MissionRecordPathUnsafe as exc:
+        raise MissionQueryError("MISSION_PATH_UNSAFE") from exc
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise MissionQueryError("MISSION_AUTHORIZATION_PROJECTION_INVALID") from exc
+
+
 def list_missions() -> tuple[MissionListing, ...]:
     return tuple(MissionListing(
         mission_id=item["mission_id"],

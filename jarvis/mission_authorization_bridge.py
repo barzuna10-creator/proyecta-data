@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from orchestrator.validator import HUMAN_DECIDER
 
@@ -55,8 +56,10 @@ from jarvis import mission_query, mission_write
 from jarvis._safe_io import exclusive_entity_lock
 from jarvis.authorization import validate_authorization_intent
 from jarvis.models import AuthorizationIntent
+from jarvis.mission_workspace import derive_repository_placeholder
 from jarvis.storage import (
-    AuthorizationIntentAlreadyRecorded, authorization_intent_id, FileJarvisStore,
+    AuthorizationDecisionMismatch, AuthorizationIntentAlreadyRecorded,
+    StoredArtifactCorrupt, authorization_intent_id, FileJarvisStore,
 )
 
 # Fixed, never-changing namespace -- deterministic mission_id derivation
@@ -113,6 +116,8 @@ def close_draft_authorization(
     store: FileJarvisStore,
     intent: AuthorizationIntent,
     decision: dict,
+    *,
+    workspace_base_root: Path | None = None,
 ) -> DraftAuthorizationResult:
     """Precondition: the caller has already independently authenticated
     the request, checked CSRF/origin, and confirmed the literal
@@ -134,6 +139,32 @@ def close_draft_authorization(
         intent_id = authorization_intent_id(intent)
         mission_id = _derived_mission_id(intent_id)
 
+        # Persist the exact original human-decision metadata BEFORE any
+        # Chugel mission can be created. A crash at any later point can
+        # only resume from these immutable bytes; it never regenerates a
+        # fresh authorization timestamp or expands authority.
+        try:
+            store.record_authorization_intent(intent, decision=decision)
+        except AuthorizationIntentAlreadyRecorded:
+            pass
+        try:
+            persisted_decision = store.get_authorization_intent_decision(intent_id)
+        except (StoredArtifactCorrupt, AuthorizationDecisionMismatch) as exc:
+            raise DraftAuthorizationDivergenceError(
+                f"authorization intent {intent_id!r} has invalid durable decision metadata"
+            ) from exc
+        if persisted_decision is None:
+            raise DraftAuthorizationDivergenceError(
+                f"authorization intent {intent_id!r} lacks durable decision metadata"
+            )
+        if (
+            persisted_decision["decided_by"] != decision.get("decided_by")
+            or persisted_decision["decision_ref"] != decision.get("decision_ref")
+        ):
+            raise DraftAuthorizationDivergenceError(
+                f"authorization retry for intent {intent_id!r} differs from the original decision"
+            )
+
         existing_effect = store.get_authorization_effect(intent_id)
         if existing_effect is not None:
             if existing_effect != mission_id:
@@ -150,38 +181,67 @@ def close_draft_authorization(
             # success -- a missing/corrupt/invalid canonical record fails
             # closed here rather than being reported as already_effective.
             try:
-                mission_query.get_mission_status(mission_id)
+                binding = mission_query.get_mission_authorization_binding(mission_id)
             except mission_query.MissionQueryError as exc:
                 raise DraftAuthorizationDivergenceError(
                     f"authorization effect for intent {intent_id!r} names mission "
                     f"{mission_id!r}, but it no longer reads back through mission_query "
                     f"({exc.code}) -- refusing to report this authorization as effective"
                 ) from exc
+            draft = current.draft
+            expected_definition = (
+                ("version", 1),
+                ("outcome", draft.mission_definition.outcome),
+                ("scope", tuple(draft.mission_definition.scope)),
+                ("non_goals", tuple(draft.mission_definition.non_goals)),
+                ("acceptance_criteria", tuple(draft.mission_definition.acceptance_criteria)),
+                ("source", "david_intake"),
+                ("based_on_proposal_id", None),
+                ("authorized_by", HUMAN_DECIDER),
+                ("authorized_at", persisted_decision["decided_at"]),
+                ("authorization_decision_ref", intent_id),
+            )
+            expected_repository = derive_repository_placeholder(
+                mission_id, draft.repository_context.expected_base_sha,
+            ) if draft.repository_context is not None else None
+            if (
+                binding.definition != expected_definition
+                or expected_repository is None
+                or binding.repository_base_sha != expected_repository["base_sha"]
+                or binding.repository_branch != expected_repository["branch"]
+            ):
+                raise DraftAuthorizationDivergenceError(
+                    f"authorization effect for intent {intent_id!r} diverges from the reviewed draft"
+                )
+            # Crash repair only, never an authority signal: this marker is
+            # non-authoritative projection bookkeeping. It is recreated
+            # idempotently only AFTER the durable effect and the complete
+            # canonical Mission Record equivalence have both succeeded.
+            store.mark_draft_authorized(intent.draft_id)
             return DraftAuthorizationResult(
                 mission_id=mission_id, intent_id=intent_id, already_effective=True,
             )
 
-        # record_authorization_intent() is itself idempotent (dedup by the
-        # same intent_id) -- a prior crashed attempt may have already
-        # recorded it without ever reaching create_mission(); that is not
-        # an error here, just evidence a retry is in progress.
-        try:
-            store.record_authorization_intent(intent)
-        except AuthorizationIntentAlreadyRecorded:
-            pass
-
         draft = current.draft
+        if draft.repository_context is None or workspace_base_root is None:
+            raise DraftAuthorizationDivergenceError(
+                "executable mission authorization requires reviewed repository_context and a trusted workspace base root"
+            )
         mission_definition = {
             "outcome": draft.mission_definition.outcome,
             "scope": list(draft.mission_definition.scope),
             "non_goals": list(draft.mission_definition.non_goals),
             "acceptance_criteria": list(draft.mission_definition.acceptance_criteria),
             "authorized_by": HUMAN_DECIDER,
-            "authorized_at": decision.get("decided_at"),
+            "authorized_at": persisted_decision["decided_at"],
             "authorization_decision_ref": intent_id,
         }
+        repository = derive_repository_placeholder(
+            mission_id, draft.repository_context.expected_base_sha,
+        )
         mission_write.create_mission_if_absent(
             draft.raw_intent, mission_definition, decision, mission_id=mission_id,
+            repository=repository,
         )
 
         store.record_authorization_effect(intent_id, mission_id)

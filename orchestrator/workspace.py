@@ -91,9 +91,15 @@ import json
 import os
 import re
 import subprocess
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - fail-closed platform branch
+    fcntl = None
 
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "mission_record.schema.json"
 with open(_SCHEMA_PATH, encoding="utf-8") as _schema_file:
@@ -116,6 +122,176 @@ class WorkspaceProvisionError(Exception):
     def __init__(self, reason_code: str, detail: str) -> None:
         self.reason_code = reason_code
         super().__init__(f"{reason_code}: {detail}")
+
+
+class WorkspaceLeaseError(Exception):
+    pass
+
+
+@dataclass
+class WorkspaceSupervisorLease:
+    """Exclusive process-wide owner of mission-worktree coordination."""
+
+    fd: int
+    root_fd: int
+    path: Path
+    base_root: Path
+    root_identity: tuple[int, int]
+    git_identity: tuple[int, int]
+    lock_identity: tuple[int, int]
+    _closed: bool = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+                fcntl.flock(self.root_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            os.close(self.root_fd)
+            self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+
+def _open_canonical_absolute_directory(path: Path) -> tuple[int, Path]:
+    """Open every component with O_NOFOLLOW; aliases are not trusted config."""
+    raw = Path(path)
+    if not raw.is_absolute() or str(raw) != os.path.normpath(str(raw)):
+        raise WorkspaceLeaseError("UNSAFE_BASE_ROOT")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in raw.parts[1:]:
+            next_fd = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
+            )
+            os.close(fd)
+            fd = next_fd
+        return fd, raw
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def validate_workspace_supervisor_lease(
+    lease: WorkspaceSupervisorLease, base_root: Path,
+) -> None:
+    if lease._closed:
+        raise WorkspaceLeaseError("LEASE_NOT_HELD")
+    try:
+        fd, root = _open_canonical_absolute_directory(base_root)
+    except (OSError, WorkspaceLeaseError) as exc:
+        raise WorkspaceLeaseError("UNSAFE_BASE_ROOT") from exc
+    try:
+        info = os.fstat(fd)
+        identity = (info.st_dev, info.st_ino)
+        git_fd = os.open(".git", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            git_info = os.fstat(git_fd)
+            lock_fd = os.open(
+                lease.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=git_fd,
+            )
+            try:
+                lock_info = os.fstat(lock_fd)
+            finally:
+                os.close(lock_fd)
+        finally:
+            os.close(git_fd)
+    except OSError as exc:
+        raise WorkspaceLeaseError("LEASE_REPOSITORY_MISMATCH") from exc
+    finally:
+        os.close(fd)
+    if (
+        root != lease.base_root
+        or identity != lease.root_identity
+        or (git_info.st_dev, git_info.st_ino) != lease.git_identity
+        or (lock_info.st_dev, lock_info.st_ino) != lease.lock_identity
+        or not stat.S_ISREG(lock_info.st_mode)
+        or lock_info.st_nlink != 1
+        or lock_info.st_uid != os.geteuid()
+        or stat.S_IMODE(lock_info.st_mode) != 0o600
+    ):
+        raise WorkspaceLeaseError("LEASE_REPOSITORY_MISMATCH")
+
+
+def acquire_workspace_supervisor_lease(base_root: Path) -> WorkspaceSupervisorLease:
+    """Acquire the sole non-blocking supervisor lease under a trusted real .git dir."""
+    if fcntl is None:
+        raise WorkspaceLeaseError("POSIX_FLOCK_UNAVAILABLE")
+    try:
+        root_fd, root = _open_canonical_absolute_directory(base_root)
+        root_info = os.fstat(root_fd)
+        root_identity = (root_info.st_dev, root_info.st_ino)
+        try:
+            fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            os.close(root_fd)
+            raise WorkspaceLeaseError("LEASE_ALREADY_HELD") from exc
+        try:
+            git_fd = os.open(".git", os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+            git_info = os.fstat(git_fd)
+            git_identity = (git_info.st_dev, git_info.st_ino)
+        except BaseException:
+            fcntl.flock(root_fd, fcntl.LOCK_UN)
+            os.close(root_fd)
+            raise
+    except WorkspaceLeaseError:
+        raise
+    except OSError as exc:
+        raise WorkspaceLeaseError("UNSAFE_GIT_DIRECTORY") from exc
+    name = "jarvis-workspace-supervisor.lock"
+    lease_ready = False
+    try:
+        try:
+            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=git_fd)
+            created = False
+        except FileNotFoundError:
+            try:
+                fd = os.open(
+                    name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600, dir_fd=git_fd,
+                )
+                created = True
+            except OSError as exc:
+                raise WorkspaceLeaseError("UNSAFE_LEASE_FILE") from exc
+        except OSError as exc:
+            raise WorkspaceLeaseError("UNSAFE_LEASE_FILE") from exc
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+                raise WorkspaceLeaseError("UNSAFE_LEASE_FILE")
+            if created and stat.S_IMODE(info.st_mode) != 0o600:
+                os.fchmod(fd, 0o600)
+                info = os.fstat(fd)
+                if stat.S_IMODE(info.st_mode) != 0o600:
+                    raise WorkspaceLeaseError("UNSAFE_LEASE_FILE")
+            elif not created and stat.S_IMODE(info.st_mode) != 0o600:
+                raise WorkspaceLeaseError("UNSAFE_LEASE_FILE")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError) as exc:
+                raise WorkspaceLeaseError("LEASE_ALREADY_HELD") from exc
+            lease_ready = True
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(git_fd)
+        if not lease_ready:
+            fcntl.flock(root_fd, fcntl.LOCK_UN)
+            os.close(root_fd)
+    lock_info = os.fstat(fd)
+    return WorkspaceSupervisorLease(
+        fd=fd, root_fd=root_fd, path=root / ".git" / name, base_root=root,
+        root_identity=root_identity, git_identity=git_identity,
+        lock_identity=(lock_info.st_dev, lock_info.st_ino),
+    )
 
 
 PROVISION_FAILURE_REASONS = frozenset({
@@ -481,6 +657,34 @@ def provision_mission_worktree(
             f"git worktree add reported success but the registry does not confirm {path} at {branch}@{base_sha}",
         )
     return path
+
+
+def verify_mission_worktree(
+    mission_id: str, *, base_root: Path, git_executable: str = "git",
+) -> WorktreeRegistryEntry:
+    """Lifecycle-neutral verification of the deterministic registered worktree.
+
+    This deliberately does not compare HEAD with the original base SHA: later
+    lifecycle phases legitimately advance HEAD. Phase-specific policy belongs
+    to the Jarvis coordinator.
+    """
+    _validate_mission_id(mission_id)
+    _require_git_executable(git_executable)
+    resolved = _require_base_root(base_root, git_executable)
+    path = derive_worktree_path(mission_id, resolved)
+    expected_branch = derive_branch_name(mission_id)
+    identity, reason = _capture_leaf_identity(resolved, mission_id)
+    if identity is None:
+        raise WorkspaceProvisionError(reason or "PATH_IS_SYMLINK", "worktree identity unavailable")
+    registry = _list_registered_worktrees(resolved, git_executable)
+    entry = registry.get(path)
+    if entry is None:
+        raise WorkspaceProvisionError("PATH_EXISTS_UNRECOGNIZED", "worktree is not registered")
+    if entry.branch != expected_branch:
+        raise WorkspaceProvisionError("BRANCH_MISMATCH_ON_RESUME", "registered branch differs")
+    if not isinstance(entry.head, str) or re.fullmatch(r"[0-9a-f]{40}", entry.head) is None:
+        raise WorkspaceProvisionError("HEAD_MISMATCH_ON_RESUME", "registered HEAD is not canonical")
+    return entry
 
 
 def _capture_leaf_identity(resolved_base_root: Path, mission_id: str) -> tuple[tuple[int, int] | None, str | None]:

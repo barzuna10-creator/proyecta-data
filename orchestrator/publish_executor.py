@@ -64,6 +64,16 @@ def _git_push(repository_root: str, branch: str, *, git_executable: str) -> None
         )
 
 
+def _local_head(repository_root: str, *, git_executable: str) -> str:
+    result = _run([git_executable, "rev-parse", "HEAD"], cwd=repository_root)
+    if result.returncode != 0:
+        raise PublishExecutorError("git rev-parse HEAD failed")
+    value = result.stdout.decode("ascii", "strict").strip()
+    if len(value) != 40 or any(c not in "0123456789abcdef" for c in value):
+        raise PublishExecutorError("git returned a non-canonical HEAD")
+    return value
+
+
 def _find_existing_pr(branch: str, *, gh_executable: str, repository_root: str) -> dict | None:
     result = _run(
         [gh_executable, "pr", "list", "--head", branch, "--state", "all",
@@ -167,10 +177,17 @@ def run(
     try:
         if state == "PUBLISHING":
             from orchestrator.publish_commit_materializer import materialize_reviewed_commit
-            materialize_reviewed_commit(
+            observed_sha = materialize_reviewed_commit(
                 mission_id, repository_root, record["repository"]["base_sha"],
                 git_executable=git_executable,
             )
+
+            canonical_sha = (record.get("publish") or {}).get("commit_sha")
+            if canonical_sha is None:
+                record = chugel.record_publish_commit(mission_id, observed_sha)
+                canonical_sha = observed_sha
+            elif canonical_sha != observed_sha:
+                raise PublishExecutorError("materialized HEAD conflicts with canonical publish identity")
 
             _git_push(repository_root, branch, git_executable=git_executable)
 
@@ -198,6 +215,11 @@ def run(
         conclusion = None
         while time.monotonic() < deadline:
             view = _pr_view(pr_number, gh_executable=gh_executable, repository_root=repository_root)
+            canonical_sha = (chugel.get_mission(mission_id).get("publish") or {}).get("commit_sha")
+            if not canonical_sha or _local_head(repository_root, git_executable=git_executable) != canonical_sha:
+                raise PublishExecutorError("local HEAD conflicts with canonical publish identity")
+            if view.get("headRefOid") != canonical_sha:
+                raise PublishExecutorError("PR head conflicts with canonical publish identity")
             conclusion = _ci_conclusion(view)
             run_id = f"pr-{pr_number}"
             if conclusion is not None:
@@ -209,7 +231,6 @@ def run(
         if conclusion == "success":
             record = chugel.transition(mission_id, "MERGE_AWAITING_AUTHORIZATION",
                 actor="chugel", reason="CI succeeded")
-            chugel.record_publish_commit(mission_id, view["headRefOid"])
             return ExecutorResult("COMPLETED", "MERGE_AWAITING_AUTHORIZATION")
 
         reason = f"CI concluded {conclusion!r}" if conclusion is not None else \

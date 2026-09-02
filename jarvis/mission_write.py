@@ -65,7 +65,8 @@ def _authorize(mission_id: str, gate_name: str, decision: dict) -> dict:
     return chugel.decide_gate(mission_id, gate_name, decision)
 
 
-def create_mission(intent_text: str, mission_definition: dict, decision: dict, *, mission_id: str | None = None) -> dict:
+def create_mission(intent_text: str, mission_definition: dict, decision: dict, *, mission_id: str | None = None,
+                   repository: dict | None = None) -> dict:
     """The only path Jarvis has to create a Mission Record. `decision`
     must carry the current-turn José attribution used for
     mission_definition["authorized_by"]; orchestrator.chugel.create_mission()
@@ -73,11 +74,12 @@ def create_mission(intent_text: str, mission_definition: dict, decision: dict, *
     HUMAN_DECIDER -- this function's re-check is defensive, not the only
     enforcement, exactly like _authorize() above."""
     _require_current_turn_attribution(decision)
-    return chugel.create_mission(intent_text, mission_definition, mission_id=mission_id)
+    return chugel.create_mission(intent_text, mission_definition, mission_id=mission_id, repository=repository)
 
 
 def create_mission_if_absent(
     intent_text: str, mission_definition: dict, decision: dict, *, mission_id: str,
+    repository: dict | None = None,
 ) -> dict:
     """Control Plane V1: identical to create_mission() (same attribution
     requirement, same underlying write), except a MissionRecordAlreadyExists
@@ -89,9 +91,26 @@ def create_mission_if_absent(
     this stays inside mission_write.py's own already-allowed write seam."""
     _require_current_turn_attribution(decision)
     try:
-        return chugel.create_mission(intent_text, mission_definition, mission_id=mission_id)
+        return chugel.create_mission(
+            intent_text, mission_definition, mission_id=mission_id, repository=repository,
+        )
     except chugel.MissionRecordAlreadyExists:
-        return chugel.get_mission(mission_id)
+        existing = chugel.get_mission(mission_id)
+        expected_definition = {
+            "outcome": mission_definition["outcome"],
+            "scope": mission_definition["scope"],
+            "non_goals": mission_definition.get("non_goals", []),
+            "acceptance_criteria": mission_definition["acceptance_criteria"],
+            "authorized_by": mission_definition["authorized_by"],
+            "authorized_at": mission_definition["authorized_at"],
+            "authorization_decision_ref": mission_definition["authorization_decision_ref"],
+        }
+        actual_definition = existing["mission_definition_history"][0]
+        if any(actual_definition.get(key) != value for key, value in expected_definition.items()):
+            raise MissionWriteError(f"mission {mission_id}: existing definition diverges from retry")
+        if repository is not None and existing.get("repository") != repository:
+            raise MissionWriteError(f"mission {mission_id}: existing repository binding diverges from retry")
+        return existing
 
 
 def authorize_scope(mission_id: str, decision: dict) -> dict:
