@@ -15,18 +15,20 @@ the CLEAN mergeability check is what actually captures real conflict
 risk).
 
 M3 (Concurrent Publish/Merge Live Validation & Hardening): the actual
-`gh pr merge` call (and its immediate post-merge re-read) is now wrapped
-in `chugel.merge_serialization_lock()` -- a cross-mission, kernel-
-released-on-crash lock closing the one real race this module's own
-concurrency story left open: M2 proved multiple missions build/review
-truly concurrently, but nothing previously stopped two of them from
-attempting the literal merge subprocess at the same instant. Every
-other step here (and in publish_executor.py) remains unlocked and
-unchanged -- pushes and PR creation are already per-branch and safe by
-construction, and this pre-merge re-verification already correctly
-refuses an unsafe merge on its own; the lock only makes the *ordering*
-of contended attempts deterministic, it does not change what counts as
-safe to merge."""
+`gh pr merge` call, its immediate post-merge re-read, and the failure-
+path Chugel persistence performed by _block() on any of that block's
+three failure branches, are now wrapped in `chugel.
+merge_serialization_lock()` -- a cross-mission, kernel-released-on-
+crash lock closing the one real race this module's own concurrency
+story left open: M2 proved multiple missions build/review truly
+concurrently, but nothing previously stopped two of them from
+attempting the literal merge subprocess at the same instant. The
+pre-merge gating checks above, and pushes/PR-creation in
+publish_executor.py, remain unlocked and unchanged -- already
+per-branch and safe by construction, and this pre-merge re-verification
+already correctly refuses an unsafe merge on its own; the lock only
+makes the *ordering* of contended attempts deterministic, it does not
+change what counts as safe to merge."""
 
 from __future__ import annotations
 
@@ -170,12 +172,21 @@ def run(
         # M3: serialize the one real concurrency hazard -- two missions'
         # `gh pr merge` calls racing the shared base branch at literally
         # the same instant. See chugel.merge_serialization_lock()'s own
-        # docstring for the full design rationale. Scoped to exactly the
-        # mutating call and its immediate post-merge re-read -- every
-        # other step in this function (the pre-merge gating checks
-        # above, push/PR-creation in publish_executor.py) is already
-        # per-branch and safe without it, and is deliberately left
-        # outside the lock to keep held time minimal.
+        # docstring for the full design rationale. The pre-merge gating
+        # checks above and push/PR-creation in publish_executor.py are
+        # already per-branch and safe without it, and are deliberately
+        # left outside this block. Inside it: the mutating `gh pr merge`
+        # call, its immediate post-merge re-read, and -- on any of the
+        # three failure branches below -- the _block() call's own
+        # Chugel persistence (a per-mission record read/write/fsync,
+        # itself serialized against other mutators of THIS mission by
+        # the separate, per-mission _mission_lock() acquired inside
+        # chugel.transition()). That nesting (this global lock held
+        # outer, a per-mission lock taken inner) is safe and never
+        # reversed anywhere else in the codebase, so it cannot deadlock
+        # -- but it does mean held time on a failure path is the merge
+        # attempt plus one Chugel write, not the bare subprocess call
+        # alone.
         with chugel.merge_serialization_lock():
             try:
                 result = _run(

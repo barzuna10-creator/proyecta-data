@@ -379,10 +379,21 @@ def merge_serialization_lock():
     `gh pr merge` attempts racing the same base branch at literally the
     same instant (orchestrator/merge_executor.py's own call site is the
     only intended caller). Every other publish/merge step -- push, PR
-    creation, CI polling -- is already per-branch and safe by
-    construction (see merge_executor.py's own module docstring); this
-    lock is deliberately scoped to nothing wider than the single `gh pr
-    merge` subprocess call.
+    creation, CI polling, and the pre-merge gating re-verification --
+    is already per-branch and safe by construction (see
+    merge_executor.py's own module docstring), and stays outside this
+    lock. What IS held under it, at that one call site: the mutating
+    `gh pr merge` call, its immediate post-merge re-read, and -- on any
+    of that block's failure branches -- the Chugel persistence _block()
+    itself performs (a per-mission record write, serialized against
+    other mutators of that same mission by the separate, per-mission
+    `_mission_lock()` chugel.transition() acquires internally; that
+    nesting, this lock outer and `_mission_lock()` inner, is the only
+    order used anywhere in this module, so it cannot deadlock). Held
+    time on a failure path is therefore the merge attempt plus one
+    Chugel write, not the bare subprocess call alone -- this lock is
+    scoped to that one call site, not to the shortest possible duration
+    within it.
 
     Deliberately NOT `_mission_lock()`, and deliberately not a durable,
     Chugel-recorded reservation naming which mission currently holds it:
