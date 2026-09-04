@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,7 @@ import os
 import threading
 import time
 
+import db
 from db import conectar
 from api.repositorio_proyectos import apagar_executor_planos, recuperar_analisis_interrumpidos
 from api.routers import auth as auth_router, feedback as feedback_router, metricas as metricas_router, proyectos, sistemas_constructivos
@@ -22,7 +24,11 @@ from similares import obtener_similares as _obtener_similares_motor, LIMITE_DEFE
 from presupuestos import calcular_presupuesto as _calcular_presupuesto_motor
 from especificaciones import unidad_comercial as _unidad_comercial
 from database.respaldar_db import CODIGO_LOCK_OCUPADO, respaldar as _respaldar_db
-from database.migraciones import aplicar_migraciones_pendientes as _aplicar_migraciones_pendientes
+from database.migraciones import (
+    aplicar_migraciones_pendientes as _aplicar_migraciones_pendientes,
+    migraciones_completadas as _migraciones_completadas,
+    MIGRACIONES as _MIGRACIONES,
+)
 
 # Investigación "no such table: usuarios" en producción: nada, en ningún
 # punto del despliegue, ejecutaba las migraciones de database/agregar_*.py
@@ -197,12 +203,75 @@ def inicio():
 # verificar_catalogo.py -- un diagnóstico para un humano, no algo que un
 # probe de salud dispare en cada llamada.
 #
+# Reconciliado desde local main's 6e98fb0 (feat(ops): strengthen
+# production health and deploy verification) durante la reconciliación
+# de linaje previa a M3: agrega dos chequeos adicionales sin tocar el
+# contrato ni el comportamiento de los dos originales.
+#
+# Mission #003 (Production Health & Deploy Guard): el mismo directorio
+# que monta render.yaml para el disco persistente -- ver ese archivo. Solo
+# se usa para comparar, nunca se expone en la respuesta (ver más abajo).
+_MONTAJE_PERSISTENTE = Path("/data")
+
+
+def _schema_listo():
+    """¿Ya corrieron TODAS las migraciones registradas en database/
+    migraciones.py, no solo la que crea `productos`? migraciones_
+    completadas() ya está diseñada para nunca lanzar (ver su propio
+    docstring) -- el try/except de acá es una segunda capa, a propósito,
+    para que /health en sí nunca pueda romperse por este chequeo
+    específico, sin importar qué tan bien se porte esa función hoy."""
+    try:
+        aplicadas = set(_migraciones_completadas())
+        registradas = {nombre for nombre, _ in _MIGRACIONES}
+        return "ok" if registradas.issubset(aplicadas) else "pending"
+    except Exception:
+        _logger.exception("HEALTH_CHECK estado=fallido causa=verificar_schema")
+        return "pending"
+
+
+def _disco_persistente_estado():
+    """Señal de configuración, no de salud -- ver Mission #003. Solo
+    tiene sentido en Render (detectado igual que /version: presencia de
+    RENDER_GIT_COMMIT, la misma variable que Render ya expone) -- en
+    cualquier otro entorno (local, CI), la base de desarrollo nunca vive
+    bajo /data a propósito, y eso no es una advertencia real, así que el
+    chequeo ni se intenta ahí ('n/a').
+
+    En Render, compara la ruta CONFIGURADA (`db.BASE_DATOS`, leída en
+    vivo -- nunca una copia capturada al importar, para que un valor
+    parcheado en pruebas o cambiado en runtime se refleje siempre) contra
+    el punto de montaje persistente -- resuelta con Path.resolve() en
+    ambos lados (normaliza `..`, symlinks) y comparada con
+    is_relative_to(), no con un prefijo de string: "/data2/algo.db" NO
+    debe aceptarse como si estuviera dentro de "/data" solo porque el
+    string empieza igual."""
+    if not os.environ.get("RENDER_GIT_COMMIT"):
+        return "n/a"
+
+    try:
+        ruta_configurada = Path(db.BASE_DATOS).resolve()
+        montaje = _MONTAJE_PERSISTENTE.resolve()
+        return "ok" if ruta_configurada.is_relative_to(montaje) else "warning"
+    except Exception:
+        _logger.exception("HEALTH_CHECK estado=fallido causa=verificar_disco")
+        return "warning"
+
+
+# `disk` es deliberadamente informativo, no bloqueante -- ver Mission
+# #003: un despliegue corriendo sobre disco efímero puede estar
+# funcionando perfectamente bien AHORA, el riesgo real es el próximo
+# redeploy que lo borre; no es un fallo de salud actual, así que nunca
+# tira el status code a 503 por sí solo, a diferencia de `database`,
+# `catalog` y `schema`.
+#
 # El cuerpo de la respuesta nunca incluye la excepción real, la ruta de la
-# base de datos, ni ningún dato de producto -- solo estados fijos
-# ("ok"/"error"/"empty"), para que un fallo de conectividad no filtre
-# infraestructura interna a quien golpee el endpoint público. El detalle
-# real de la excepción sí queda en el log del servidor (_logger), para
-# poder diagnosticar sin exponerlo por HTTP.
+# base de datos, nombres de migraciones, ni ningún dato de producto --
+# solo estados fijos ("ok"/"error"/"empty"/"pending"/"warning"/"n/a"),
+# para que un fallo de conectividad no filtre infraestructura interna a
+# quien golpee el endpoint público. El detalle real de la excepción sí
+# queda en el log del servidor (_logger), para poder diagnosticar sin
+# exponerlo por HTTP.
 @app.get("/health")
 def salud():
     estado_bd = "ok"
@@ -220,11 +289,19 @@ def salud():
         _logger.exception("HEALTH_CHECK estado=fallido causa=conexion_o_consulta")
         estado_bd = "error"
 
-    saludable = estado_bd == "ok" and estado_catalogo == "ok"
+    estado_schema = _schema_listo()
+    estado_disco = _disco_persistente_estado()
+
+    saludable = estado_bd == "ok" and estado_catalogo == "ok" and estado_schema == "ok"
 
     cuerpo = {
         "status": "ok" if saludable else "degraded",
-        "checks": {"database": estado_bd, "catalog": estado_catalogo},
+        "checks": {
+            "database": estado_bd,
+            "catalog": estado_catalogo,
+            "schema": estado_schema,
+            "disk": estado_disco,
+        },
     }
 
     return JSONResponse(content=cuerpo, status_code=200 if saludable else 503)

@@ -1,7 +1,9 @@
 """Pruebas para GET /health y GET /version (api/main.py), ver
 MASTER_ROADMAP.md, NOW #1: "no existe ningún mecanismo" para detectar un
 backend roto o un catálogo vacío -- antes de esto, "/" respondía 200 sin
-tocar la base de datos.
+tocar la base de datos. Ampliado en Mission #003 (Production Health &
+Deploy Guard) con los chequeos de schema/migraciones y disco
+persistente.
 
 No hay TestClient de FastAPI a propósito (requeriría httpx, no instalado)
 -- salud() y version() son funciones Python normales sin `async def` ni
@@ -27,7 +29,7 @@ from unittest import mock
 import db
 from fastapi import HTTPException
 
-from api.main import producto_por_id, salud, version
+from api.main import producto_por_id, salud, version, _schema_listo, _disco_persistente_estado
 
 
 def _crear_db_temporal(con_productos=True, cantidad_productos=0):
@@ -54,6 +56,27 @@ def _crear_db_temporal(con_productos=True, cantidad_productos=0):
     return archivo.name
 
 
+def _agregar_tabla_migraciones(ruta_db, nombres_aplicados=()):
+    """Mission #003: crea migraciones_aplicadas (mismo esquema que
+    database/migraciones.py::_asegurar_tabla_seguimiento) con los nombres
+    dados ya marcados como aplicados -- para controlar qué ve
+    _schema_listo() sin depender de las migraciones reales del repo."""
+    conexion = sqlite3.connect(ruta_db)
+    conexion.execute("""
+        CREATE TABLE migraciones_aplicadas (
+            nombre TEXT PRIMARY KEY,
+            fecha_aplicada TEXT NOT NULL
+        )
+    """)
+    for nombre in nombres_aplicados:
+        conexion.execute(
+            "INSERT INTO migraciones_aplicadas (nombre, fecha_aplicada) VALUES (?, '2026-01-01 00:00:00')",
+            (nombre,),
+        )
+    conexion.commit()
+    conexion.close()
+
+
 def _cuerpo(respuesta):
     return json.loads(respuesta.body)
 
@@ -63,8 +86,17 @@ class PruebaSaludBaseYCatalogoOk(unittest.TestCase):
         self.ruta_db = _crear_db_temporal(con_productos=True, cantidad_productos=3)
         self._patch = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
         self._patch.start()
+        # Mission #003: sin esto, _schema_listo() compara contra las
+        # migraciones REALES registradas en database/migraciones.py (que
+        # esta base de prueba nunca corrió) y reportaría 'pending' --
+        # una lista vacía de migraciones "registradas" hace que el
+        # chequeo de schema sea trivialmente 'ok' para este escenario,
+        # que solo le interesa a database/catalog.
+        self._patch_migraciones = mock.patch("api.main._MIGRACIONES", [])
+        self._patch_migraciones.start()
 
     def tearDown(self):
+        self._patch_migraciones.stop()
         self._patch.stop()
         os.remove(self.ruta_db)
 
@@ -76,6 +108,7 @@ class PruebaSaludBaseYCatalogoOk(unittest.TestCase):
         self.assertEqual(cuerpo["status"], "ok")
         self.assertEqual(cuerpo["checks"]["database"], "ok")
         self.assertEqual(cuerpo["checks"]["catalog"], "ok")
+        self.assertEqual(cuerpo["checks"]["schema"], "ok")
 
 
 class PruebaSaludCatalogoVacio(unittest.TestCase):
@@ -83,8 +116,11 @@ class PruebaSaludCatalogoVacio(unittest.TestCase):
         self.ruta_db = _crear_db_temporal(con_productos=True, cantidad_productos=0)
         self._patch = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
         self._patch.start()
+        self._patch_migraciones = mock.patch("api.main._MIGRACIONES", [])
+        self._patch_migraciones.start()
 
     def tearDown(self):
+        self._patch_migraciones.stop()
         self._patch.stop()
         os.remove(self.ruta_db)
 
@@ -126,16 +162,175 @@ class PruebaSaludBaseInalcanzable(unittest.TestCase):
 
         # Ni la ruta real de la base de datos (el directorio temporal usado
         # en esta prueba), ni palabras propias de un traceback/excepción de
-        # sqlite3, deben aparecer en el cuerpo de la respuesta pública.
+        # sqlite3, ni nombres reales de migraciones, deben aparecer en el
+        # cuerpo de la respuesta pública.
         self.assertNotIn(self.directorio_temporal, texto_crudo)
-        for fragmento_prohibido in ("Traceback", "sqlite3", "Error:", "Exception"):
+        for fragmento_prohibido in ("Traceback", "sqlite3", "Error:", "Exception", "agregar_"):
             self.assertNotIn(fragmento_prohibido, texto_crudo)
 
-        # Solo las dos claves de chequeo esperadas, con valores de un
-        # conjunto fijo -- nada de mensajes libres.
-        self.assertEqual(set(cuerpo["checks"].keys()), {"database", "catalog"})
+        # Mission #003: ahora cuatro claves de chequeo, todas con valores
+        # de un conjunto fijo -- nada de mensajes libres, ni acá ni en
+        # los dos chequeos nuevos.
+        self.assertEqual(set(cuerpo["checks"].keys()), {"database", "catalog", "schema", "disk"})
         self.assertIn(cuerpo["checks"]["database"], {"ok", "error"})
         self.assertIn(cuerpo["checks"]["catalog"], {"ok", "empty", "unknown"})
+        self.assertIn(cuerpo["checks"]["schema"], {"ok", "pending"})
+        self.assertIn(cuerpo["checks"]["disk"], {"ok", "warning", "n/a"})
+
+
+class PruebaSaludSchema(unittest.TestCase):
+    """Mission #003: _schema_listo() compara TODAS las migraciones
+    registradas (api.main._MIGRACIONES, mockeado acá con una lista
+    chica y controlada) contra migraciones_aplicadas -- no solo si
+    productos existe."""
+
+    def setUp(self):
+        self.ruta_db = _crear_db_temporal(con_productos=True, cantidad_productos=3)
+        self._patch_db = mock.patch.object(db, "BASE_DATOS", self.ruta_db)
+        self._patch_db.start()
+        self._patch_migraciones = mock.patch("api.main._MIGRACIONES", [("m1", None), ("m2", None)])
+        self._patch_migraciones.start()
+
+    def tearDown(self):
+        self._patch_migraciones.stop()
+        self._patch_db.stop()
+        os.remove(self.ruta_db)
+
+    def test_ok_cuando_todas_las_registradas_estan_aplicadas(self):
+        _agregar_tabla_migraciones(self.ruta_db, nombres_aplicados=["m1", "m2"])
+
+        self.assertEqual(_schema_listo(), "ok")
+
+        respuesta = salud()
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(_cuerpo(respuesta)["checks"]["schema"], "ok")
+
+    def test_pending_cuando_falta_una_migracion_registrada(self):
+        _agregar_tabla_migraciones(self.ruta_db, nombres_aplicados=["m1"])  # falta "m2"
+
+        self.assertEqual(_schema_listo(), "pending")
+
+        respuesta = salud()
+        self.assertEqual(respuesta.status_code, 503)
+        cuerpo = _cuerpo(respuesta)
+        self.assertEqual(cuerpo["status"], "degraded")
+        self.assertEqual(cuerpo["checks"]["schema"], "pending")
+        # database/catalog siguen "ok" -- schema es la única causa de
+        # degradación en este escenario, no un side-effect de otra cosa.
+        self.assertEqual(cuerpo["checks"]["database"], "ok")
+        self.assertEqual(cuerpo["checks"]["catalog"], "ok")
+
+    def test_pending_cuando_la_tabla_de_seguimiento_todavia_no_existe(self):
+        # No se llama _agregar_tabla_migraciones -- migraciones_aplicadas
+        # no existe todavía (arranque recién empezando, antes de que el
+        # runner de migraciones alcance a crearla). migraciones_
+        # completadas() ya está diseñada para no lanzar acá (devuelve
+        # []) -- esto confirma que eso se traduce en 'pending', no en un
+        # health check roto.
+        self.assertEqual(_schema_listo(), "pending")
+
+    def test_no_lanza_ante_un_fallo_inesperado_de_migraciones_completadas(self):
+        # Segunda capa de defensa (ver docstring de _schema_listo): aunque
+        # migraciones_completadas() ya no debería lanzar nunca, si por
+        # algún cambio futuro lo hiciera, _schema_listo() igual debe
+        # devolver 'pending', no propagar la excepción.
+        with mock.patch("api.main._migraciones_completadas", side_effect=RuntimeError("boom")):
+            self.assertEqual(_schema_listo(), "pending")
+
+
+class PruebaSaludDisco(unittest.TestCase):
+    """Mission #003: _disco_persistente_estado() -- ver el docstring de
+    la función para el razonamiento completo. Estas pruebas son
+    deliberadamente a nivel de unidad (llaman la función directo, sin
+    pasar por salud()) porque no hace falta un archivo real bajo /data
+    para probar la lógica de resolución de rutas -- Path.resolve() no
+    exige que la ruta exista."""
+
+    def _sin_render(self):
+        parche = mock.patch.dict(os.environ, {}, clear=False)
+        parche.start()
+        os.environ.pop("RENDER_GIT_COMMIT", None)
+        self.addCleanup(parche.stop)
+
+    def _en_render(self):
+        parche = mock.patch.dict(os.environ, {"RENDER_GIT_COMMIT": "abc1234"})
+        parche.start()
+        self.addCleanup(parche.stop)
+
+    def test_n_a_fuera_de_render(self):
+        self._sin_render()
+        with mock.patch.object(db, "BASE_DATOS", "database/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "n/a")
+
+    def test_n_a_fuera_de_render_incluso_si_la_ruta_ya_es_data(self):
+        # El chequeo de Render tiene prioridad -- ni se intenta resolver
+        # la ruta si no estamos en Render, sin importar cuál sea.
+        self._sin_render()
+        with mock.patch.object(db, "BASE_DATOS", "/data/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "n/a")
+
+    def test_ok_en_render_con_ruta_dentro_del_montaje(self):
+        self._en_render()
+        with mock.patch.object(db, "BASE_DATOS", "/data/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "ok")
+
+    def test_ok_en_render_con_subdirectorio_dentro_del_montaje(self):
+        self._en_render()
+        with mock.patch.object(db, "BASE_DATOS", "/data/respaldos/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "ok")
+
+    def test_warning_en_render_con_ruta_relativa_local(self):
+        self._en_render()
+        with mock.patch.object(db, "BASE_DATOS", "database/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "warning")
+
+    def test_warning_boundary_prefijo_de_string_similar_no_se_acepta(self):
+        # El caso exacto que un chequeo naive con .startswith("/data")
+        # aceptaría por error -- "/data2" empieza con el mismo string
+        # que "/data" pero NO es un subdirectorio real del montaje.
+        self._en_render()
+        with mock.patch.object(db, "BASE_DATOS", "/data2/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "warning")
+
+    def test_warning_boundary_prefijo_sin_separador(self):
+        # Mismo caso límite, sin subdirectorio -- "/database" también
+        # empieza con "/data" como string, tampoco es válido.
+        self._en_render()
+        with mock.patch.object(db, "BASE_DATOS", "/database/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "warning")
+
+    def test_warning_con_traversal_normalizado_hacia_afuera(self):
+        # resolve() normaliza ".." antes de comparar -- esto termina
+        # apuntando de verdad a /data2/proyecta.db, fuera del montaje.
+        self._en_render()
+        with mock.patch.object(db, "BASE_DATOS", "/data/../data2/proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "warning")
+
+    def test_ok_con_traversal_normalizado_que_vuelve_adentro(self):
+        # ".." que termina resolviendo DENTRO del montaje sigue siendo
+        # válido -- confirma que el rechazo es por estar genuinamente
+        # afuera, no por la sola presencia de "..".
+        self._en_render()
+        with mock.patch.object(db, "BASE_DATOS", "/data/sub/../proyecta.db"):
+            self.assertEqual(_disco_persistente_estado(), "ok")
+
+    def test_warning_no_afecta_el_status_code_general(self):
+        # Integración completa: disk="warning" nunca debe bajar el
+        # status a 503 por sí solo (ver Mission #003) -- database,
+        # catalog y schema siguen determinando el status code.
+        self._en_render()
+        ruta_db = _crear_db_temporal(con_productos=True, cantidad_productos=3)
+        try:
+            with mock.patch.object(db, "BASE_DATOS", ruta_db), \
+                 mock.patch("api.main._MIGRACIONES", []):
+                respuesta = salud()
+        finally:
+            os.remove(ruta_db)
+
+        self.assertEqual(respuesta.status_code, 200)
+        cuerpo = _cuerpo(respuesta)
+        self.assertEqual(cuerpo["status"], "ok")
+        self.assertEqual(cuerpo["checks"]["disk"], "warning")
 
 
 class PruebaVersion(unittest.TestCase):
