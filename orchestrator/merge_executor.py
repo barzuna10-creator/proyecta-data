@@ -12,7 +12,21 @@ head; the PR's mergeStateStatus is CLEAN) from informational-only ones
 authorized -- unrelated, harmless concurrent activity from other
 missions is expected and must not block a merge that is otherwise safe;
 the CLEAN mergeability check is what actually captures real conflict
-risk)."""
+risk).
+
+M3 (Concurrent Publish/Merge Live Validation & Hardening): the actual
+`gh pr merge` call (and its immediate post-merge re-read) is now wrapped
+in `chugel.merge_serialization_lock()` -- a cross-mission, kernel-
+released-on-crash lock closing the one real race this module's own
+concurrency story left open: M2 proved multiple missions build/review
+truly concurrently, but nothing previously stopped two of them from
+attempting the literal merge subprocess at the same instant. Every
+other step here (and in publish_executor.py) remains unlocked and
+unchanged -- pushes and PR creation are already per-branch and safe by
+construction, and this pre-merge re-verification already correctly
+refuses an unsafe merge on its own; the lock only makes the *ordering*
+of contended attempts deterministic, it does not change what counts as
+safe to merge."""
 
 from __future__ import annotations
 
@@ -153,20 +167,30 @@ def run(
     elif view["state"] != "OPEN":
         return _block(mission_id, f"PR is in an unexpected state {view['state']!r}")
     else:
-        try:
-            result = _run(
-                [gh_executable, "pr", "merge", str(pr_number), "--merge", "--delete-branch=false"],
-                cwd=repository_root, timeout=_TIMEOUT_SECONDS,
-            )
-        except MergeExecutorError as exc:
-            return _block(mission_id, str(exc))
-        if result.returncode != 0:
-            return _block(mission_id, f"gh pr merge failed (exit {result.returncode}): "
-                                       f"{result.stderr.decode('utf-8', 'replace')}")
-        post = _pr_view(pr_number, gh_executable=gh_executable, repository_root=repository_root)
-        merge_commit_sha = (post.get("mergeCommit") or {}).get("oid")
-        if not merge_commit_sha:
-            return _block(mission_id, "merge reported success but no merge commit SHA is available")
+        # M3: serialize the one real concurrency hazard -- two missions'
+        # `gh pr merge` calls racing the shared base branch at literally
+        # the same instant. See chugel.merge_serialization_lock()'s own
+        # docstring for the full design rationale. Scoped to exactly the
+        # mutating call and its immediate post-merge re-read -- every
+        # other step in this function (the pre-merge gating checks
+        # above, push/PR-creation in publish_executor.py) is already
+        # per-branch and safe without it, and is deliberately left
+        # outside the lock to keep held time minimal.
+        with chugel.merge_serialization_lock():
+            try:
+                result = _run(
+                    [gh_executable, "pr", "merge", str(pr_number), "--merge", "--delete-branch=false"],
+                    cwd=repository_root, timeout=_TIMEOUT_SECONDS,
+                )
+            except MergeExecutorError as exc:
+                return _block(mission_id, str(exc))
+            if result.returncode != 0:
+                return _block(mission_id, f"gh pr merge failed (exit {result.returncode}): "
+                                           f"{result.stderr.decode('utf-8', 'replace')}")
+            post = _pr_view(pr_number, gh_executable=gh_executable, repository_root=repository_root)
+            merge_commit_sha = (post.get("mergeCommit") or {}).get("oid")
+            if not merge_commit_sha:
+                return _block(mission_id, "merge reported success but no merge commit SHA is available")
 
     chugel.record_merge_commit(mission_id, merge_commit_sha)
     chugel.transition(mission_id, "MERGED", actor="chugel", reason="merge executed")

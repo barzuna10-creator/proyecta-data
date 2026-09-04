@@ -363,6 +363,66 @@ def _mission_lock(mission_id: str):
         os.close(fd)
 
 
+# --- M3: cross-mission merge serialization ---------------------------------
+
+_MERGE_LOCK_NAME = ".merge.lock"
+
+
+def _merge_lock_path() -> Path:
+    return _MISSIONS_DIR / _MERGE_LOCK_NAME
+
+
+@contextlib.contextmanager
+def merge_serialization_lock():
+    """Cross-process, cross-MISSION exclusive lock serializing the one
+    real concurrency hazard M3 exists to close: two missions' real
+    `gh pr merge` attempts racing the same base branch at literally the
+    same instant (orchestrator/merge_executor.py's own call site is the
+    only intended caller). Every other publish/merge step -- push, PR
+    creation, CI polling -- is already per-branch and safe by
+    construction (see merge_executor.py's own module docstring); this
+    lock is deliberately scoped to nothing wider than the single `gh pr
+    merge` subprocess call.
+
+    Deliberately NOT `_mission_lock()`, and deliberately not a durable,
+    Chugel-recorded reservation naming which mission currently holds it:
+    `_mission_lock()` is per-mission (each mission only ever contends
+    with its own past writers), but the base branch is ONE resource
+    shared by every mission, so this needs a single, global lock file
+    instead. A JSON-recorded "who holds the merge slot" field was
+    considered and rejected during M3 design review: it would duplicate
+    exactly the kind of decision-relevant state this module exists to be
+    the sole owner of ("no second state engine"), and would need its own
+    liveness/staleness bookkeeping to avoid a dead holder blocking
+    forever. This lock needs none of that: it is a pure ordering
+    primitive with zero mission-identifying content, so it cannot
+    desync from any Mission Record, and -- exactly like `_mission_lock()`
+    above -- the kernel releases it automatically if the holding process
+    dies while it is held, so a crash mid-merge can never permanently
+    block a future merge attempt by any mission. The actual outcome of a
+    contended merge is still decided entirely by merge_executor.py's own
+    pre-merge re-verification (head SHA / CI / mergeStateStatus), re-run
+    fresh by whichever caller acquires this lock second -- this lock only
+    prevents two `gh pr merge` invocations from ever being in flight at
+    the same instant, it does not itself judge whether a merge is safe.
+
+    POSIX-only, matching this module's existing O_NOFOLLOW/
+    `_fsync_directory`/`_mission_lock` portability stance -- a no-op (no
+    exclusion at all) on a platform without fcntl, which is a documented
+    portability boundary, never a silent safety claim."""
+    _MISSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = _merge_lock_path()
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _find_ledger_index(ledger: list, invocation_id: str) -> int:
     for idx, entry in enumerate(ledger):
         if isinstance(entry, dict) and entry.get("invocation_id") == invocation_id:
