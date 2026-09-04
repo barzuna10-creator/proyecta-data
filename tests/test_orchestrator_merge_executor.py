@@ -1,6 +1,8 @@
 """orchestrator/merge_executor.py -- pre-merge gating vs. informational
-checks, CLOSED-PR/already-merged handling, and the --merge-only
-invariant. Real Chugel Mission Records; git/gh calls faked."""
+checks, CLOSED-PR/already-merged handling, the --merge-only invariant,
+and (M3 merge recovery hardening) reconciliation of an ambiguous local
+`gh pr merge` outcome against GitHub's own authoritative PR state. Real
+Chugel Mission Records; git/gh calls faked."""
 
 from __future__ import annotations
 
@@ -332,6 +334,199 @@ class M3ConcurrentMergeSerializationTests(MergeExecutorTestCase):
         # Confirms the lock is scoped to the merge call only -- the two
         # missions' pre-merge `gh pr view` calls were free to overlap.
         self.assertTrue(view_overlap_seen["value"], "view calls never overlapped -- test's own concurrency was too weak")
+
+
+class MergeRecoveryHardeningTests(MergeExecutorTestCase):
+    """M3 merge recovery hardening: reproduces the exact live-acceptance
+    failure deterministically -- `gh pr merge` issued, the local result
+    is lost/ambiguous (a killed process, a transient error, or a
+    zero-exit result the immediate re-read doesn't itself confirm), the
+    remote merge may have continued independently -- and proves
+    _reconcile_ambiguous_merge_outcome() resolves every real shape
+    correctly: eventual MERGED, genuine failure, permanent ambiguity,
+    and mismatched identity, always via read-only `gh pr view` polling,
+    never a second real `gh pr merge` mutation."""
+
+    def _view(self, **overrides):
+        base = {"state": "OPEN", "headRefOid": _HEAD_SHA, "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN", "mergeCommit": None,
+                "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+        base.update(overrides)
+        return base
+
+    def _merge_argvs(self, run_mock):
+        return [c.args[0] for c in run_mock.call_args_list
+                if len(c.args[0]) > 2 and c.args[0][0] == "gh" and c.args[0][2] == "merge"]
+
+    def test_ambiguous_local_failure_that_eventually_shows_merged_converges_to_merged(self):
+        """The exact live failure: `gh pr merge` returns non-zero (the
+        local controller lost the result / observed a transient
+        conflict such as "Merge already in progress"), but the remote
+        merge continues and GitHub's own state resolves to MERGED with
+        the correct, authorized identity a couple of polls later."""
+        mid = self._mission_merging()
+        merge_failure = mock.Mock(returncode=1, stdout=b"", stderr=b"GraphQL: Merge already in progress\n")
+        post_merge_view = self._view(state="MERGED", mergeCommit={"oid": "d" * 40})
+        calls = [
+            _json_result(self._view()),            # Step 1 pre-merge view
+            _ok_result(stdout=(b"c" * 40)),         # origin/main rev-parse (informational)
+            merge_failure,                          # the real, authorized gh pr merge attempt -- fails locally
+            _json_result(self._view()),             # reconciliation poll #1 -- still OPEN (transient)
+            _json_result(post_merge_view),          # reconciliation poll #2 -- now MERGED, correct identity
+        ]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls) as run_mock, \
+                mock.patch("orchestrator.merge_executor.time.sleep"):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "COMPLETED")
+        self.assertEqual(result.state, "MERGED")
+        record = chugel.get_mission(mid)
+        self.assertEqual(record["state"], "MERGED")
+        self.assertEqual(record["merge"]["merge_commit_sha"], "d" * 40)
+        # Never a second real merge mutation -- only the one, original,
+        # authorized `gh pr merge` call.
+        self.assertEqual(len(self._merge_argvs(run_mock)), 1)
+
+    def test_ambiguous_local_failure_followed_by_genuine_closed_pr_blocks(self):
+        """The local `gh pr merge` result is lost, and reconciliation
+        discovers GitHub's own definitive, terminal answer: the PR was
+        closed without ever merging. No further polling is needed --
+        resolves on the first reconciliation read."""
+        mid = self._mission_merging()
+        merge_failure = mock.Mock(returncode=1, stdout=b"", stderr=b"some transient gh error\n")
+        closed_view = self._view(state="CLOSED", mergeCommit=None)
+        calls = [
+            _json_result(self._view()),
+            _ok_result(stdout=(b"c" * 40)),
+            merge_failure,
+            _json_result(closed_view),  # reconciliation poll #1 -- definitively CLOSED
+        ]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls) as run_mock, \
+                mock.patch("orchestrator.merge_executor.time.sleep") as sleep_mock:
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
+        self.assertIn("closed without merging", result.reason)
+        sleep_mock.assert_not_called()  # resolved on the first read -- no need to poll further
+        self.assertEqual(len(self._merge_argvs(run_mock)), 1)
+
+    def test_permanently_ambiguous_state_blocks_after_bounded_polling_with_no_second_merge(self):
+        """GitHub's own state never resolves within the bound -- stays
+        OPEN through every reconciliation poll. Must fail closed to
+        BLOCKED (never assume success, never assume failure), respect
+        the exact poll bound, and never issue a second real merge
+        mutation while waiting."""
+        mid = self._mission_merging()
+        merge_failure = mock.Mock(returncode=1, stdout=b"", stderr=b"transient\n")
+        calls = [
+            _json_result(self._view()),
+            _ok_result(stdout=(b"c" * 40)),
+            merge_failure,
+        ] + [_json_result(self._view()) for _ in range(merge_executor._MERGE_RECONCILE_MAX_ATTEMPTS)]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls) as run_mock, \
+                mock.patch("orchestrator.merge_executor.time.sleep"):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
+        self.assertIn("remained ambiguous", result.reason)
+        # Exactly the bounded number of reconciliation polls -- never
+        # more (the bound is respected), never fewer (it actually
+        # exhausted the bound rather than giving up early).
+        view_calls = [c.args[0] for c in run_mock.call_args_list
+                      if len(c.args[0]) > 2 and c.args[0][0] == "gh" and c.args[0][2] == "view"]
+        self.assertEqual(len(view_calls), 1 + merge_executor._MERGE_RECONCILE_MAX_ATTEMPTS)
+        self.assertEqual(len(self._merge_argvs(run_mock)), 1)
+
+    def test_wrong_head_identity_on_reconciliation_blocks_never_converges(self):
+        """Reconciliation finds the PR MERGED, but with a head SHA that
+        does NOT match this mission's own authorized/reviewed commit --
+        contradictory evidence (e.g. a different PR/commit somehow
+        merged). Must never be silently accepted as this mission's own
+        success."""
+        mid = self._mission_merging()
+        merge_failure = mock.Mock(returncode=1, stdout=b"", stderr=b"transient\n")
+        wrong_identity_view = self._view(state="MERGED", headRefOid="f" * 40, mergeCommit={"oid": "d" * 40})
+        calls = [
+            _json_result(self._view()),
+            _ok_result(stdout=(b"c" * 40)),
+            merge_failure,
+            _json_result(wrong_identity_view),
+        ]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls) as run_mock, \
+                mock.patch("orchestrator.merge_executor.time.sleep"):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
+        self.assertIn("contradictory identity", result.reason)
+        self.assertIsNone(chugel.get_mission(mid)["merge"]["merge_commit_sha"])
+        self.assertEqual(len(self._merge_argvs(run_mock)), 1)
+
+    def test_merged_but_missing_merge_commit_sha_on_reconciliation_blocks(self):
+        """Reconciliation finds state MERGED but no merge commit SHA at
+        all -- equally contradictory, must not converge."""
+        mid = self._mission_merging()
+        merge_failure = mock.Mock(returncode=1, stdout=b"", stderr=b"transient\n")
+        no_commit_view = self._view(state="MERGED", mergeCommit=None)
+        calls = [
+            _json_result(self._view()),
+            _ok_result(stdout=(b"c" * 40)),
+            merge_failure,
+            _json_result(no_commit_view),
+        ]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls), \
+                mock.patch("orchestrator.merge_executor.time.sleep"):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
+        self.assertIn("contradictory identity", result.reason)
+
+    def test_gh_pr_view_itself_failing_throughout_reconciliation_blocks_after_bound(self):
+        """Not just the merge call -- the read-only reconciliation calls
+        themselves can also fail (a real MergeExecutorError from
+        _pr_view, e.g. a transient gh/network failure). Must still be
+        bounded, must still fail closed, must never crash uncaught."""
+        mid = self._mission_merging()
+        merge_failure = mock.Mock(returncode=1, stdout=b"", stderr=b"transient\n")
+        view_failure = mock.Mock(returncode=1, stdout=b"", stderr=b"gh: network error\n")
+        calls = [
+            _json_result(self._view()),
+            _ok_result(stdout=(b"c" * 40)),
+            merge_failure,
+        ] + [view_failure for _ in range(merge_executor._MERGE_RECONCILE_MAX_ATTEMPTS)]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls), \
+                mock.patch("orchestrator.merge_executor.time.sleep"):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
+        self.assertIn("remained ambiguous", result.reason)
+
+    def test_local_process_crash_then_restart_finds_already_merged_never_double_merges(self):
+        """Restart/recovery idempotency for the exact live scenario: the
+        local controller is killed/crashes mid-merge-attempt (never even
+        reaching BLOCKED -- the mission record is simply left at
+        MERGING, exactly as a real SIGKILL would leave it), but the
+        remote merge had already gone through. A fresh run() invocation
+        after restart (mission still MERGING, so the state guard still
+        allows it) must discover the already-MERGED PR via the ordinary
+        Step-2 check-before-merge path and converge cleanly -- never
+        attempting a second real `gh pr merge` call."""
+        mid = self._mission_merging()
+        # Simulate the crash: leave the mission at MERGING (do nothing --
+        # _mission_merging() already put it there), representing a
+        # process that died before ever calling merge_executor.run() at
+        # all, or died deep inside a prior call before any Chugel write.
+        self.assertEqual(chugel.get_mission(mid)["state"], "MERGING")
+
+        already_merged_view = {
+            "state": "MERGED", "headRefOid": _HEAD_SHA, "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN", "mergeCommit": {"oid": "d" * 40},
+            "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }
+        with mock.patch.object(merge_executor, "_run", return_value=_json_result(already_merged_view)) as run_mock:
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "COMPLETED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "MERGED")
+        self.assertEqual(chugel.get_mission(mid)["merge"]["merge_commit_sha"], "d" * 40)
+        self.assertEqual(len(self._merge_argvs(run_mock)), 0)  # no merge call at all -- pure check-before-merge
 
 
 if __name__ == "__main__":
