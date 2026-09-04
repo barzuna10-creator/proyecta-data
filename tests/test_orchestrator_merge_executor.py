@@ -386,6 +386,50 @@ class MergeRecoveryHardeningTests(MergeExecutorTestCase):
         # authorized `gh pr merge` call.
         self.assertEqual(len(self._merge_argvs(run_mock)), 1)
 
+    def test_rc0_success_with_immediate_head_sha_mismatch_does_not_converge(self):
+        """P2 correction pass regression: `gh pr merge` itself returns
+        rc=0 (an apparently successful CLI exit) -- but the immediate,
+        authoritative post-merge `gh pr view` re-read reports a head SHA
+        that does NOT match this mission's own authorized/reviewed
+        commit. This is a distinct code path from the "rc!=0, reconcile,
+        then find a mismatch" scenarios already covered above: here the
+        very FIRST post-merge check (run() lines around the `if
+        post.get('state') == 'MERGED' and post.get('headRefOid') ==
+        reviewed_sha ...` condition) must itself refuse to treat this as
+        success, falling through to reconciliation (which, on the same
+        contradictory evidence, also refuses to converge) -- proving
+        exact identity binding is enforced even on an apparently
+        successful CLI return, not only on an already-ambiguous one."""
+        mid = self._mission_merging()
+        # gh pr merge itself "succeeds" locally...
+        merge_success = _ok_result()
+        # ...but the immediate post-merge view shows a MERGED PR whose
+        # head SHA does not match this mission's own reviewed_sha
+        # (_HEAD_SHA) -- e.g. a stale read, a race with some other
+        # actor, or a genuinely wrong PR/commit having been merged.
+        mismatched_post_view = self._view(state="MERGED", headRefOid="f" * 40, mergeCommit={"oid": "d" * 40})
+        # Reconciliation (reached because the immediate check refused to
+        # converge) observes the same contradictory identity again and
+        # must also refuse.
+        calls = [
+            _json_result(self._view()),         # Step 1 pre-merge view
+            _ok_result(stdout=(b"c" * 40)),      # origin/main rev-parse (informational)
+            merge_success,                       # the real gh pr merge call -- reports rc=0
+            _json_result(mismatched_post_view),  # immediate post-merge check -- identity mismatch
+            _json_result(mismatched_post_view),  # reconciliation poll #1 -- still mismatched
+        ]
+        with mock.patch.object(merge_executor, "_run", side_effect=calls) as run_mock, \
+                mock.patch("orchestrator.merge_executor.time.sleep"):
+            result = merge_executor.run(mid, repository_root="/tmp/repo")
+        self.assertEqual(result.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(chugel.get_mission(mid)["state"], "BLOCKED")
+        self.assertIn("contradictory identity", result.reason)
+        self.assertIsNone(chugel.get_mission(mid)["merge"]["merge_commit_sha"])
+        # Exactly one real merge mutation was issued (the original,
+        # apparently-successful one) -- the mismatch never triggers a
+        # second one.
+        self.assertEqual(len(self._merge_argvs(run_mock)), 1)
+
     def test_ambiguous_local_failure_followed_by_genuine_closed_pr_blocks(self):
         """The local `gh pr merge` result is lost, and reconciliation
         discovers GitHub's own definitive, terminal answer: the PR was

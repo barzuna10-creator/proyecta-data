@@ -383,17 +383,26 @@ def merge_serialization_lock():
     is already per-branch and safe by construction (see
     merge_executor.py's own module docstring), and stays outside this
     lock. What IS held under it, at that one call site: the mutating
-    `gh pr merge` call, its immediate post-merge re-read, and -- on any
-    of that block's failure branches -- the Chugel persistence _block()
-    itself performs (a per-mission record write, serialized against
-    other mutators of that same mission by the separate, per-mission
-    `_mission_lock()` chugel.transition() acquires internally; that
-    nesting, this lock outer and `_mission_lock()` inner, is the only
-    order used anywhere in this module, so it cannot deadlock). Held
-    time on a failure path is therefore the merge attempt plus one
-    Chugel write, not the bare subprocess call alone -- this lock is
-    scoped to that one call site, not to the shortest possible duration
-    within it.
+    `gh pr merge` subprocess call itself, and nothing else. Its
+    immediate post-merge re-read, any M3 merge-recovery-hardening
+    reconciliation of an ambiguous local outcome (bounded, read-only
+    `gh pr view` polling against GitHub's own authoritative PR state --
+    see merge_executor.py's own `_reconcile_ambiguous_merge_outcome()`),
+    and every resulting Chugel persistence (`_block()`'s BLOCKED write,
+    or the eventual MERGED write) all happen AFTER this lock is
+    released -- none of that work is mutating `gh pr merge` traffic, so
+    holding a lock whose only purpose is serializing that one specific
+    mutation across it would add real latency to the OTHER mission's own
+    merge attempt without closing any additional hazard. Those later
+    Chugel writes remain safe on their own terms: each is still
+    serialized against other mutators of that same mission by the
+    separate, per-mission `_mission_lock()` chugel.transition() acquires
+    internally, which this lock never nests with (it is fully released
+    before that call happens, so there is no ordering to reason about
+    between the two). Held time under THIS lock is therefore just the
+    one real merge-mutation attempt -- deliberately the shortest
+    duration that still closes the hazard it exists for, not "the call
+    site" as a whole.
 
     Deliberately NOT `_mission_lock()`, and deliberately not a durable,
     Chugel-recorded reservation naming which mission currently holds it:
