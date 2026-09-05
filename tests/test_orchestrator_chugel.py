@@ -1890,5 +1890,101 @@ class PruebaBloqueoGeneralizadoCrossProceso(DispatchLedgerTestCase):
             self.assertTrue(record["repository"]["worktree_path"].startswith("/tmp/race-worktree-"), i)
 
 
+# --- M3: cross-mission merge serialization lock ---------------------------
+
+class PruebaBloqueoMergeCrossProceso(ChugelTestCase):
+    """M3: chugel.merge_serialization_lock() -- a single, global (not
+    per-mission) lock. Thread-based mutual-exclusion proof mirrors
+    PruebaConcurrenciaReservaCrossProceso above (each thread performs its
+    own os.open() of the lock file, exercising real kernel-level
+    fcntl.flock() exclusion, not merely Python thread scheduling);
+    crash-safety is proven with a genuine separate OS process, killed
+    with SIGKILL while holding the lock."""
+
+    def test_dos_hilos_compitiendo_nunca_se_superponen(self):
+        import threading
+        import time
+
+        overlaps = []
+        order = []
+        active = {"count": 0}
+        active_lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def hold_briefly(label):
+            barrier.wait()
+            with chugel.merge_serialization_lock():
+                with active_lock:
+                    active["count"] += 1
+                    if active["count"] > 1:
+                        overlaps.append(label)
+                order.append(("enter", label))
+                time.sleep(0.05)
+                order.append(("exit", label))
+                with active_lock:
+                    active["count"] -= 1
+
+        threads = [threading.Thread(target=hold_briefly, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(overlaps, [], "two holders were inside the lock at the same time")
+        # Each holder's own enter/exit pair is contiguous -- proves the
+        # second thread's os.open()+flock() genuinely blocked until the
+        # first released, rather than both merely happening to finish
+        # without overlapping by luck.
+        first_label = order[0][1]
+        second_label = 1 - first_label
+        self.assertEqual(order[0], ("enter", first_label))
+        self.assertEqual(order[1], ("exit", first_label))
+        self.assertEqual(order[2], ("enter", second_label))
+        self.assertEqual(order[3], ("exit", second_label))
+
+    def test_kernel_libera_el_lock_si_el_proceso_titular_muere(self):
+        """A real, separate OS process acquires the lock, signals that it
+        holds it, then is SIGKILLed while still holding it -- simulating
+        a genuine crash, not a clean release. A fresh acquire in THIS
+        process must then succeed promptly (the flock is not left held
+        forever by the dead process), proving the fail-closed guarantee
+        chugel.merge_serialization_lock()'s own docstring claims."""
+        missions_dir = chugel._MISSIONS_DIR
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "import orchestrator.chugel as chugel\n"
+            "from pathlib import Path\n"
+            "chugel._MISSIONS_DIR = Path(%r)\n"
+            "with chugel.merge_serialization_lock():\n"
+            "    print('HOLDING', flush=True)\n"
+            "    import time; time.sleep(30)\n"
+        ) % (repo_root, str(missions_dir))
+
+        holder = subprocess.Popen(
+            [sys.executable, "-c", script],
+            cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            line = holder.stdout.readline()
+            self.assertEqual(line.strip(), "HOLDING", "holder process never confirmed acquiring the lock")
+
+            holder.kill()  # SIGKILL -- no chance to run any cleanup/finally block
+            holder.wait(timeout=5)
+
+            # Re-acquire directly in this process (a plain, bounded call
+            # is sufficient proof; if the kernel had NOT released the
+            # dead holder's flock, this call would hang here instead of
+            # returning, and the test would time out rather than pass).
+            with chugel.merge_serialization_lock():
+                pass
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait(timeout=5)
+            if holder.stdout is not None:
+                holder.stdout.close()
+
+
 if __name__ == "__main__":
     unittest.main()
