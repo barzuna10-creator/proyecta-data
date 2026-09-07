@@ -47,6 +47,11 @@ COORDINATOR_CHUGEL_MODULE = "mission_coordinator.py"
 ALLOWED_COORDINATOR_CHUGEL_CALLS = {
     "get_mission", "transition", "list_missions", "record_repository_state",
     "begin_deploy_observation",
+    # M5 (Learning & Knowledge Continuity): derive_knowledge_for_completed_
+    # mission()'s own two Chugel calls, bookkeeping the knowledge-derivation
+    # side pipeline only -- never a state/state_history write (see both
+    # mutators' own docstrings in orchestrator/chugel.py).
+    "record_knowledge_derivation_completed", "record_knowledge_derivation_attempt_failed",
 }
 KNOWLEDGE_MODULES = {
     "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",

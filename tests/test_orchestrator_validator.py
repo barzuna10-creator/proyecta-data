@@ -73,6 +73,10 @@ def _minimal_intake_record():
             "configured": None, "consumed": {"unit": "tokens", "amount": 0},
             "per_agent_consumed": {"david": None, "emilio": None, "emma": None}, "exhausted": False,
         },
+        "knowledge_derivation": {
+            "status": "pending", "attempt_count": 0, "last_attempted_at": None,
+            "last_error": None, "completed_at": None, "candidate_ids": [],
+        },
     }
 
 

@@ -50,8 +50,10 @@ class KnowledgeRetrievalTestCase(unittest.TestCase):
         self.store.save_authorization(authorization)
         return review, authorization
 
-    def promote_new(self, candidate_id, *, product_areas=("jarvis",), repository_binding=None, label="FACT", tier=None):
+    def promote_new(self, candidate_id, *, product_areas=("jarvis",), repository_binding=None, label="FACT", tier=None, created_at=None):
         content = candidate(candidate_id=candidate_id, applicability=KnowledgeApplicability(tuple(product_areas)), repository_binding=repository_binding, label=label, tier=tier)
+        if created_at is not None:
+            content = dataclasses.replace(content, created_at=created_at)
         if label == "INTENT":
             content = dataclasses.replace(content, research_evidence=(
                 dataclasses.replace(content.research_evidence[0], label="INTENT", sources=(
@@ -169,6 +171,20 @@ class RankingDeterminismTests(KnowledgeRetrievalTestCase):
         self.assertEqual(
             [r.entry.knowledge_id for r in response.results],
             ["aaaaaaaa-0030-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-0031-4bbb-8bbb-bbbbbbbbbbbb"],
+        )
+
+    def test_canonical_outranks_a_much_more_recent_mission_derived_complementary_entry(self):
+        """M5: a mission-derived candidate is submitted, reviewed, and
+        promoted MUCH more recently than a long-standing canonical entry --
+        recency must never let it outrank canonical at equal product-area
+        match. search()'s own sort key never reads created_at at all; this
+        pins that down against the exact tier ordering M5 relies on."""
+        self.promote_new("aaaaaaaa-0040-4aaa-8aaa-aaaaaaaaaaaa", product_areas=("x",), tier="canonical", created_at="2020-01-01T00:00:00Z")
+        self.promote_new("bbbbbbbb-0041-4bbb-8bbb-bbbbbbbbbbbb", product_areas=("x",), tier="complementary", created_at="2026-09-01T00:00:00Z")
+        response = search(self.store, self.resolver, product_areas=("x",))
+        self.assertEqual(
+            [r.entry.knowledge_id for r in response.results],
+            ["aaaaaaaa-0040-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-0041-4bbb-8bbb-bbbbbbbbbbbb"],
         )
 
     def test_complementary_outranks_unclassified_legacy_tier(self):

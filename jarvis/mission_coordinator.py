@@ -54,11 +54,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from orchestrator import autonomous_runner, chugel, deploy_verifier, merge_executor, publish_executor
 from orchestrator import publish_identity_repair
 from orchestrator.agent_invocation import InvocationNotAuthorized
 from orchestrator.validator import GATE_STATUSES
+from jarvis._safe_io import LockReentryError
+from jarvis.knowledge import build_candidate_envelope, require_explicit_tier
+from jarvis.knowledge_storage import KnowledgeAlreadyExists, KnowledgeNotFound, FileKnowledgeStore
+from jarvis.learning_ingestion import derive_knowledge_candidates
+from jarvis.learning_projection import project_mission_learning
 from jarvis.mission_workspace import MissionWorkspaceError, MissionWorkspaceManager
 
 _GATE_STATES = frozenset({
@@ -498,6 +504,127 @@ class CoordinatorReport:
 DEFAULT_CI_POLL_TIMEOUT_SECONDS = 1800.0
 
 
+# M5 (Learning & Knowledge Continuity). FileKnowledgeStore is explicit-root
+# by construction (see its own docstring) -- this module-level constant is
+# this codebase's one default root, deliberately a sibling of orchestrator/
+# missions/ (chugel.py's own _MISSIONS_DIR), never inside jarvis/ itself.
+# Tests redirect it exactly like tests/test_orchestrator_chugel.py's
+# ChugelTestCase redirects chugel._MISSIONS_DIR: monkeypatch this name to a
+# temp directory, never read/write the real path.
+_KNOWLEDGE_STORE_ROOT = Path(__file__).resolve().parent.parent / "orchestrator" / "knowledge"
+
+
+def _knowledge_store() -> FileKnowledgeStore:
+    return FileKnowledgeStore(_KNOWLEDGE_STORE_ROOT)
+
+
+def _submit_candidate_idempotently(content) -> None:
+    """TOCTOU-hardened submission of one derived candidate into the real,
+    unmodified draft -> awaiting_emma_review pipeline. Holds no Chugel
+    lock -- only jarvis.knowledge_storage's own per-candidate
+    exclusive_entity_lock, entirely independent of orchestrator.chugel's
+    _mission_lock (zero cross-domain nesting risk, confirmed by 5 rounds
+    of independent review)."""
+    store = _knowledge_store()
+    try:
+        status = store.get_candidate_status(content.candidate_id)
+    except KnowledgeNotFound:
+        status = None
+
+    if status is not None and status not in ("draft",):
+        # Already at or past awaiting_emma_review -- nothing left to do.
+        return
+
+    try:
+        if status is None:
+            envelope = build_candidate_envelope(content)
+            try:
+                store.save_candidate(envelope)
+            except KnowledgeAlreadyExists:
+                pass  # another invocation already saved it -- benign race.
+
+        try:
+            store.transition_candidate(content.candidate_id, "awaiting_emma_review")
+        except ValueError as exc:
+            if str(exc) != "KNOWLEDGE_CANDIDATE_TRANSITION_FORBIDDEN":
+                raise
+            # Re-check: a concurrent invocation may have already made this
+            # exact transition between our pre-check and this call -- that is
+            # a benign race against the other trigger call site, not a real
+            # failure. Anything else re-raises unmodified.
+            current = store.get_candidate_status(content.candidate_id)
+            if current == "draft":
+                raise
+    except LockReentryError:
+        # jarvis._safe_io.exclusive_entity_lock() is a real cross-PROCESS
+        # (fcntl.flock) lock, but its own in-process reentrancy guard fails
+        # fast (never queues) if another thread of THIS SAME process is
+        # already inside a lock for this exact candidate_id -- a real
+        # scenario here, since the synchronous inline trigger and the
+        # mission_supervisor housekeeping pass can legitimately race for
+        # the same mission within one process. That other in-flight call
+        # will finish the same idempotent work; nothing further to do here.
+        return
+
+
+def derive_knowledge_for_completed_mission(mission_id: str) -> None:
+    """M5 (Learning & Knowledge Continuity). Derives knowledge candidates
+    from a COMPLETED mission's own learning projection and submits them,
+    idempotently, into the real knowledge-candidate pipeline -- never a
+    KnowledgeEntry directly, never any new authority. Called from exactly
+    two places: synchronously, inline, from advance()'s own DEPLOY_PENDING/
+    VERIFYING_PRODUCTION branch right after observing a COMPLETED
+    deploy_verifier result; and from jarvis.mission_supervisor's
+    housekeeping pass, for a COMPLETED mission whose knowledge_derivation
+    never reached "completed" (including manual/operator retry of a
+    "stalled" mission -- see below).
+
+    The ONLY short-circuit is knowledge_derivation.status == "completed":
+    this function is deliberately NOT refused merely because status is
+    "stalled" -- reaching this function at all, by ANY caller, always
+    attempts the work. Only mission_supervisor's own automatic-discovery
+    filter excludes "stalled" missions from being dispatched here
+    automatically; a direct/manual call always proceeds, or manual retry
+    after "stalled" would be permanently impossible.
+
+    Never acquires orchestrator.chugel._mission_lock itself, directly or
+    by wrapping a `with` block around a call to one of Chugel's own two
+    knowledge_derivation mutators -- both are non-reentrant with respect
+    to a caller that already holds the lock; nesting here would deadlock
+    on every single successful call. All Chugel access here is either the
+    already lock-free chugel.get_mission() or a bare call to one of those
+    two mutators, each of which acquires and releases the lock itself, for
+    its own single write, and nothing else."""
+    record = chugel.get_mission(mission_id)
+    if record["state"] != "COMPLETED":
+        raise ValueError(f"mission {mission_id}: requires state COMPLETED, got {record['state']!r}")
+    if record["knowledge_derivation"]["status"] == "completed":
+        return
+
+    try:
+        projection = project_mission_learning(record)
+        candidates = derive_knowledge_candidates(projection)
+        candidate_ids = []
+        for content in candidates:
+            _submit_candidate_idempotently(content)
+            candidate_ids.append(content.candidate_id)
+        chugel.record_knowledge_derivation_completed(mission_id, candidate_ids=candidate_ids)
+    except Exception as exc:
+        chugel.record_knowledge_derivation_attempt_failed(mission_id, error_summary=str(exc))
+        raise
+
+
+def knowledge_derivation_status(mission_id: str) -> dict:
+    """Read-only convenience for jarvis.mission_supervisor's housekeeping
+    pass: returns the mission's own knowledge_derivation object verbatim.
+    mission_supervisor.py is not itself an allowed Chugel-import seam (see
+    tests/test_jarvis_foundation_boundaries.py) -- it reaches this data
+    only through this narrow, already-disclosed mission_coordinator seam,
+    exactly like it already does for advance()."""
+    record = chugel.get_mission(mission_id)
+    return record["knowledge_derivation"]
+
+
 def advance(
     mission_id: str,
     adapters: dict,
@@ -730,6 +857,21 @@ def advance(
         if result.status == "SKIPPED":
             return CoordinatorReport("WORKSPACE_OCCUPIED", state, reason=result.reason)
         if result.status == "COMPLETED":
+            # M5 (Learning & Knowledge Continuity): derive knowledge
+            # candidates from this now-COMPLETED mission's own learning
+            # projection BEFORE returning the same, unchanged report below.
+            # derive_knowledge_for_completed_mission() never raises out of
+            # here in normal operation (its own try/except records the
+            # failure into knowledge_derivation and re-raises only for an
+            # unexpected/programmer-error class -- see its own docstring);
+            # this is deliberately still allowed to propagate rather than
+            # being swallowed here, since a mission that just reached
+            # COMPLETED but whose knowledge-derivation bookkeeping call
+            # itself raised for a structural reason (e.g. a corrupt
+            # projection) is a real bug worth surfacing loudly, not a
+            # reason to silently report success. The mission's own COMPLETED
+            # report is otherwise entirely unaffected by this call.
+            derive_knowledge_for_completed_mission(mission_id)
             return CoordinatorReport("COMPLETED", "COMPLETED")
         return CoordinatorReport("BLOCKED", result.state, reason=result.reason)
 

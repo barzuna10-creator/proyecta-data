@@ -24,7 +24,8 @@
     "publish",
     "merge",
     "deploy",
-    "budget"
+    "budget",
+    "knowledge_derivation"
   ],
   "properties": {
     "schema_version": {
@@ -371,6 +372,21 @@
       "description": "Durable reservation ledger for provider dispatch, binding (role, attempt, invocation_id) before any provider process is launched. Deliberately absent from 'required' -- an existing Mission Record with no dispatch_ledger key predates this field and is treated identically to one with an empty ledger; no historical record is rewritten to add it. Entries are appended once (at RESERVED) and thereafter updated in place as the same invocation_id progresses through its lifecycle -- this is metadata about dispatch attempts, not a new Mission state.",
       "type": "array",
       "items": { "$ref": "#/definitions/dispatch_ledger_entry" }
+    },
+
+    "knowledge_derivation": {
+      "description": "M5 (Learning & Knowledge Continuity) -- bookkeeping ONLY for the automatic derivation of knowledge candidates from a COMPLETED mission's own learning projection. Never a second state engine: this object never carries a `state`/`state_history` field and no mutator that writes it ever touches record['state']/record['state_history']. 'status'==\"completed\" is the sole idempotency marker jarvis.mission_coordinator.derive_knowledge_for_completed_mission() consults to short-circuit already-finished derivation; 'stalled' means MAX_KNOWLEDGE_DERIVATION_ATTEMPTS consecutive attempts have failed and automatic (housekeeping-pass) retries stop, though a manual/direct call to that function is never refused on this basis. candidate_ids never point at accepted KnowledgeEntry rows by themselves -- they only ever identify draft KnowledgeCandidateContent rows submitted into jarvis.knowledge_storage's own unmodified draft -> awaiting_emma_review -> awaiting_human_authorization -> accepted pipeline; nothing here grants any authority over promotion.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "attempt_count", "last_attempted_at", "last_error", "completed_at", "candidate_ids"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "completed", "stalled"] },
+        "attempt_count": { "type": "integer", "minimum": 0 },
+        "last_attempted_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "last_error": { "anyOf": [{ "type": "null" }, { "type": "string" }] },
+        "completed_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "candidate_ids": { "type": "array", "items": { "type": "string" } }
+      }
     }
   },
 
