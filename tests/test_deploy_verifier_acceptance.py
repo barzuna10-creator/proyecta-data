@@ -135,11 +135,16 @@ def _make_server(responses):
 
 # --- fast bounds for the harness (real components, shortened patience) --
 
+# The real, controlling bound is now TOTAL_OBSERVATION_BUDGET_SECONDS
+# (real wall-clock, derived from deploy.observation_started_at) -- not a
+# fixed attempt count. Shortened here purely so the harness's real HTTP
+# round-trips and real git subprocess calls finish in a couple hundred
+# milliseconds of wall-clock instead of 900s, while still genuinely
+# exercising budget-driven (not attempt-count-driven) termination.
 _FAST_BOUNDS = mock.patch.multiple(
     deploy_verifier,
-    _VERSION_POLL_MAX_ATTEMPTS=3,
+    TOTAL_OBSERVATION_BUDGET_SECONDS=4.0,
     _VERSION_POLL_INTERVAL_SECONDS=0.05,
-    _HEALTH_POLL_MAX_ATTEMPTS=3,
     _HEALTH_POLL_INTERVAL_SECONDS=0.05,
 )
 

@@ -64,9 +64,7 @@ except ImportError:  # pragma: no cover -- POSIX-only, matching chugel.py's
 # --- bounds -----------------------------------------------------------
 
 TOTAL_OBSERVATION_BUDGET_SECONDS = 900.0
-_VERSION_POLL_MAX_ATTEMPTS = 30
 _VERSION_POLL_INTERVAL_SECONDS = 10.0
-_HEALTH_POLL_MAX_ATTEMPTS = 6
 _HEALTH_POLL_INTERVAL_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 10
 _GIT_UNSHALLOW_TIMEOUT_SECONDS = 20.0
@@ -270,16 +268,33 @@ def _run_deploy_pending_phase(
     mission_id: str, *, base_url: str, expected_sha: str,
     git_repo_path: str, git_executable: str, observation_started_at: str, requests_timeout: float,
 ) -> VerifierResult:
+    """Polls /version and proves ancestry until either a match is found or
+    the mission's real, PERSISTED TOTAL_OBSERVATION_BUDGET_SECONDS is
+    exhausted -- never a fixed attempt count (a fixed count would silently
+    cap the effective budget far below what was actually authorized, and
+    could misclassify an ordinary still-propagating deploy as a false,
+    unconditional IDENTITY_MISMATCH_DEFINITIVE long before the real budget
+    was spent).
+
+    A budget check performed BEFORE a poll/evaluation can complete (at
+    entry, or exhausted while waiting to acquire the ancestry lock)
+    classifies OBSERVATION_BUDGET_EXHAUSTED, since nothing new was learned
+    this call. A budget check performed AFTER at least one real, evaluated
+    /version response classifies using that last real observation
+    (IDENTITY_MISMATCH_DEFINITIVE / ANCESTRY_UNVERIFIABLE /
+    IDENTITY_NEVER_OBSERVED) instead -- this is what makes
+    IDENTITY_MISMATCH_DEFINITIVE reachable at all: only once the full
+    persisted budget has genuinely been spent gathering real evidence,
+    never from an arbitrary attempt cap."""
     observed_any_identity = False
     last_definitive_non_ancestor = False
     last_unverifiable = False
 
-    for attempt in range(1, _VERSION_POLL_MAX_ATTEMPTS + 1):
-        remaining = _remaining_budget(observation_started_at)
-        if remaining <= 0:
-            return _block(mission_id, "OBSERVATION_BUDGET_EXHAUSTED",
-                           "production observation budget exhausted while polling /version")
+    if _remaining_budget(observation_started_at) <= 0:
+        return _block(mission_id, "OBSERVATION_BUDGET_EXHAUSTED",
+                       "production observation budget exhausted before any /version poll could run")
 
+    while True:
         status_code, body, error = _http_get_json(f"{base_url}/version", timeout=requests_timeout)
         checked_at = _now_iso()
         try:
@@ -325,13 +340,13 @@ def _run_deploy_pending_phase(
         # well-formed identity that ancestry was actually evaluated
         # against ever updates them.
 
-        if attempt < _VERSION_POLL_MAX_ATTEMPTS:
-            remaining = _remaining_budget(observation_started_at)
-            if remaining <= 0:
-                return _block(mission_id, "OBSERVATION_BUDGET_EXHAUSTED",
-                               "production observation budget exhausted while polling /version")
-            time.sleep(min(_VERSION_POLL_INTERVAL_SECONDS, remaining))
+        remaining = _remaining_budget(observation_started_at)
+        if remaining <= 0:
+            break
+        time.sleep(min(_VERSION_POLL_INTERVAL_SECONDS, remaining))
 
+    # The real, persisted budget is genuinely exhausted, and at least one
+    # real /version response was evaluated above -- classify using it.
     if last_definitive_non_ancestor:
         return _block(mission_id, "IDENTITY_MISMATCH_DEFINITIVE",
                        "the observed production commit is definitively not a descendant of "
@@ -339,22 +354,26 @@ def _run_deploy_pending_phase(
     if last_unverifiable or observed_any_identity:
         return _block(mission_id, "ANCESTRY_UNVERIFIABLE",
                        "a well-formed commit identity was observed but ancestry could never "
-                       "be conclusively computed within budget")
+                       "be conclusively computed within the persisted observation budget")
     return _block(mission_id, "IDENTITY_NEVER_OBSERVED",
-                   "no well-formed commit identity was ever observed from /version")
+                   "no well-formed commit identity was ever observed from /version within "
+                   "the persisted observation budget")
 
 
 def _run_verifying_production_phase(
     mission_id: str, *, base_url: str, observation_started_at: str, requests_timeout: float,
 ) -> VerifierResult:
+    """Polls /health until it reports healthy or the mission's real,
+    persisted TOTAL_OBSERVATION_BUDGET_SECONDS is exhausted -- same
+    budget-driven (never fixed-attempt-count) discipline as
+    _run_deploy_pending_phase(), for the same reason."""
     last_degraded = False
 
-    for attempt in range(1, _HEALTH_POLL_MAX_ATTEMPTS + 1):
-        remaining = _remaining_budget(observation_started_at)
-        if remaining <= 0:
-            return _block(mission_id, "OBSERVATION_BUDGET_EXHAUSTED",
-                           "production observation budget exhausted while polling /health")
+    if _remaining_budget(observation_started_at) <= 0:
+        return _block(mission_id, "OBSERVATION_BUDGET_EXHAUSTED",
+                       "production observation budget exhausted before any /health poll could run")
 
+    while True:
         status_code, body, error = _http_get_json(f"{base_url}/health", timeout=requests_timeout)
         checked_at = _now_iso()
         try:
@@ -371,17 +390,16 @@ def _run_verifying_production_phase(
 
         last_degraded = isinstance(body, dict) and body.get("status") == "degraded"
 
-        if attempt < _HEALTH_POLL_MAX_ATTEMPTS:
-            remaining = _remaining_budget(observation_started_at)
-            if remaining <= 0:
-                return _block(mission_id, "OBSERVATION_BUDGET_EXHAUSTED",
-                               "production observation budget exhausted while polling /health")
-            time.sleep(min(_HEALTH_POLL_INTERVAL_SECONDS, remaining))
+        remaining = _remaining_budget(observation_started_at)
+        if remaining <= 0:
+            break
+        time.sleep(min(_HEALTH_POLL_INTERVAL_SECONDS, remaining))
 
     if last_degraded:
         return _block(mission_id, "HEALTH_DEGRADED", "production /health last reported status='degraded'")
     return _block(mission_id, "HEALTH_UNREACHABLE_OR_MALFORMED",
-                   "production /health never returned a parseable, healthy response within budget")
+                   "production /health never returned a parseable, healthy response within "
+                   "the persisted observation budget")
 
 
 # --- entrypoint ----------------------------------------------------------

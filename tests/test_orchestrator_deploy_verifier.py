@@ -25,6 +25,30 @@ from tests.test_orchestrator_chugel_deploy import (
 )
 
 
+def _fake_clock(start: float, step: float):
+    """Returns (remaining_budget_side_effect, advance). The side_effect is
+    a _remaining_budget(...)-compatible callable that reads a SHARED
+    counter -- multiple reads within the same poll iteration (e.g. a
+    pre-ancestry-check and a loop-bottom check) see the SAME value,
+    exactly like real wall-clock barely moves across a few fast Python
+    calls. `advance()` moves the counter forward by `step` and is meant to
+    be called exactly once per real poll (once per HTTP call) -- modeling
+    one real interval's worth of wall-clock elapsing BETWEEN polls, never
+    between internal budget checks within the same poll. This is what
+    makes the fake clock behave like the real one instead of racing
+    against however many internal _remaining_budget() call sites the
+    implementation happens to have."""
+    state = {"remaining": start}
+
+    def _remaining_budget_side_effect(_observation_started_at):
+        return state["remaining"]
+
+    def _advance():
+        state["remaining"] -= step
+
+    return _remaining_budget_side_effect, _advance
+
+
 def _version_ok(sha):
     return (200, {"version": "1.0", "commit": sha}, None)
 
@@ -121,10 +145,20 @@ class DeployPendingPhaseTests(DeployVerifierTestCase):
         self.assertEqual(final["deploy"]["observed_sha"], "c" * 40)
 
     def test_never_observed_identity_blocks_identity_never_observed(self):
+        # A deterministic fake clock -- advanced once per real poll, read
+        # (possibly more than once) per internal budget check -- runs a
+        # small, exact number of real, evaluated polls before exhausting,
+        # with no dependency on real wall-clock timing.
         record = _mission_at_deploy_pending()
         mid = record["mission_id"]
-        with mock.patch.object(deploy_verifier, "_VERSION_POLL_MAX_ATTEMPTS", 2):
-            with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_version_malformed()):
+        remaining_budget_side_effect, advance = _fake_clock(start=3.0, step=1.0)
+
+        def _http(*_args, **_kwargs):
+            advance()
+            return _version_malformed()
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
+            with mock.patch.object(deploy_verifier, "_http_get_json", side_effect=_http):
                 result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
         self.assertEqual(result.status, "BLOCKED")
         final = chugel.get_mission(mid)
@@ -133,20 +167,38 @@ class DeployPendingPhaseTests(DeployVerifierTestCase):
     def test_unreachable_version_endpoint_also_blocks_identity_never_observed(self):
         record = _mission_at_deploy_pending()
         mid = record["mission_id"]
-        with mock.patch.object(deploy_verifier, "_VERSION_POLL_MAX_ATTEMPTS", 2):
-            with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_version_unreachable()):
+        remaining_budget_side_effect, advance = _fake_clock(start=3.0, step=1.0)
+
+        def _http(*_args, **_kwargs):
+            advance()
+            return _version_unreachable()
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
+            with mock.patch.object(deploy_verifier, "_http_get_json", side_effect=_http):
                 result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
         self.assertEqual(result.status, "BLOCKED")
         final = chugel.get_mission(mid)
         self.assertEqual(final["deploy"]["last_blocked_classification"], "IDENTITY_NEVER_OBSERVED")
 
     def test_definitive_non_ancestor_blocks_identity_mismatch_definitive(self):
+        # The clock advances inside the (mocked) ancestry check, not the
+        # HTTP call -- matching real production, where _verify_ancestry
+        # itself (lock wait + real git subprocesses) is what can consume
+        # real time WITHIN one iteration, between the pre-ancestry-check
+        # (still positive) and the loop-bottom check (now exhausted) --
+        # exactly the sequence that must reach the "genuinely evaluated"
+        # classification, not an early OBSERVATION_BUDGET_EXHAUSTED bail.
         record = _mission_at_deploy_pending()
         mid = record["mission_id"]
-        with mock.patch.object(deploy_verifier, "_VERSION_POLL_MAX_ATTEMPTS", 2):
+        remaining_budget_side_effect, advance = _fake_clock(start=1.0, step=1.0)
+
+        def _ancestry(*_args, **_kwargs):
+            advance()
+            return deploy_verifier._ANCESTRY_DEFINITIVE_NON_ANCESTOR
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
             with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_version_ok("c" * 40)):
-                with mock.patch.object(deploy_verifier, "_verify_ancestry",
-                                        return_value=deploy_verifier._ANCESTRY_DEFINITIVE_NON_ANCESTOR):
+                with mock.patch.object(deploy_verifier, "_verify_ancestry", side_effect=_ancestry):
                     result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
         self.assertEqual(result.status, "BLOCKED")
         final = chugel.get_mission(mid)
@@ -155,10 +207,15 @@ class DeployPendingPhaseTests(DeployVerifierTestCase):
     def test_unverifiable_ancestry_blocks_ancestry_unverifiable(self):
         record = _mission_at_deploy_pending()
         mid = record["mission_id"]
-        with mock.patch.object(deploy_verifier, "_VERSION_POLL_MAX_ATTEMPTS", 2):
+        remaining_budget_side_effect, advance = _fake_clock(start=1.0, step=1.0)
+
+        def _ancestry(*_args, **_kwargs):
+            advance()
+            return deploy_verifier._ANCESTRY_UNVERIFIABLE
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
             with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_version_ok("c" * 40)):
-                with mock.patch.object(deploy_verifier, "_verify_ancestry",
-                                        return_value=deploy_verifier._ANCESTRY_UNVERIFIABLE):
+                with mock.patch.object(deploy_verifier, "_verify_ancestry", side_effect=_ancestry):
                     result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
         self.assertEqual(result.status, "BLOCKED")
         final = chugel.get_mission(mid)
@@ -171,14 +228,145 @@ class DeployPendingPhaseTests(DeployVerifierTestCase):
         though a matching well-formed identity was observed every time."""
         record = _mission_at_deploy_pending()
         mid = record["mission_id"]
-        with mock.patch.object(deploy_verifier, "_VERSION_POLL_MAX_ATTEMPTS", 3):
+        remaining_budget_side_effect, advance = _fake_clock(start=3.0, step=1.0)
+
+        def _ancestry(*_args, **_kwargs):
+            advance()
+            return deploy_verifier._ANCESTRY_UNVERIFIABLE
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
             with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_version_ok("c" * 40)):
-                with mock.patch.object(deploy_verifier, "_verify_ancestry",
-                                        return_value=deploy_verifier._ANCESTRY_UNVERIFIABLE):
+                with mock.patch.object(deploy_verifier, "_verify_ancestry", side_effect=_ancestry):
                     result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
         final = chugel.get_mission(mid)
         self.assertNotEqual(final["deploy"]["last_blocked_classification"], "IDENTITY_MISMATCH_DEFINITIVE")
         self.assertEqual(final["deploy"]["last_blocked_classification"], "ANCESTRY_UNVERIFIABLE")
+
+
+class BudgetDrivenTerminationTests(DeployVerifierTestCase):
+    """Direct regression coverage for the corrected P0 bug: version/health
+    polling must be bounded by the mission's real, PERSISTED observation
+    budget (TOTAL_OBSERVATION_BUDGET_SECONDS, derived from
+    deploy.observation_started_at), never by a fixed attempt count. Before
+    the fix, a fixed 30-attempt cap (at a 10s interval) silently terminated
+    polling at ~300s even when the real, authorized budget was 900s --
+    these tests prove that can no longer happen, using a deterministic
+    fake remaining-budget clock so the assertion is exact and fast rather
+    than actually sleeping for minutes."""
+
+    def test_version_polling_does_not_stop_at_the_old_thirty_attempt_boundary(self):
+        """(1) Proves polling cannot terminate at ~300s (the old fixed
+        30 x 10s cap) while a real 900s-equivalent budget still remains."""
+        record = _mission_at_deploy_pending()
+        mid = record["mission_id"]
+        call_count = {"n": 0}
+        remaining_budget_side_effect, advance = _fake_clock(start=900.0, step=10.0)
+
+        def _http(*_args, **_kwargs):
+            call_count["n"] += 1
+            advance()
+            return _version_malformed()
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
+            with mock.patch.object(deploy_verifier, "_http_get_json", side_effect=_http):
+                result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
+
+        self.assertGreater(
+            call_count["n"], 30,
+            "polling stopped at or before the old fixed 30-attempt cap even though the "
+            "persisted budget had not been exhausted",
+        )
+        self.assertEqual(result.status, "BLOCKED")
+        final = chugel.get_mission(mid)
+        self.assertEqual(final["deploy"]["last_blocked_classification"], "IDENTITY_NEVER_OBSERVED")
+
+    def test_definitive_non_ancestor_only_classifies_after_real_budget_exhaustion(self):
+        """(2) Proves the core P0 scenario: a continuously-observed,
+        still-propagating old commit (a genuine 'non-ancestor' on every
+        single poll -- indistinguishable, mid-flight, from a real mismatch)
+        must NOT be classified IDENTITY_MISMATCH_DEFINITIVE merely because
+        some fixed attempt count was reached -- only once the real,
+        persisted budget is genuinely spent."""
+        record = _mission_at_deploy_pending()
+        mid = record["mission_id"]
+        call_count = {"n": 0}
+        # Advances inside the (mocked) ancestry check, not the HTTP call --
+        # matching real production, where _verify_ancestry itself (a real
+        # lock wait plus real git subprocesses) is what can consume real
+        # time WITHIN one iteration.
+        remaining_budget_side_effect, advance = _fake_clock(start=900.0, step=10.0)
+
+        def _ancestry(*_args, **_kwargs):
+            call_count["n"] += 1
+            advance()
+            return deploy_verifier._ANCESTRY_DEFINITIVE_NON_ANCESTOR
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
+            with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_version_ok("c" * 40)):
+                with mock.patch.object(deploy_verifier, "_verify_ancestry", side_effect=_ancestry):
+                    result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
+
+        self.assertGreater(
+            call_count["n"], 30,
+            "classified as a definitive mismatch before the real persisted budget was spent",
+        )
+        self.assertEqual(result.status, "BLOCKED")
+        final = chugel.get_mission(mid)
+        self.assertEqual(final["deploy"]["last_blocked_classification"], "IDENTITY_MISMATCH_DEFINITIVE")
+
+    def test_budget_expiry_before_any_evaluation_produces_observation_budget_exhausted(self):
+        """(3) Budget expiry detected before any poll this call can even be
+        evaluated classifies OBSERVATION_BUDGET_EXHAUSTED, never a stale
+        reuse of some earlier classification."""
+        record = _mission_at_deploy_pending()
+        mid = record["mission_id"]
+        with mock.patch.object(deploy_verifier, "_remaining_budget", return_value=0.0):
+            with mock.patch.object(deploy_verifier, "_http_get_json") as http_mock:
+                result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
+        http_mock.assert_not_called()
+        self.assertEqual(result.status, "BLOCKED")
+        final = chugel.get_mission(mid)
+        self.assertEqual(final["deploy"]["last_blocked_classification"], "OBSERVATION_BUDGET_EXHAUSTED")
+
+    def test_success_well_before_deadline_still_exits_normally(self):
+        """(4) A match found well before the (simulated, still-large)
+        budget is exhausted must still complete normally on the very first
+        poll -- the budget-driven loop must never force needless extra
+        polling once the real work is done."""
+        record = _mission_at_deploy_pending()
+        mid = record["mission_id"]
+        with mock.patch.object(deploy_verifier, "_remaining_budget", return_value=900.0):
+            with mock.patch.object(deploy_verifier, "_http_get_json",
+                                    side_effect=[_version_ok("c" * 40), _health_ok()]):
+                with mock.patch.object(deploy_verifier, "_verify_ancestry",
+                                        return_value=deploy_verifier._ANCESTRY_MATCH):
+                    result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
+        self.assertEqual(result.status, "COMPLETED")
+
+    def test_health_polling_does_not_stop_at_a_fixed_attempt_boundary_either(self):
+        """Same regression, health phase: a persistently degraded response
+        must not be classified until the real persisted budget -- not a
+        fixed attempt count -- is exhausted."""
+        record = _mission_at_verifying_production()
+        mid = record["mission_id"]
+        call_count = {"n": 0}
+        remaining_budget_side_effect, advance = _fake_clock(start=900.0, step=5.0)
+
+        def _http(*_args, **_kwargs):
+            call_count["n"] += 1
+            advance()
+            return _health_degraded()
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
+            with mock.patch.object(deploy_verifier, "_http_get_json", side_effect=_http):
+                result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
+
+        self.assertGreater(call_count["n"], 6,
+                            "health polling stopped at or before the old fixed 6-attempt cap "
+                            "even though the persisted budget had not been exhausted")
+        self.assertEqual(result.status, "BLOCKED")
+        final = chugel.get_mission(mid)
+        self.assertEqual(final["deploy"]["last_blocked_classification"], "HEALTH_DEGRADED")
 
 
 class VerifyingProductionPhaseTests(DeployVerifierTestCase):
@@ -199,8 +387,14 @@ class VerifyingProductionPhaseTests(DeployVerifierTestCase):
         transport failure."""
         record = _mission_at_verifying_production()
         mid = record["mission_id"]
-        with mock.patch.object(deploy_verifier, "_HEALTH_POLL_MAX_ATTEMPTS", 2):
-            with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_health_degraded()):
+        remaining_budget_side_effect, advance = _fake_clock(start=3.0, step=1.0)
+
+        def _http(*_args, **_kwargs):
+            advance()
+            return _health_degraded()
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
+            with mock.patch.object(deploy_verifier, "_http_get_json", side_effect=_http):
                 result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
         self.assertEqual(result.status, "BLOCKED")
         final = chugel.get_mission(mid)
@@ -211,8 +405,14 @@ class VerifyingProductionPhaseTests(DeployVerifierTestCase):
     def test_unreachable_health_endpoint_blocks_unreachable_or_malformed(self):
         record = _mission_at_verifying_production()
         mid = record["mission_id"]
-        with mock.patch.object(deploy_verifier, "_HEALTH_POLL_MAX_ATTEMPTS", 2):
-            with mock.patch.object(deploy_verifier, "_http_get_json", return_value=_health_unreachable()):
+        remaining_budget_side_effect, advance = _fake_clock(start=3.0, step=1.0)
+
+        def _http(*_args, **_kwargs):
+            advance()
+            return _health_unreachable()
+
+        with mock.patch.object(deploy_verifier, "_remaining_budget", side_effect=remaining_budget_side_effect):
+            with mock.patch.object(deploy_verifier, "_http_get_json", side_effect=_http):
                 result = deploy_verifier.run(mid, base_url="https://x.test", git_repo_path="/tmp")
         self.assertEqual(result.status, "BLOCKED")
         final = chugel.get_mission(mid)
