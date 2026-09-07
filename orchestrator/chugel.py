@@ -47,6 +47,7 @@ from typing import Any
 
 from orchestrator.validator import (
     CANONICAL_SHA_RE,
+    DEPLOY_BLOCKED_CLASSIFICATIONS,
     DISPATCH_RETRYABLE_CLASSIFICATIONS,
     HUMAN_DECIDER,
     validate_mission_record,
@@ -131,6 +132,25 @@ class DispatchEntryNotFound(ChugelError):
 class EvidenceRejectionNotEligible(ChugelError):
     """An explicit evidence rejection did not match one unresolved,
     completed dispatch or would contradict already-persisted evidence."""
+
+
+class DeployNotEligible(ChugelError):
+    """M4: a deploy.* mutator was called while the mission's current state
+    (or, for begin_deploy_observation(), a structurally-required prior
+    field) does not permit it. Fails closed before any write, exactly like
+    DispatchNotEligible."""
+
+
+class DeployRecoveryNotEligible(ChugelError):
+    """M4: reopen_deploy_observation_window() was called while the mission
+    is not BLOCKED, or while deploy.recovery_status is already
+    'exhausted' -- refuses immediately, writes nothing, in either case."""
+
+
+class DeployVerificationReservationStale(ChugelError):
+    """M4: finalize_deploy_verification() was called with an invocation_id
+    that no longer matches deploy.dispatch.invocation_id -- a stale or
+    already-finalized reservation."""
 
 
 # --- module-level constants ---------------------------------------------
@@ -310,6 +330,34 @@ def _write_mission_record(record: dict) -> None:
 def _mission_lock_path(mission_id: str) -> Path:
     _validate_mission_id(mission_id)
     return _MISSIONS_DIR / f".{mission_id}.reservation.lock"
+
+
+# M4: a SEPARATE, dedicated per-mission lock file from the one above --
+# never the same fd/path as _mission_lock_path(). _mission_lock() is
+# acquired-and-released around each single, short mission-record
+# read-modify-write; this second lock is held by orchestrator/
+# deploy_verifier.py for the ENTIRE duration of one production-verification
+# run (which includes bounded HTTP polling and git subprocess calls, well
+# outside any _mission_lock() critical section) -- see
+# reserve_deploy_verification()'s own docstring below.
+def _deploy_verification_lock_path(mission_id: str) -> Path:
+    _validate_mission_id(mission_id)
+    return _MISSIONS_DIR / f".{mission_id}.deploy_verification.lock"
+
+
+# Holds the open fd for every mission this process currently holds the
+# deploy-verification lock for, keyed by mission_id -- populated only by a
+# successful reserve_deploy_verification() and consumed only by
+# finalize_deploy_verification(). This is what lets reserve_deploy_verification()
+# keep its literal `str | None` return type (the design's own required
+# signature) while still keeping the lock's fd open, and therefore the
+# kernel-level exclusion live, for the whole run: the fd is not local to
+# either call, it lives here in between. If this process dies with an
+# entry still present, the kernel releases the underlying flock() on its
+# own (exactly like _mission_lock()) -- this dict itself holds no
+# durable state and is never read to make a decision, only to find the fd
+# to close.
+_DEPLOY_VERIFICATION_LOCK_FDS: dict[str, int] = {}
 
 
 @contextlib.contextmanager
@@ -594,11 +642,32 @@ def _create_mission_locked(
             "ci_runs": [],
         },
         "merge": {"merge_commit_sha": None, "merged_at": None},
+        # M4 (Automatic Production Deployment Observation & Verification):
+        # the entire deploy object is initialized here, at INTAKE, exactly
+        # like every other field above -- never partially built up later.
+        # deploy.dispatch is a distinct production-verification execution
+        # reservation guarded by orchestrator/deploy_verifier.py's own
+        # dedicated per-mission lock file, unrelated to the top-level
+        # dispatch_ledger[] used for Emilio/Emma agent dispatch (see the
+        # schema's own deploy/deploy_dispatch_reservation descriptions).
         "deploy": {
             "expected_sha": None,
             "deploy_confirmed_at": None,
             "health_check": {"checked_at": None, "status_code": None, "body_summary": None},
             "version_check": {"checked_at": None, "status_code": None, "body_summary": None},
+            "observation_started_at": None,
+            "observed_sha": None,
+            "ancestry_verified": None,
+            "recovery_count": 0,
+            "recovery_status": "available",
+            "recovery_history": [],
+            "last_blocked_classification": None,
+            "dispatch": {
+                "invocation_id": None,
+                "reserved_at": None,
+                "status": None,
+                "last_skip_observed_at": None,
+            },
         },
         "budget": {
             "configured": None,
@@ -1539,6 +1608,487 @@ def decide_scope_change_and_reauthorize(
                 result.errors,
             )
 
+        _write_mission_record(mutated)
+        return mutated
+
+
+# --- M4: production deploy observation & verification ---------------------
+# Every mutator below follows this module's existing pattern exactly:
+# read fresh under _mission_lock, deepcopy, mutate, validate_mission_record(),
+# atomic write. None of them ever calls a Render API, triggers a deploy, or
+# performs a rollback/redeploy/restart/config mutation -- this is read-only
+# observation/verification bookkeeping only, matching orchestrator/
+# deploy_verifier.py's own read-only design.
+
+MAX_DEPLOY_RECOVERY_ATTEMPTS = 3
+
+
+def begin_deploy_observation(mission_id: str) -> dict:
+    """The only path from MERGED to DEPLOY_PENDING. Reads
+    merge.merge_commit_sha (already required, structurally, for MERGED --
+    see validator._evidence_merged_or_later() -- so its absence here would
+    mean the record was already internally invalid; guarded anyway, never
+    assumed). Sets deploy.expected_sha and deploy.observation_started_at in
+    the SAME write that performs the MERGED -> DEPLOY_PENDING transition --
+    never two separate calls, so a crash between them is impossible by
+    construction. No gate: this is the automatic, system-attributed
+    ("chugel") edge the M4 design explicitly authorizes -- merge_authorization
+    already the human authority over the production-affecting action."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "MERGED":
+            raise DeployNotEligible(
+                f"mission {mission_id}: begin_deploy_observation() requires state "
+                f"'MERGED', got {record.get('state')!r}"
+            )
+        merge_sha = (record.get("merge") or {}).get("merge_commit_sha")
+        if not merge_sha:
+            raise DeployNotEligible(
+                f"mission {mission_id}: merge.merge_commit_sha is missing at MERGED -- "
+                "structurally impossible given the MERGED evidence check, refusing anyway"
+            )
+
+        check = can_transition(record, "DEPLOY_PENDING")
+        if not check.allowed:
+            raise MissionTransitionRejected(
+                f"mission {mission_id}: 'MERGED' -> 'DEPLOY_PENDING' not allowed",
+                check.reasons,
+            )
+
+        mutated = copy.deepcopy(record)
+        timestamp = _now()
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["expected_sha"] = merge_sha
+        mutated["deploy"]["observation_started_at"] = timestamp
+        mutated["state_history"] = mutated["state_history"] + [{
+            "from_state": mutated["state"], "to_state": "DEPLOY_PENDING",
+            "at": timestamp, "actor": "chugel",
+            "reason": "begin production deploy observation",
+        }]
+        mutated["state"] = "DEPLOY_PENDING"
+        mutated["updated_at"] = timestamp
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: begin_deploy_observation() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def _deploy_http_check_payload(*, checked_at, status_code, body_summary) -> dict:
+    return {"checked_at": checked_at, "status_code": status_code, "body_summary": body_summary}
+
+
+def record_deploy_version_check(
+    mission_id: str, *, checked_at: str, status_code: int | None, body_summary: str | None
+) -> dict:
+    """Overwritable (not first-write-wins), unlike record_publish_commit()/
+    record_merge_commit() -- orchestrator/deploy_verifier.py's bounded
+    /version poll may durably record more than one intermediate
+    observation before ancestry is ever confirmed. Eligible while
+    DEPLOY_PENDING (the /version poll itself) or VERIFYING_PRODUCTION (a
+    later defensive re-check during the /health phase)."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") not in ("DEPLOY_PENDING", "VERIFYING_PRODUCTION"):
+            raise DeployNotEligible(
+                f"mission {mission_id}: record_deploy_version_check() requires state "
+                f"'DEPLOY_PENDING' or 'VERIFYING_PRODUCTION', got {record.get('state')!r}"
+            )
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["version_check"] = _deploy_http_check_payload(
+            checked_at=checked_at, status_code=status_code, body_summary=body_summary
+        )
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_deploy_version_check() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_deploy_health_check(
+    mission_id: str, *, checked_at: str, status_code: int | None, body_summary: str | None
+) -> dict:
+    """Overwritable, same reason as record_deploy_version_check(). Eligible
+    only while VERIFYING_PRODUCTION -- /health is never polled before
+    ancestry has already been confirmed."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "VERIFYING_PRODUCTION":
+            raise DeployNotEligible(
+                f"mission {mission_id}: record_deploy_health_check() requires state "
+                f"'VERIFYING_PRODUCTION', got {record.get('state')!r}"
+            )
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["health_check"] = _deploy_http_check_payload(
+            checked_at=checked_at, status_code=status_code, body_summary=body_summary
+        )
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_deploy_health_check() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_deploy_ancestry_result(mission_id: str, *, observed_sha: str, ancestry_verified: bool) -> dict:
+    """Not explicitly named in the M4 design's own enumerated mutator list,
+    but structurally required: deploy.observed_sha/deploy.ancestry_verified
+    must be written by *something*, under the same state-eligibility-guard
+    discipline as every other deploy.* writer here -- this is that writer,
+    named and shaped to match record_deploy_version_check()/
+    record_deploy_health_check() exactly (overwritable, single state guard,
+    no side transition). Eligible only while DEPLOY_PENDING -- ancestry is
+    resolved during the /version poll phase, before the DEPLOY_PENDING ->
+    VERIFYING_PRODUCTION transition, and is never re-decided afterward by
+    this function (a later defensive re-check during VERIFYING_PRODUCTION,
+    if the verifier chooses to do one, is recorded as a BLOCKED
+    classification via record_deploy_blocked(), never by overwriting this
+    field after the fact)."""
+    if not isinstance(observed_sha, str) or CANONICAL_SHA_RE.fullmatch(observed_sha) is None:
+        raise ValueError("observed_sha must be a canonical 40-character lowercase SHA")
+    if type(ancestry_verified) is not bool:
+        raise ValueError("ancestry_verified must be a bool")
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "DEPLOY_PENDING":
+            raise DeployNotEligible(
+                f"mission {mission_id}: record_deploy_ancestry_result() requires state "
+                f"'DEPLOY_PENDING', got {record.get('state')!r}"
+            )
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["observed_sha"] = observed_sha
+        mutated["deploy"]["ancestry_verified"] = ancestry_verified
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_deploy_ancestry_result() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_deploy_confirmed(mission_id: str, *, confirmed_at: str) -> dict:
+    """The only path from VERIFYING_PRODUCTION to COMPLETED. Sets
+    deploy.deploy_confirmed_at in the same write that performs the
+    transition -- never two separate calls. validator._evidence_completed()
+    independently re-verifies the full evidence contract (ancestry,
+    version_check, health_check) before allowing this transition to
+    actually land; this function does not itself decide that evidence is
+    sufficient, exactly like every other transition-performing mutator in
+    this module."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "VERIFYING_PRODUCTION":
+            raise DeployNotEligible(
+                f"mission {mission_id}: record_deploy_confirmed() requires state "
+                f"'VERIFYING_PRODUCTION', got {record.get('state')!r}"
+            )
+
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["deploy_confirmed_at"] = confirmed_at
+        timestamp = _now()
+        mutated["state_history"] = mutated["state_history"] + [{
+            "from_state": mutated["state"], "to_state": "COMPLETED",
+            "at": timestamp, "actor": "chugel", "reason": "production deploy verified",
+        }]
+        mutated["state"] = "COMPLETED"
+        mutated["updated_at"] = timestamp
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_deploy_confirmed() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_deploy_blocked(mission_id: str, *, classification: str, reason: str) -> dict:
+    """The ONLY writer of deploy.last_blocked_classification -- the
+    structured field orchestrator/deploy_recovery_policy.py's
+    recovery_action_for() keys off, never parsed from state_history's own
+    free-text `reason`. Eligible while DEPLOY_PENDING or
+    VERIFYING_PRODUCTION; performs the transition to BLOCKED, actor
+    'chugel', in the same write."""
+    if classification not in DEPLOY_BLOCKED_CLASSIFICATIONS:
+        raise ValueError(
+            f"classification {classification!r} is not one of {sorted(DEPLOY_BLOCKED_CLASSIFICATIONS)}"
+        )
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") not in ("DEPLOY_PENDING", "VERIFYING_PRODUCTION"):
+            raise DeployNotEligible(
+                f"mission {mission_id}: record_deploy_blocked() requires state "
+                f"'DEPLOY_PENDING' or 'VERIFYING_PRODUCTION', got {record.get('state')!r}"
+            )
+
+        check = can_transition(record, "BLOCKED")
+        if not check.allowed:
+            raise MissionTransitionRejected(
+                f"mission {mission_id}: {record.get('state')!r} -> 'BLOCKED' not allowed",
+                check.reasons,
+            )
+
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["last_blocked_classification"] = classification
+        timestamp = _now()
+        mutated["state_history"] = mutated["state_history"] + [{
+            "from_state": mutated["state"], "to_state": "BLOCKED",
+            "at": timestamp, "actor": "chugel", "reason": reason,
+        }]
+        mutated["state"] = "BLOCKED"
+        mutated["updated_at"] = timestamp
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_deploy_blocked() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def reopen_deploy_observation_window(mission_id: str, *, decided_by: str, acknowledgement: str) -> dict:
+    """The exceptional recovery path -- requires the same literal,
+    current-turn HUMAN_DECIDER attribution as decide_gate()/create_mission(),
+    even though this is deliberately NOT one of the three normal
+    human_gates (the M4 design's own reasoning: merge_authorization is
+    already the human authority over the production-affecting action).
+    Refuses immediately, before any read/write beyond the initial fresh
+    read, if deploy.recovery_status is already 'exhausted' -- no fourth
+    reopen is ever possible.
+
+    Appends one entry to deploy.recovery_history (append-only) capturing
+    the FULL PRIOR window's evidence verbatim, then resets every
+    current-window field (expected_sha is the one field left untouched --
+    immutable once set by begin_deploy_observation()). Always transitions
+    BLOCKED -> DEPLOY_PENDING, regardless of whether BLOCKED was entered
+    from DEPLOY_PENDING or VERIFYING_PRODUCTION -- a fresh window always
+    restarts from the /version poll, never resumes mid-/health."""
+    if decided_by != HUMAN_DECIDER:
+        raise ValueError(
+            f"reopen_deploy_observation_window() refuses: decided_by must be the literal "
+            f"{HUMAN_DECIDER!r}, got {decided_by!r}"
+        )
+    if not isinstance(acknowledgement, str) or not acknowledgement.strip():
+        raise ValueError("acknowledgement must be a non-empty string")
+
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") != "BLOCKED":
+            raise DeployRecoveryNotEligible(
+                f"mission {mission_id}: reopen_deploy_observation_window() requires state "
+                f"'BLOCKED', got {record.get('state')!r}"
+            )
+        deploy = record.get("deploy") or {}
+        if deploy.get("recovery_status") != "available":
+            raise DeployRecoveryNotEligible(
+                f"mission {mission_id}: deploy.recovery_status is "
+                f"{deploy.get('recovery_status')!r}, not 'available' -- no further reopen "
+                "is permitted"
+            )
+
+        check = can_transition(record, "DEPLOY_PENDING")
+        if not check.allowed:
+            raise MissionTransitionRejected(
+                f"mission {mission_id}: 'BLOCKED' -> 'DEPLOY_PENDING' not allowed",
+                check.reasons,
+            )
+
+        timestamp = _now()
+        recovery_entry = {
+            "recovered_at": timestamp,
+            "decided_by": decided_by,
+            "acknowledgement": acknowledgement,
+            "prior_blocked_reason": deploy.get("last_blocked_classification"),
+            "prior_observation_started_at": deploy.get("observation_started_at"),
+            "prior_observed_sha": deploy.get("observed_sha"),
+            "prior_ancestry_verified": deploy.get("ancestry_verified"),
+            "prior_version_check": copy.deepcopy(deploy.get("version_check")),
+            "prior_health_check": copy.deepcopy(deploy.get("health_check")),
+        }
+
+        new_count = deploy.get("recovery_count", 0) + 1
+
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["recovery_history"] = mutated["deploy"]["recovery_history"] + [recovery_entry]
+        mutated["deploy"]["observation_started_at"] = timestamp
+        mutated["deploy"]["observed_sha"] = None
+        mutated["deploy"]["ancestry_verified"] = None
+        mutated["deploy"]["version_check"] = _deploy_http_check_payload(
+            checked_at=None, status_code=None, body_summary=None
+        )
+        mutated["deploy"]["health_check"] = _deploy_http_check_payload(
+            checked_at=None, status_code=None, body_summary=None
+        )
+        mutated["deploy"]["deploy_confirmed_at"] = None
+        mutated["deploy"]["last_blocked_classification"] = None
+        mutated["deploy"]["recovery_count"] = new_count
+        if new_count >= MAX_DEPLOY_RECOVERY_ATTEMPTS:
+            mutated["deploy"]["recovery_status"] = "exhausted"
+
+        mutated["state_history"] = mutated["state_history"] + [{
+            "from_state": mutated["state"], "to_state": "DEPLOY_PENDING",
+            "at": timestamp, "actor": "chugel",
+            "reason": f"deploy observation window reopened by {decided_by}: {acknowledgement}",
+        }]
+        mutated["state"] = "DEPLOY_PENDING"
+        mutated["updated_at"] = timestamp
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: reopen_deploy_observation_window() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def reserve_deploy_verification(mission_id: str) -> str | None:
+    """Kernel-proven, single-live-runner reservation for one production
+    verification run. Under _mission_lock (the ordinary mission-record
+    lock), checks state eligibility and then attempts a NON-BLOCKING
+    exclusive fcntl.flock() on a SEPARATE, dedicated per-mission lock file
+    (_deploy_verification_lock_path(), never the same path _mission_lock()
+    itself uses). On BlockingIOError (a live process already holds it) --
+    returns None without mutating the record at all; the caller should
+    skip this dispatch cycle (optionally calling
+    record_deploy_verification_skip()). On success, this process now holds
+    the lock: its fd is kept open in this module's own
+    _DEPLOY_VERIFICATION_LOCK_FDS, not released until
+    finalize_deploy_verification() runs or this process dies (kernel
+    auto-release, exactly like _mission_lock()) -- so the exclusion is
+    real and kernel-enforced for the ENTIRE verification run, including
+    the bounded HTTP polling and git subprocess calls orchestrator/
+    deploy_verifier.py performs far outside this function's own
+    _mission_lock critical section. A fresh invocation_id (UUID4) is
+    written to deploy.dispatch in the same write that acquires the lock."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record.get("state") not in ("DEPLOY_PENDING", "VERIFYING_PRODUCTION"):
+            raise DeployNotEligible(
+                f"mission {mission_id}: reserve_deploy_verification() requires state "
+                f"'DEPLOY_PENDING' or 'VERIFYING_PRODUCTION', got {record.get('state')!r}"
+            )
+
+        _MISSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path = _deploy_verification_lock_path(mission_id)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                return None
+
+        invocation_id = str(uuid.uuid4())
+        timestamp = _now()
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["dispatch"] = {
+            "invocation_id": invocation_id,
+            "reserved_at": timestamp,
+            "status": "reserved",
+            "last_skip_observed_at": mutated["deploy"]["dispatch"].get("last_skip_observed_at"),
+        }
+        mutated["updated_at"] = timestamp
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            raise MissionValidationFailed(
+                f"mission {mission_id}: reserve_deploy_verification() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        _DEPLOY_VERIFICATION_LOCK_FDS[mission_id] = fd
+        return invocation_id
+
+
+def finalize_deploy_verification(mission_id: str, invocation_id: str) -> dict:
+    """Releases the kernel-level lock reserve_deploy_verification() took
+    (closing the fd this module has been holding open in
+    _DEPLOY_VERIFICATION_LOCK_FDS since reservation) and marks
+    deploy.dispatch.status 'completed', but ONLY if invocation_id still
+    matches deploy.dispatch.invocation_id -- a stale or already-finalized
+    invocation_id fails closed (DeployVerificationReservationStale) without
+    mutating the record. The lock release happens regardless of whether
+    this process is the one that originally reserved it in THIS process's
+    own fd table (a fresh process finalizing a reservation from before its
+    own restart holds no fd here to release -- nothing to do beyond the
+    record write in that case, which is fine: the kernel already released
+    the previous process's lock the moment that process exited)."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        dispatch = (record.get("deploy") or {}).get("dispatch") or {}
+        if dispatch.get("invocation_id") != invocation_id:
+            raise DeployVerificationReservationStale(
+                f"mission {mission_id}: no live deploy-verification reservation matches "
+                f"invocation_id {invocation_id!r}"
+            )
+
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["dispatch"] = dict(mutated["deploy"]["dispatch"])
+        mutated["deploy"]["dispatch"]["status"] = "completed"
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: finalize_deploy_verification() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+
+        fd = _DEPLOY_VERIFICATION_LOCK_FDS.pop(mission_id, None)
+        if fd is not None:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        return mutated
+
+
+def record_deploy_verification_skip(mission_id: str) -> dict:
+    """Sets ONLY deploy.dispatch.last_skip_observed_at -- a single,
+    overwritable scalar, never a growing list. STRICTLY DIAGNOSTIC: this
+    field must never be read by any completion/failure/recovery/timeout/
+    authority-decision logic anywhere in this codebase -- it exists solely
+    so a human or a test can observe that a dispatch cycle was skipped due
+    to contention, nothing more."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        mutated = copy.deepcopy(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["dispatch"] = dict(mutated["deploy"]["dispatch"])
+        mutated["deploy"]["dispatch"]["last_skip_observed_at"] = _now()
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_deploy_verification_skip() failed validation", result.errors
+            )
         _write_mission_record(mutated)
         return mutated
 

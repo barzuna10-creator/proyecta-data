@@ -25,6 +25,7 @@ from tests.test_orchestrator_autonomous_runner import (
     _emma_completed_template,
     _scope_gate_approval,
 )
+from tests.test_orchestrator_chugel import _builder_evidence, _reviewer_evidence
 
 _HEAD_SHA = "a" * 40
 
@@ -1233,6 +1234,86 @@ class DefaultCiPollTimeoutConstantTests(unittest.TestCase):
         together (still "in sync" per the test above) still surfaces as a
         deliberate, reviewed change here."""
         self.assertEqual(mission_coordinator.DEFAULT_CI_POLL_TIMEOUT_SECONDS, 1800.0)
+
+
+class DeployObservationWiringTests(CoordinatorTestCase):
+    """M4: advance()'s new MERGED (auto begin_deploy_observation(), no
+    gate) and DEPLOY_PENDING/VERIFYING_PRODUCTION (deploy_verifier.run())
+    branches. orchestrator.deploy_verifier.run() itself is faked here,
+    exactly like merge_executor.run()/publish_executor.run() are faked
+    above -- its own real behavior is covered by
+    tests/test_orchestrator_deploy_verifier.py and the disposable
+    acceptance harness."""
+
+    def _mission_at_merged(self):
+        mid = self._mission_authorized()
+        chugel.transition(mid, "BUILDING", actor="chugel", reason="x")
+        chugel.record_builder_evidence(mid, _builder_evidence())
+        chugel.transition(mid, "VERIFYING", actor="chugel", reason="x")
+        chugel.transition(mid, "AWAITING_REVIEW", actor="chugel", reason="x")
+        chugel.transition(mid, "REVIEWING", actor="chugel", reason="x")
+        chugel.record_reviewer_evidence(mid, _reviewer_evidence(verdict="PASS"))
+        chugel.transition(mid, "PUBLISH_AWAITING_AUTHORIZATION", actor="chugel", reason="x")
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="x")
+        chugel.record_publish_commit(mid, _HEAD_SHA)
+        chugel.record_publish_pr(mid, "https://example.invalid/pr/1", 1)
+        chugel.transition(mid, "CI_PENDING", actor="chugel", reason="x")
+        chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="x")
+        chugel.decide_gate(mid, "merge_authorization", {
+            "status": "approved", "requested_at": "2026-08-19T12:30:00Z",
+            "decided_at": "2026-08-19T12:30:00Z", "decided_by": "jose",
+            "decision_ref": "ref-merge-1", "approved_for": {"head_sha": _HEAD_SHA},
+        })
+        chugel.transition(mid, "MERGING", actor="jose", reason="x")
+        chugel.record_merge_commit(mid, "d" * 40)
+        chugel.transition(mid, "MERGED", actor="chugel", reason="x")
+        return mid
+
+    def test_merged_automatically_begins_deploy_observation_no_gate(self):
+        mid = self._mission_at_merged()
+        with mock.patch("orchestrator.deploy_verifier.run") as verifier_run:
+            verifier_run.return_value = mock.Mock(status="BLOCKED", state="BLOCKED", reason="synthetic stop")
+            self._advance(mid, deploy_base_url="https://example.invalid")
+        record = chugel.get_mission(mid)
+        # begin_deploy_observation() ran (no gate, actor chugel) and
+        # deploy_verifier.run() was actually reached afterward.
+        entry = next(e for e in record["state_history"] if e["from_state"] == "MERGED")
+        self.assertEqual(entry["to_state"], "DEPLOY_PENDING")
+        self.assertEqual(entry["actor"], "chugel")
+        verifier_run.assert_called_once()
+
+    def test_missing_deploy_base_url_fails_closed_to_human_action_required(self):
+        mid = self._mission_at_merged()
+        chugel.begin_deploy_observation(mid)
+        report = self._advance(mid)  # no deploy_base_url override
+        self.assertEqual(report.status, "HUMAN_ACTION_REQUIRED")
+        self.assertEqual(report.state, "DEPLOY_PENDING")
+
+    def test_deploy_verifier_completed_reports_completed(self):
+        mid = self._mission_at_merged()
+        chugel.begin_deploy_observation(mid)
+        with mock.patch("orchestrator.deploy_verifier.run") as verifier_run:
+            verifier_run.return_value = mock.Mock(status="COMPLETED", state="COMPLETED", reason="")
+            report = self._advance(mid, deploy_base_url="https://example.invalid")
+        self.assertEqual(report.status, "COMPLETED")
+        self.assertEqual(report.state, "COMPLETED")
+
+    def test_deploy_verifier_blocked_reports_blocked(self):
+        mid = self._mission_at_merged()
+        chugel.begin_deploy_observation(mid)
+        with mock.patch("orchestrator.deploy_verifier.run") as verifier_run:
+            verifier_run.return_value = mock.Mock(status="BLOCKED", state="BLOCKED", reason="HEALTH_DEGRADED")
+            report = self._advance(mid, deploy_base_url="https://example.invalid")
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.reason, "HEALTH_DEGRADED")
+
+    def test_deploy_verifier_skipped_reports_workspace_occupied(self):
+        mid = self._mission_at_merged()
+        chugel.begin_deploy_observation(mid)
+        with mock.patch("orchestrator.deploy_verifier.run") as verifier_run:
+            verifier_run.return_value = mock.Mock(status="SKIPPED", state="DEPLOY_PENDING", reason="lock held")
+            report = self._advance(mid, deploy_base_url="https://example.invalid")
+        self.assertEqual(report.status, "WORKSPACE_OCCUPIED")
 
 
 if __name__ == "__main__":

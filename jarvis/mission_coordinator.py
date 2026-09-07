@@ -55,7 +55,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from orchestrator import autonomous_runner, chugel, merge_executor, publish_executor
+from orchestrator import autonomous_runner, chugel, deploy_verifier, merge_executor, publish_executor
 from orchestrator import publish_identity_repair
 from orchestrator.agent_invocation import InvocationNotAuthorized
 from orchestrator.validator import GATE_STATUSES
@@ -462,6 +462,9 @@ def _last_transition_reason(record: dict) -> str:
 COORDINATOR_REPORT_STATUSES = frozenset({
     "GATE_REQUIRED", "BLOCKED", "HUMAN_ACTION_REQUIRED",
     "TERMINAL_FAILURE", "MERGED", "WORKSPACE_OCCUPIED",
+    # M4 addition: genuinely terminal, distinct from MERGED -- production
+    # deploy has been independently observed/verified, not merely merged.
+    "COMPLETED",
 })
 
 
@@ -508,6 +511,8 @@ def advance(
     ci_poll_interval_seconds: float = 30.0,
     build_review_deadline: float | None = None,
     workspace_manager: MissionWorkspaceManager | None = None,
+    deploy_base_url: str | None = None,
+    deploy_git_executable: str = "git",
 ) -> CoordinatorReport:
     record = chugel.get_mission(mission_id)
     state = record["state"]
@@ -554,7 +559,8 @@ def advance(
                         pr_title=pr_title, git_executable=git_executable, gh_executable=gh_executable,
                         ci_poll_timeout_seconds=ci_poll_timeout_seconds,
                         ci_poll_interval_seconds=ci_poll_interval_seconds,
-                        build_review_deadline=build_review_deadline, workspace_manager=workspace_manager)
+                        build_review_deadline=build_review_deadline, workspace_manager=workspace_manager,
+                        deploy_base_url=deploy_base_url, deploy_git_executable=deploy_git_executable)
 
     if state == "INTAKE":
         # The one transition this function ever makes without a human
@@ -607,7 +613,8 @@ def advance(
                             pr_title=pr_title, git_executable=git_executable, gh_executable=gh_executable,
                             ci_poll_timeout_seconds=ci_poll_timeout_seconds,
                             ci_poll_interval_seconds=ci_poll_interval_seconds,
-                            build_review_deadline=build_review_deadline, workspace_manager=workspace_manager)
+                            build_review_deadline=build_review_deadline, workspace_manager=workspace_manager,
+                            deploy_base_url=deploy_base_url, deploy_git_executable=deploy_git_executable)
         return CoordinatorReport("HUMAN_ACTION_REQUIRED", result.state, reason=result.reason)
 
     if state == "PUBLISH_AWAITING_AUTHORIZATION":
@@ -651,7 +658,8 @@ def advance(
                             pr_title=pr_title, git_executable=git_executable, gh_executable=gh_executable,
                             ci_poll_timeout_seconds=ci_poll_timeout_seconds,
                             ci_poll_interval_seconds=ci_poll_interval_seconds,
-                            build_review_deadline=build_review_deadline, workspace_manager=workspace_manager)
+                            build_review_deadline=build_review_deadline, workspace_manager=workspace_manager,
+                            deploy_base_url=deploy_base_url, deploy_git_executable=deploy_git_executable)
         return CoordinatorReport("BLOCKED", result.state, reason=result.reason)
 
     if state == "MERGE_AWAITING_AUTHORIZATION":
@@ -692,7 +700,38 @@ def advance(
         return CoordinatorReport("BLOCKED", result.state, reason=result.reason)
 
     if state == "MERGED":
-        return CoordinatorReport("MERGED", state)
+        # M4: the one non-human, system-attributed edge this module adds --
+        # exactly like the INTAKE -> SCOPE_AWAITING_AUTHORIZATION edge
+        # above, no gate: merge_authorization is already the human
+        # authority over the production-affecting action (the merge to
+        # main, which triggers Render's own auto-deploy-on-push). This
+        # never itself calls a Render API or triggers anything -- it only
+        # begins Chugel's own record of an observation window.
+        chugel.begin_deploy_observation(mission_id)
+        return _recurse()
+
+    if state in ("DEPLOY_PENDING", "VERIFYING_PRODUCTION"):
+        # M4: orchestrator/deploy_verifier.py is entirely read-only
+        # (GET /health, GET /version, local read-only git subprocess
+        # calls) -- never a workspace guard like BUILDING/MERGING/etc.
+        # above, since it never mutates the shared tree. If deploy_base_url
+        # was never configured for this caller, there is nothing automatic
+        # to do -- fails closed to HUMAN_ACTION_REQUIRED rather than
+        # guessing a URL.
+        if not deploy_base_url:
+            return CoordinatorReport(
+                "HUMAN_ACTION_REQUIRED", state,
+                reason="deploy_base_url is not configured -- production verification cannot run",
+            )
+        result = deploy_verifier.run(
+            mission_id, base_url=deploy_base_url, git_repo_path=repository_root,
+            git_executable=deploy_git_executable,
+        )
+        if result.status == "SKIPPED":
+            return CoordinatorReport("WORKSPACE_OCCUPIED", state, reason=result.reason)
+        if result.status == "COMPLETED":
+            return CoordinatorReport("COMPLETED", "COMPLETED")
+        return CoordinatorReport("BLOCKED", result.state, reason=result.reason)
 
     if state == "BLOCKED":
         return CoordinatorReport("BLOCKED", state, reason=_last_transition_reason(record))
@@ -708,7 +747,9 @@ def executive_summary(mission_id: str) -> str:
     outcome = record["mission_definition_history"][-1]["outcome"]
     state = record["state"]
 
-    if state == "MERGED":
+    if state == "COMPLETED":
+        result_line = "COMPLETED (production deploy verified)"
+    elif state == "MERGED":
         result_line = "MERGED"
     elif state == "BLOCKED":
         result_line = f"BLOCKED: {_last_transition_reason(record)}"
@@ -726,7 +767,7 @@ def executive_summary(mission_id: str) -> str:
     pr_url = (record.get("publish") or {}).get("pr_url") or "n/a"
     merge_sha = (record.get("merge") or {}).get("merge_commit_sha") or "n/a"
 
-    needs = "nothing" if state in ("MERGED",) else f"resolve {state} and confirm to continue"
+    needs = "nothing" if state in ("MERGED", "COMPLETED") else f"resolve {state} and confirm to continue"
 
     return (
         f"Mission 004 -- {outcome}\n"

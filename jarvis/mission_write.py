@@ -10,7 +10,10 @@ current-turn José message to relay."""
 
 from __future__ import annotations
 
+import datetime
+
 from orchestrator import chugel
+from orchestrator.deploy_recovery_policy import RecoveryAction, recovery_action_for
 from orchestrator.validator import HUMAN_DECIDER
 
 _GATE_STATE = {
@@ -19,9 +22,23 @@ _GATE_STATE = {
     "merge_authorization": "MERGE_AWAITING_AUTHORIZATION",
 }
 
+# M4: extended from the original four states to six -- DEPLOY_PENDING and
+# VERIFYING_PRODUCTION are now resumable too, subject to the additional
+# recovery-policy check resume_from_blocked() performs below for exactly
+# those two states (see step 3 in that function's own docstring).
 _RESUMABLE_PRIOR_STATES = frozenset({
     "PUBLISHING", "CI_PENDING", "MERGE_AWAITING_AUTHORIZATION", "MERGING",
+    "DEPLOY_PENDING", "VERIFYING_PRODUCTION",
 })
+
+# M4: total production-observation budget, mirrored from
+# orchestrator/deploy_verifier.py's own TOTAL_OBSERVATION_BUDGET_SECONDS --
+# duplicated here (not imported) so this module, already one of Chugel's
+# disclosed write seams, has no need to depend on deploy_verifier.py, which
+# is an execution module, not a write seam.
+_DEPLOY_OBSERVATION_BUDGET_SECONDS = 900.0
+
+_DEPLOY_RESUMABLE_PRIOR_STATES = frozenset({"DEPLOY_PENDING", "VERIFYING_PRODUCTION"})
 
 
 class MissionWriteError(Exception):
@@ -42,6 +59,28 @@ class ResumeNotEligible(MissionWriteError):
     def __init__(self, mission_id: str, reason: str):
         super().__init__(f"mission {mission_id}: {reason}")
         self.mission_id = mission_id
+
+
+class DeployRecoveryRequired(MissionWriteError):
+    """M4: resume_from_blocked() was called for a mission BLOCKED from
+    DEPLOY_PENDING/VERIFYING_PRODUCTION, but orchestrator.deploy_recovery_policy.
+    recovery_action_for() says plain resume is not safe for this
+    classification/budget/recovery_status combination. No transition is
+    performed -- either the mission's recovery budget is exhausted
+    (`action` is RECOVERY_EXHAUSTED) or an exceptional
+    orchestrator.chugel.reopen_deploy_observation_window() call, carrying
+    José's own literal acknowledgement, is required first (`action` is
+    EXCEPTIONAL_REOPEN_REQUIRED) -- or the combination is simply
+    unrecognized and this fails closed (`action` is DENY)."""
+
+    def __init__(self, mission_id: str, action, classification: str | None):
+        super().__init__(
+            f"mission {mission_id}: plain resume is not safe for deploy-observation "
+            f"classification {classification!r} -- recovery_action_for() says {action!r}"
+        )
+        self.mission_id = mission_id
+        self.action = action
+        self.classification = classification
 
 
 def _require_current_turn_attribution(decision: dict) -> None:
@@ -151,9 +190,27 @@ def resume_from_blocked(mission_id: str, decision: dict) -> dict:
     hold a literal, current-turn confirmation from José that the
     external issue is resolved. Derives the single legal target state
     mechanically from state_history (never a caller-supplied target),
-    restricted to the four Mission 004 V1 resumable states; any other
+    restricted to the six Mission 004/M4 V1 resumable states; any other
     prior state, or any Chugel-level rejection of the resulting
-    transition, fails closed here."""
+    transition, fails closed here.
+
+    Exact ordering (M4 addition is step 3; steps 1/2/4 are unchanged from
+    Mission 004):
+      1. _require_current_turn_attribution(decision) -- unchanged, runs first.
+      2. _RESUMABLE_PRIOR_STATES membership check -- unchanged, now
+         evaluated against the six-member set.
+      3. NEW, only when prior_state is DEPLOY_PENDING or
+         VERIFYING_PRODUCTION: read deploy.last_blocked_classification/
+         deploy.recovery_status, compute the mission's remaining
+         production-observation budget from deploy.observation_started_at,
+         and ask orchestrator.deploy_recovery_policy.recovery_action_for().
+         If the result is not RecoveryAction.PLAIN_RESUME, raise
+         DeployRecoveryRequired and perform no transition. This step is a
+         complete no-op (zero new code executes) for the four pre-existing
+         resumable states.
+      4. chugel.transition(...) -- unchanged, reached only when step 2
+         passed and (for the two deploy states) step 3 returned
+         PLAIN_RESUME."""
     _require_current_turn_attribution(decision)
     record = chugel.get_mission(mission_id)
     if record["state"] != "BLOCKED":
@@ -163,9 +220,30 @@ def resume_from_blocked(mission_id: str, decision: dict) -> dict:
     if prior_state not in _RESUMABLE_PRIOR_STATES:
         raise ResumeNotEligible(
             mission_id,
-            f"BLOCKED was entered from {prior_state!r}, which Mission 004 V1 "
+            f"BLOCKED was entered from {prior_state!r}, which Mission 004/M4 V1 "
             "does not support resuming",
         )
+
+    if prior_state in _DEPLOY_RESUMABLE_PRIOR_STATES:
+        deploy = record.get("deploy") or {}
+        classification = deploy.get("last_blocked_classification")
+        recovery_status = deploy.get("recovery_status", "available")
+        observation_started_at = deploy.get("observation_started_at")
+        if observation_started_at:
+            elapsed = (
+                datetime.datetime.now(datetime.timezone.utc)
+                - datetime.datetime.fromisoformat(observation_started_at.replace("Z", "+00:00"))
+            ).total_seconds()
+        else:
+            elapsed = _DEPLOY_OBSERVATION_BUDGET_SECONDS
+        remaining_budget_seconds = _DEPLOY_OBSERVATION_BUDGET_SECONDS - elapsed
+
+        action = recovery_action_for(
+            classification, recovery_status=recovery_status,
+            remaining_budget_seconds=remaining_budget_seconds,
+        )
+        if action != RecoveryAction.PLAIN_RESUME:
+            raise DeployRecoveryRequired(mission_id, action, classification)
 
     return chugel.transition(
         mission_id, prior_state, actor="chugel",

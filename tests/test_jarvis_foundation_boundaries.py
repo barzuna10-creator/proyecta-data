@@ -36,8 +36,17 @@ COORDINATOR_CHUGEL_MODULE = "mission_coordinator.py"
 # before real dispatch/publish/merge work against it -- never writes
 # anything, same read-only nature list_missions() already has everywhere
 # else it is used (jarvis.mission_query's own exact-two-calls contract).
+# M4: "begin_deploy_observation" added -- mission_coordinator.advance()'s
+# MERGED branch is the sole place the mechanical, no-gate MERGED ->
+# DEPLOY_PENDING edge is ever produced (merge_authorization is already
+# the human authority over the production-affecting action -- see that
+# branch's own comment and orchestrator/chugel.py's begin_deploy_observation()
+# docstring), exactly the same "one fixed mechanical edge, no fabricated
+# decision" shape as the pre-existing "transition" call for INTAKE ->
+# SCOPE_AWAITING_AUTHORIZATION.
 ALLOWED_COORDINATOR_CHUGEL_CALLS = {
     "get_mission", "transition", "list_missions", "record_repository_state",
+    "begin_deploy_observation",
 }
 KNOWLEDGE_MODULES = {
     "jarvis.knowledge", "jarvis.knowledge_storage", "jarvis.knowledge_authorization",
@@ -56,8 +65,12 @@ SOLE_KNOWLEDGE_SEARCH_MODULES = {"mission_context.py", "knowledge_retrieval.py",
 # subcommand).
 SOLE_ZENTRA_POLICY_READERS = {"zentra_evidence.py", "trusted_zentra_context.py", "control_plane_server.py", "cli.py"}
 SOLE_COORDINATOR_IMPORTER = "mission_coordinator.py"
+# M4: "orchestrator.deploy_verifier" added -- mission_coordinator.py is
+# also the sole Jarvis importer of the read-only deploy-verification
+# executor, same shape as the pre-existing publish/merge executors.
 COORDINATOR_ONLY_IMPORTS = {"orchestrator.autonomous_runner", "orchestrator.publish_executor",
-                            "orchestrator.merge_executor", "orchestrator.publish_identity_repair"}
+                            "orchestrator.merge_executor", "orchestrator.publish_identity_repair",
+                            "orchestrator.deploy_verifier"}
 
 
 def _chugel_boundary_violations(filename: str, source: str) -> tuple[str, ...]:

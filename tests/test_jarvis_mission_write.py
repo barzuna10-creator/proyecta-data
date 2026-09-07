@@ -9,9 +9,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import orchestrator.chugel as chugel
 from jarvis.mission_write import (
+    DeployRecoveryRequired,
     GateNotYetEligible,
     MissionWriteError,
     ResumeNotEligible,
@@ -21,6 +23,7 @@ from jarvis.mission_write import (
     create_mission,
     resume_from_blocked,
 )
+from orchestrator.deploy_recovery_policy import RecoveryAction
 
 
 def _mission_definition_payload(authorized_by="jose"):
@@ -170,6 +173,77 @@ class ResumeFromBlockedTests(MissionWriteTestCase):
         import inspect
         sig = inspect.signature(resume_from_blocked)
         self.assertEqual(list(sig.parameters), ["mission_id", "decision"])
+
+
+class ResumeFromBlockedDeployRecoveryTests(MissionWriteTestCase):
+    """M4: DEPLOY_PENDING/VERIFYING_PRODUCTION are now resumable prior
+    states too, but only when orchestrator.deploy_recovery_policy.
+    recovery_action_for() says PLAIN_RESUME -- otherwise resume_from_blocked()
+    must raise DeployRecoveryRequired and perform no transition at all."""
+
+    def _mission_at_merged(self, mid):
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "CI_PENDING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="test setup")
+        chugel.record_publish_commit(mid, "a" * 40)
+        decision = dict(_decision())
+        decision["approved_for"] = {"head_sha": "a" * 40}
+        chugel.decide_gate(mid, "merge_authorization", decision)
+        chugel.transition(mid, "MERGING", actor="chugel", reason="test setup")
+        chugel.record_merge_commit(mid, "b" * 40)
+        chugel.transition(mid, "MERGED", actor="chugel", reason="test setup")
+
+    def _blocked_from_deploy_state(self, mid, prior_state, *, classification):
+        self._mission_at_merged(mid)
+        chugel.begin_deploy_observation(mid)
+        if prior_state == "VERIFYING_PRODUCTION":
+            chugel.record_deploy_ancestry_result(mid, observed_sha="b" * 40, ancestry_verified=True)
+            chugel.transition(mid, "VERIFYING_PRODUCTION", actor="chugel", reason="test setup")
+        chugel.record_deploy_blocked(mid, classification=classification, reason="synthetic block")
+
+    def test_plain_resume_eligible_classification_resumes_normally(self):
+        for prior in ("DEPLOY_PENDING", "VERIFYING_PRODUCTION"):
+            with self.subTest(prior=prior):
+                mid = self._fresh_mission()
+                self._blocked_from_deploy_state(mid, prior, classification="ANCESTRY_UNVERIFIABLE")
+                record = resume_from_blocked(mid, _decision())
+                self.assertEqual(record["state"], prior)
+
+    def test_exceptional_reopen_required_classification_refuses_plain_resume(self):
+        mid = self._fresh_mission()
+        self._blocked_from_deploy_state(mid, "DEPLOY_PENDING", classification="HEALTH_DEGRADED")
+        before = chugel.get_mission(mid)
+        with self.assertRaises(DeployRecoveryRequired) as ctx:
+            resume_from_blocked(mid, _decision())
+        self.assertEqual(ctx.exception.action, RecoveryAction.EXCEPTIONAL_REOPEN_REQUIRED)
+        after = chugel.get_mission(mid)
+        self.assertEqual(before, after)
+
+    def test_exhausted_recovery_status_refuses_even_a_plain_resume_eligible_classification(self):
+        mid = self._fresh_mission()
+        self._blocked_from_deploy_state(mid, "DEPLOY_PENDING", classification="ANCESTRY_UNVERIFIABLE")
+        for _ in range(3):
+            chugel.reopen_deploy_observation_window(mid, decided_by="jose", acknowledgement="retry")
+            chugel.record_deploy_blocked(mid, classification="ANCESTRY_UNVERIFIABLE", reason="still blocked")
+        with self.assertRaises(DeployRecoveryRequired) as ctx:
+            resume_from_blocked(mid, _decision())
+        self.assertEqual(ctx.exception.action, RecoveryAction.RECOVERY_EXHAUSTED)
+
+    def test_four_pre_existing_states_are_untouched_by_the_new_step(self):
+        """Step 3 must be a complete no-op for the four Mission 004 states
+        -- proven here by mocking recovery_action_for() and asserting it
+        is never even called for a non-deploy prior state."""
+        mid = self._fresh_mission()
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="synthetic block")
+        with mock.patch(
+            "jarvis.mission_write.recovery_action_for",
+            side_effect=AssertionError("must not be called for a non-deploy prior state"),
+        ):
+            record = resume_from_blocked(mid, _decision())
+        self.assertEqual(record["state"], "PUBLISHING")
 
 
 if __name__ == "__main__":
