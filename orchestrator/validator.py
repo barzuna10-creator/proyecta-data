@@ -75,6 +75,22 @@ GATE_STATUSES = frozenset({"not_requested", "pending", "approved", "rejected"})
 SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
 GATE_NAMES = ("scope_authorization", "publish_authorization", "merge_authorization")
 
+# M4 (Automatic Production Deployment Observation & Verification): the
+# exhaustive 7-value closed vocabulary for deploy.last_blocked_classification,
+# mirrored in orchestrator/schemas/mission_record.schema.json's own enum.
+# Kept here so orchestrator/chugel.py's record_deploy_blocked() and
+# orchestrator/deploy_recovery_policy.py's recovery_action_for() both read
+# it from one place, never redefine it.
+DEPLOY_BLOCKED_CLASSIFICATIONS = frozenset({
+    "IDENTITY_NEVER_OBSERVED",
+    "IDENTITY_MISMATCH_DEFINITIVE",
+    "ANCESTRY_UNVERIFIABLE",
+    "HEALTH_DEGRADED",
+    "HEALTH_UNREACHABLE_OR_MALFORMED",
+    "IDENTITY_CONTRADICTED_DURING_HEALTH_CHECK",
+    "OBSERVATION_BUDGET_EXHAUSTED",
+})
+
 # The only literal value ever accepted for a human decision-maker, per
 # agents/AGENT_STANDARD.md section 18 and every CONTRACT.md's precedence
 # chain: no agent name is ever valid here.
@@ -1187,16 +1203,44 @@ def _evidence_verifying_production(record: dict) -> list[ValidationError]:
 
 
 def _evidence_completed(record: dict) -> list[ValidationError]:
+    """COMPLETED must be structurally impossible without BOTH real
+    ancestry proof and real health proof -- a hard evidence-layer
+    invariant (M4), not merely something orchestrator/deploy_verifier.py
+    is trusted to get right. Corrects a real pre-M4 gap: this previously
+    never checked deploy.health_check at all, so a record could reach
+    COMPLETED with identity confirmed but production health never actually
+    observed."""
     errors = _evidence_merged_or_later(record)
     deploy = record.get("deploy") or {}
     if not deploy.get("deploy_confirmed_at"):
         errors.append(ValidationError(
             "STATE_EVIDENCE_MISSING", "COMPLETED requires deploy.deploy_confirmed_at", "$.state",
         ))
+    if not deploy.get("observed_sha"):
+        errors.append(ValidationError(
+            "STATE_EVIDENCE_MISSING", "COMPLETED requires deploy.observed_sha", "$.state",
+        ))
+    if deploy.get("ancestry_verified") is not True:
+        errors.append(ValidationError(
+            "STATE_EVIDENCE_MISSING", "COMPLETED requires deploy.ancestry_verified is True", "$.state",
+        ))
     version_check = deploy.get("version_check") or {}
+    if version_check.get("status_code") != 200:
+        errors.append(ValidationError(
+            "STATE_EVIDENCE_MISSING", "COMPLETED requires deploy.version_check.status_code == 200", "$.state",
+        ))
     if not version_check.get("body_summary"):
         errors.append(ValidationError(
             "STATE_EVIDENCE_MISSING", "COMPLETED requires deploy.version_check evidence", "$.state",
+        ))
+    health_check = deploy.get("health_check") or {}
+    if health_check.get("status_code") != 200:
+        errors.append(ValidationError(
+            "STATE_EVIDENCE_MISSING", "COMPLETED requires deploy.health_check.status_code == 200", "$.state",
+        ))
+    if not health_check.get("checked_at"):
+        errors.append(ValidationError(
+            "STATE_EVIDENCE_MISSING", "COMPLETED requires deploy.health_check.checked_at", "$.state",
         ))
     return errors
 

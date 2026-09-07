@@ -660,7 +660,7 @@ class ConcurrentNotifyStressTests(SupervisorTestCase):
 
 class CoordinatorReportStatusExhaustivenessTests(SupervisorTestCase):
     """Verification Hardening V1, Pillar 1 (contract checks): explicit,
-    per-status treatment of every one of CoordinatorReport's 6 declared
+    per-status treatment of every one of CoordinatorReport's declared
     statuses against _drain_pass()'s real handling -- not just that
     CoordinatorReport can be constructed with each one (round-trip),
     which proves nothing about how _drain_pass() actually treats them.
@@ -720,14 +720,28 @@ class CoordinatorReportStatusExhaustivenessTests(SupervisorTestCase):
     def test_workspace_occupied_never_stalls(self):
         self._assert_status_never_stalls("WORKSPACE_OCCUPIED")
 
+    def test_completed_never_stalls(self):
+        """M4 addition: advance()'s new DEPLOY_PENDING/VERIFYING_PRODUCTION
+        branch returns CoordinatorReport("COMPLETED", "COMPLETED") once
+        orchestrator.deploy_verifier.run() confirms production health --
+        genuinely terminal (COMPLETED stays in mission_supervisor.
+        TERMINAL_STATES, so it is never itself re-dispatched), but must
+        still receive the same uniform 'never stalled' treatment as every
+        other non-HUMAN_ACTION_REQUIRED status, exactly like MERGED
+        already does."""
+        self._assert_status_never_stalls("COMPLETED")
+
     def test_human_action_required_is_the_only_status_that_stalls(self):
         """Direct cross-check: every status in COORDINATOR_REPORT_STATUSES
-        except HUMAN_ACTION_REQUIRED must be proven (by the five tests
+        except HUMAN_ACTION_REQUIRED must be proven (by the six tests
         above) to never stall -- this test asserts that partition itself,
         so a future addition to COORDINATOR_REPORT_STATUSES with no
         corresponding test above fails immediately and visibly, rather
         than silently inheriting untested "safe" treatment."""
-        tested_never_stalls = {"GATE_REQUIRED", "BLOCKED", "TERMINAL_FAILURE", "MERGED", "WORKSPACE_OCCUPIED"}
+        tested_never_stalls = {
+            "GATE_REQUIRED", "BLOCKED", "TERMINAL_FAILURE", "MERGED",
+            "WORKSPACE_OCCUPIED", "COMPLETED",
+        }
         self.assertEqual(
             mission_coordinator.COORDINATOR_REPORT_STATUSES,
             tested_never_stalls | {"HUMAN_ACTION_REQUIRED"},

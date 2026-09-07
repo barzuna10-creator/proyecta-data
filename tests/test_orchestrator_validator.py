@@ -61,6 +61,13 @@ def _minimal_intake_record():
             "expected_sha": None, "deploy_confirmed_at": None,
             "health_check": {"checked_at": None, "status_code": None, "body_summary": None},
             "version_check": {"checked_at": None, "status_code": None, "body_summary": None},
+            "observation_started_at": None, "observed_sha": None, "ancestry_verified": None,
+            "recovery_count": 0, "recovery_status": "available", "recovery_history": [],
+            "last_blocked_classification": None,
+            "dispatch": {
+                "invocation_id": None, "reserved_at": None, "status": None,
+                "last_skip_observed_at": None,
+            },
         },
         "budget": {
             "configured": None, "consumed": {"unit": "tokens", "amount": 0},
@@ -175,6 +182,14 @@ def _completed_record():
         "expected_sha": "d" * 40, "deploy_confirmed_at": "2026-08-19T13:05:00Z",
         "health_check": {"checked_at": "2026-08-19T13:05:00Z", "status_code": 200, "body_summary": "ok"},
         "version_check": {"checked_at": "2026-08-19T13:05:00Z", "status_code": 200, "body_summary": "d" * 40},
+        "observation_started_at": "2026-08-19T13:00:00Z", "observed_sha": "d" * 40,
+        "ancestry_verified": True, "recovery_count": 0, "recovery_status": "available",
+        "recovery_history": [], "last_blocked_classification": None,
+        "dispatch": {
+            "invocation_id": "11111111-1111-4111-8111-111111111111",
+            "reserved_at": "2026-08-19T13:00:00Z", "status": "completed",
+            "last_skip_observed_at": None,
+        },
     }
     return record
 
@@ -1180,6 +1195,55 @@ class PruebaCompletedSinEvidencia(unittest.TestCase):
         result = validate_mission_record(record)
         self.assertFalse(result.valid)
         self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+    def test_completed_sin_health_check_es_invalido(self):
+        """M4 regression: this was the real pre-M4 gap -- _evidence_completed()
+        never checked deploy.health_check at all, so a record could reach
+        COMPLETED with identity confirmed but production health never
+        actually observed. health_check.status_code == 200 is now a hard
+        requirement, checked_at == None must equally be invalid."""
+        record = _completed_record()
+        record["deploy"]["health_check"] = {"checked_at": None, "status_code": None, "body_summary": None}
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+    def test_completed_con_health_check_no_200_es_invalido(self):
+        record = _completed_record()
+        record["deploy"]["health_check"]["status_code"] = 503
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+    def test_completed_sin_ancestria_verificada_es_invalido(self):
+        record = _completed_record()
+        record["deploy"]["ancestry_verified"] = False
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+    def test_completed_sin_observed_sha_es_invalido(self):
+        record = _completed_record()
+        record["deploy"]["observed_sha"] = None
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+    def test_completed_con_version_check_no_200_es_invalido(self):
+        record = _completed_record()
+        record["deploy"]["version_check"]["status_code"] = 500
+        result = validate_mission_record(record)
+        self.assertFalse(result.valid)
+        self.assertIn("STATE_EVIDENCE_MISSING", error_codes(result))
+
+    def test_completed_con_toda_la_evidencia_es_valido(self):
+        """The positive counterpart -- proves the fix isn't over-strict:
+        the exact shape _completed_record() already produces (used by
+        PruebaFlujosLegales.test_flujo_merge_deploy_completion_es_valido)
+        remains valid."""
+        record = _completed_record()
+        result = validate_mission_record(record)
+        self.assertTrue(result.valid, error_codes(result))
 
 
 class PruebaConsistenciaDeHistorialDeEstado(unittest.TestCase):

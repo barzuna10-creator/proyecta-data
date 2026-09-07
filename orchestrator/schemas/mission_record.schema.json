@@ -274,15 +274,47 @@
     },
 
     "deploy": {
-      "description": "Production deploy verification -- read-only checks only (GET /health, GET /version, and reading the platform's own deploy event log), matching how every Level 1 mission this session confirmed a deploy. Never a trigger: nothing in this record causes a deploy, it only records observation of one that already happened via the platform's own auto-deploy.",
+      "description": "Production deploy verification -- read-only checks only (GET /health, GET /version, and reading the platform's own deploy event log), matching how every Level 1 mission this session confirmed a deploy. Never a trigger: nothing in this record causes a deploy, it only records observation of one that already happened via the platform's own auto-deploy. M4: deploy.dispatch is a distinct production-verification execution reservation (guarding orchestrator/deploy_verifier.py's own single-live-runner liveness property), unrelated to the pre-existing top-level dispatch_ledger/dispatch_ledger_entry used for Emilio/Emma agent dispatch -- the shared field-name vocabulary (reserved_at/status/invocation_id) is coincidental, not shared semantics.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["expected_sha", "deploy_confirmed_at", "health_check", "version_check"],
+      "required": [
+        "expected_sha", "deploy_confirmed_at", "health_check", "version_check",
+        "observation_started_at", "observed_sha", "ancestry_verified",
+        "recovery_count", "recovery_status", "recovery_history",
+        "last_blocked_classification", "dispatch"
+      ],
       "properties": {
         "expected_sha": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/sha" }] },
         "deploy_confirmed_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
         "health_check": { "$ref": "#/definitions/http_check" },
-        "version_check": { "$ref": "#/definitions/http_check" }
+        "version_check": { "$ref": "#/definitions/http_check" },
+        "observation_started_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "observed_sha": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/sha" }] },
+        "ancestry_verified": { "anyOf": [{ "type": "null" }, { "type": "boolean" }] },
+        "recovery_count": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "recovery_status": { "type": "string", "enum": ["available", "exhausted"] },
+        "recovery_history": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/deploy_recovery_entry" }
+        },
+        "last_blocked_classification": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "enum": [
+                "IDENTITY_NEVER_OBSERVED",
+                "IDENTITY_MISMATCH_DEFINITIVE",
+                "ANCESTRY_UNVERIFIABLE",
+                "HEALTH_DEGRADED",
+                "HEALTH_UNREACHABLE_OR_MALFORMED",
+                "IDENTITY_CONTRADICTED_DURING_HEALTH_CHECK",
+                "OBSERVATION_BUDGET_EXHAUSTED"
+              ]
+            }
+          ]
+        },
+        "dispatch": { "$ref": "#/definitions/deploy_dispatch_reservation" }
       }
     },
 
@@ -727,6 +759,65 @@
         "checked_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
         "status_code": { "anyOf": [{ "type": "null" }, { "type": "integer" }] },
         "body_summary": { "anyOf": [{ "type": "null" }, { "type": "string" }] }
+      }
+    },
+
+    "deploy_recovery_entry": {
+      "description": "One append-only record of an exceptional reopen of a mission's deploy-observation window (orchestrator/chugel.py's reopen_deploy_observation_window()), capturing the FULL prior observation window's evidence verbatim before it is reset.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recovered_at", "decided_by", "acknowledgement", "prior_blocked_reason",
+        "prior_observation_started_at", "prior_observed_sha", "prior_ancestry_verified",
+        "prior_version_check", "prior_health_check"
+      ],
+      "properties": {
+        "recovered_at": { "$ref": "#/definitions/timestamp" },
+        "decided_by": { "const": "jose" },
+        "acknowledgement": { "type": "string", "minLength": 1 },
+        "prior_blocked_reason": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "enum": [
+                "IDENTITY_NEVER_OBSERVED",
+                "IDENTITY_MISMATCH_DEFINITIVE",
+                "ANCESTRY_UNVERIFIABLE",
+                "HEALTH_DEGRADED",
+                "HEALTH_UNREACHABLE_OR_MALFORMED",
+                "IDENTITY_CONTRADICTED_DURING_HEALTH_CHECK",
+                "OBSERVATION_BUDGET_EXHAUSTED"
+              ]
+            }
+          ]
+        },
+        "prior_observation_started_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "prior_observed_sha": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/sha" }] },
+        "prior_ancestry_verified": { "anyOf": [{ "type": "null" }, { "type": "boolean" }] },
+        "prior_version_check": { "$ref": "#/definitions/http_check" },
+        "prior_health_check": { "$ref": "#/definitions/http_check" }
+      }
+    },
+
+    "deploy_dispatch_reservation": {
+      "description": "A production-verification execution reservation guarded by orchestrator/deploy_verifier.py's own dedicated per-mission fcntl.flock() lock file -- distinct from, and unrelated to, the top-level dispatch_ledger used for Emilio/Emma agent dispatch (see deploy's own description).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocation_id", "reserved_at", "status", "last_skip_observed_at"],
+      "properties": {
+        "invocation_id": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          ]
+        },
+        "reserved_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
+        "status": { "anyOf": [{ "type": "null" }, { "type": "string", "enum": ["reserved", "completed"] }] },
+        "last_skip_observed_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] }
       }
     },
 

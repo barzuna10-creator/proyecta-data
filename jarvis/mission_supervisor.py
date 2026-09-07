@@ -68,6 +68,13 @@ AUTO_ADVANCE_ELIGIBLE_STATES = frozenset({
     "CHANGES_REQUIRED", "CORRECTING",
     "PUBLISH_AWAITING_AUTHORIZATION", "PUBLISHING", "CI_PENDING",
     "MERGE_AWAITING_AUTHORIZATION", "MERGING",
+    # M4: MERGED (the automatic, gate-free begin_deploy_observation() edge)
+    # and the two production-verification states -- every dispatch of
+    # DEPLOY_PENDING/VERIFYING_PRODUCTION goes through advance() ->
+    # orchestrator.deploy_verifier.run() -> chugel.reserve_deploy_verification(),
+    # never a bypass, regardless of whether the mission arrived via fresh
+    # progression, resume, or restart-rediscovery.
+    "MERGED", "DEPLOY_PENDING", "VERIFYING_PRODUCTION",
 })
 
 # The three real Chugel states a human gate authorization is pending
@@ -82,18 +89,19 @@ GATE_WAITING_STATES = frozenset({
 
 # No further work is ever possible from these -- excluded from the drain
 # pass by construction (not a special case: they are simply not in
-# AUTO_ADVANCE_ELIGIBLE_STATES). Includes the three post-MERGED states
-# (DEPLOY_PENDING, VERIFYING_PRODUCTION, COMPLETED) that exist in
-# orchestrator/schemas/mission_record.schema.json's state enum and in
-# validator.TRANSITIONS but that mission_coordinator.advance() itself has
-# no branch for -- it treats MERGED as advance()'s own terminal report
-# (Mission 004, unmodified here) and this module drives nothing beyond
-# what advance() itself drives. Round-2 independent review, P3: without
-# these three, the classification was not exhaustive over the schema
-# state enum -- see test_every_schema_state_is_classified_somewhere.
+# AUTO_ADVANCE_ELIGIBLE_STATES). M4: MERGED, DEPLOY_PENDING, and
+# VERIFYING_PRODUCTION were previously bucketed here as inert/terminal-like
+# (mission_coordinator.advance() had no branch for any of them beyond
+# treating MERGED as its own terminal report) -- that is no longer true.
+# advance() now drives MERGED -> DEPLOY_PENDING automatically (no gate)
+# and drives DEPLOY_PENDING/VERIFYING_PRODUCTION via
+# orchestrator.deploy_verifier.run(), so all three now belong in
+# AUTO_ADVANCE_ELIGIBLE_STATES above instead. COMPLETED remains genuinely
+# terminal, untouched -- no automatic action is ever taken from it again.
+# Round-2 independent review, P3 (still honored): every schema state must
+# be classified somewhere -- see test_every_schema_state_is_classified_somewhere.
 TERMINAL_STATES = frozenset({
-    "MERGED", "FAILED", "CANCELLED", "ROLLED_BACK",
-    "DEPLOY_PENDING", "VERIFYING_PRODUCTION", "COMPLETED",
+    "COMPLETED", "FAILED", "CANCELLED", "ROLLED_BACK",
 })
 
 # BLOCKED is its own bucket: waiting on a human to confirm an external
