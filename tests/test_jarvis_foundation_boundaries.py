@@ -21,7 +21,18 @@ ALLOWED_CHUGEL_CALLS = {"list_missions", "get_mission"}
 # mission_query.py alone still gets (that module's whole contract is "read
 # exactly these two calls, nothing else").
 WRITE_CHUGEL_MODULE = "mission_write.py"
-ALLOWED_WRITE_CHUGEL_CALLS = {"get_mission", "create_mission", "decide_gate", "transition"}
+# M6: "reopen_deploy_observation_window" added -- jarvis.mission_write's
+# own reopen_deploy_observation_window() is now the sole disclosed
+# wrapper around orchestrator.chugel.reopen_deploy_observation_window(),
+# giving jarvis.control_plane_server's new POST
+# /v1/missions/{id}/reopen-deploy-observation handler a way to reach it
+# without importing orchestrator.chugel directly -- the exact same
+# "wrap the one new Chugel write this milestone needs, still through the
+# one disclosed write seam" shape as every prior addition to this set.
+ALLOWED_WRITE_CHUGEL_CALLS = {
+    "get_mission", "create_mission", "decide_gate", "transition",
+    "reopen_deploy_observation_window",
+}
 COORDINATOR_CHUGEL_MODULE = "mission_coordinator.py"
 # Mission 006: "transition" was added deliberately -- advance() is now the
 # sole place the mechanical INTAKE -> SCOPE_AWAITING_AUTHORIZATION edge is

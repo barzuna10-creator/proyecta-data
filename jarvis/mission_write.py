@@ -61,6 +61,24 @@ class ResumeNotEligible(MissionWriteError):
         self.mission_id = mission_id
 
 
+class DeployReopenNotEligible(MissionWriteError):
+    """M6: reopen_deploy_observation_window() (this module's function,
+    below) was called but orchestrator.chugel.reopen_deploy_observation_window()
+    itself refused -- the mission is not currently BLOCKED, or
+    deploy.recovery_status is not 'available' (already 'exhausted', so no
+    further reopen is ever possible). Exists for exactly the same reason
+    GateNotYetEligible/ResumeNotEligible do: jarvis.control_plane_server
+    never imports orchestrator.chugel directly (it is not one of the
+    three disclosed Chugel seams -- see that module's own docstring and
+    tests/test_jarvis_foundation_boundaries.py), so it needs a
+    mission_write-level exception type to catch instead of
+    orchestrator.chugel.DeployRecoveryNotEligible."""
+
+    def __init__(self, mission_id: str, reason: str):
+        super().__init__(f"mission {mission_id}: {reason}")
+        self.mission_id = mission_id
+
+
 class DeployRecoveryRequired(MissionWriteError):
     """M4: resume_from_blocked() was called for a mission BLOCKED from
     DEPLOY_PENDING/VERIFYING_PRODUCTION, but orchestrator.deploy_recovery_policy.
@@ -249,3 +267,34 @@ def resume_from_blocked(mission_id: str, decision: dict) -> dict:
         mission_id, prior_state, actor="chugel",
         reason="resumed from BLOCKED on José's explicit confirmation",
     )
+
+
+def reopen_deploy_observation_window(mission_id: str, *, decided_by: str, acknowledgement: str) -> dict:
+    """M6: the only path Jarvis has to reopen a BLOCKED mission's deploy-
+    observation window via the exceptional recovery path -- the sole
+    additional caller orchestrator.chugel.reopen_deploy_observation_window()
+    gains this milestone. Never called automatically, exactly like
+    resume_from_blocked() above: the caller (jarvis.control_plane_server)
+    must already hold a literal, current-turn confirmation from José, and
+    a real, non-empty acknowledgement string, before this is ever
+    invoked.
+
+    Attribution is checked here, defensively, in addition to
+    orchestrator.chugel.reopen_deploy_observation_window()'s own
+    unconditional identical check -- the same defense-in-depth discipline
+    _require_current_turn_attribution() gives every other write in this
+    module. `chugel.DeployRecoveryNotEligible` (mission not BLOCKED, or
+    deploy.recovery_status is not 'available') is translated to this
+    module's own DeployReopenNotEligible so jarvis.control_plane_server
+    never needs to import orchestrator.chugel directly to catch it."""
+    if decided_by != HUMAN_DECIDER:
+        raise MissionWriteError(
+            f"refusing to relay a deploy-reopen decision not attributed to "
+            f"the literal {HUMAN_DECIDER!r}, got {decided_by!r}"
+        )
+    try:
+        return chugel.reopen_deploy_observation_window(
+            mission_id, decided_by=decided_by, acknowledgement=acknowledgement,
+        )
+    except chugel.DeployRecoveryNotEligible as exc:
+        raise DeployReopenNotEligible(mission_id, str(exc)) from exc

@@ -316,6 +316,268 @@ class RealGateFlowTests(ControlPlaneServerTestCase):
         self.assertEqual(409, status)
 
 
+class ResumeAndReopenDeployObservationEndpointTests(ControlPlaneServerTestCase):
+    """M6: POST /v1/missions/{id}/resume and POST
+    /v1/missions/{id}/reopen-deploy-observation -- the first real HTTP
+    callers of jarvis.mission_write.resume_from_blocked()/
+    reopen_deploy_observation_window(). Every mission here is driven
+    through real, legal chugel.transition() calls, never a hacked
+    record -- the same fixture style as
+    tests/test_jarvis_mission_write.py's ResumeFromBlockedTests/
+    ResumeFromBlockedDeployRecoveryTests, over real HTTP instead of a
+    direct function call."""
+
+    _CONFIRM = "I authorize this action now"
+
+    def _blocked_from(self, mid, prior_state):
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        if prior_state == "MERGING":
+            chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="test setup")
+            chugel.record_publish_commit(mid, "a" * 40)
+            decision = {
+                "status": "approved", "requested_at": "2026-08-19T12:10:00Z",
+                "decided_at": "2026-08-19T12:10:00Z", "decided_by": "jose",
+                "decision_ref": "ref-1", "approved_for": {"head_sha": "a" * 40},
+            }
+            chugel.decide_gate(mid, "merge_authorization", decision)
+            chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(mid, prior_state, actor="chugel", reason="test setup")
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="synthetic block")
+
+    def _mission_at_merged(self, mid):
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "CI_PENDING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="test setup")
+        chugel.record_publish_commit(mid, "a" * 40)
+        decision = {
+            "status": "approved", "requested_at": "2026-08-19T12:10:00Z",
+            "decided_at": "2026-08-19T12:10:00Z", "decided_by": "jose",
+            "decision_ref": "ref-1", "approved_for": {"head_sha": "a" * 40},
+        }
+        chugel.decide_gate(mid, "merge_authorization", decision)
+        chugel.transition(mid, "MERGING", actor="chugel", reason="test setup")
+        chugel.record_merge_commit(mid, "b" * 40)
+        chugel.transition(mid, "MERGED", actor="chugel", reason="test setup")
+
+    def _blocked_from_deploy_pending(self, mid, *, classification):
+        self._mission_at_merged(mid)
+        chugel.begin_deploy_observation(mid)
+        chugel.record_deploy_blocked(mid, classification=classification, reason="synthetic block")
+
+    def test_resume_succeeds_from_a_real_resumable_prior_state(self):
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._blocked_from(mid, "PUBLISHING")
+        status, body = self._request("POST", f"/v1/missions/{mid}/resume", {"confirmation": self._CONFIRM})
+        self.assertEqual(200, status)
+        self.assertEqual("PUBLISHING", body["state"])
+        self.assertEqual("PUBLISHING", chugel.get_mission(mid)["state"])
+
+    def test_resume_without_the_exact_confirmation_phrase_is_rejected_and_makes_no_transition(self):
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._blocked_from(mid, "PUBLISHING")
+        status, _ = self._request("POST", f"/v1/missions/{mid}/resume", {"confirmation": "close enough"})
+        self.assertEqual(400, status)
+        self.assertEqual("BLOCKED", chugel.get_mission(mid)["state"])
+
+    def test_exceptional_reopen_required_then_a_real_acknowledged_reopen_succeeds(self):
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._blocked_from_deploy_pending(mid, classification="HEALTH_DEGRADED")
+
+        status, body = self._request("POST", f"/v1/missions/{mid}/resume", {"confirmation": self._CONFIRM})
+        self.assertEqual(409, status)
+        self.assertIn("reopen-deploy-observation", body["error"])
+        self.assertEqual("BLOCKED", chugel.get_mission(mid)["state"])
+
+        status2, body2 = self._request("POST", f"/v1/missions/{mid}/reopen-deploy-observation", {
+            "confirmation": self._CONFIRM, "acknowledgement": "verified manually with the provider",
+        })
+        self.assertEqual(200, status2)
+        self.assertEqual("DEPLOY_PENDING", body2["state"])
+        self.assertEqual("DEPLOY_PENDING", chugel.get_mission(mid)["state"])
+
+    def test_recovery_exhausted_never_suggests_reopen_and_a_real_reopen_call_is_itself_refused(self):
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._blocked_from_deploy_pending(mid, classification="ANCESTRY_UNVERIFIABLE")
+        for _ in range(3):  # MAX_DEPLOY_RECOVERY_ATTEMPTS
+            chugel.reopen_deploy_observation_window(mid, decided_by="jose", acknowledgement="retry")
+            chugel.record_deploy_blocked(mid, classification="ANCESTRY_UNVERIFIABLE", reason="still blocked")
+        self.assertEqual("exhausted", chugel.get_mission(mid)["deploy"]["recovery_status"])
+
+        status, body = self._request("POST", f"/v1/missions/{mid}/resume", {"confirmation": self._CONFIRM})
+        self.assertEqual(409, status)
+        self.assertIn("exhausted", body["error"])
+        self.assertNotIn("reopen-deploy-observation", body["error"])
+
+        # The real, fail-closed fact this message rests on: Chugel itself
+        # refuses the reopen, not just this module's own wording above.
+        status2, _ = self._request("POST", f"/v1/missions/{mid}/reopen-deploy-observation", {
+            "confirmation": self._CONFIRM, "acknowledgement": "one more try",
+        })
+        self.assertEqual(409, status2)
+        self.assertEqual("BLOCKED", chugel.get_mission(mid)["state"])
+
+    def test_deny_resume_refuses_with_no_suggested_next_step_but_a_direct_reopen_still_succeeds(self):
+        """Characterization test, not a policy claim: real, pre-existing
+        M4 behavior is that orchestrator.chugel.reopen_deploy_observation_window()
+        does not itself gate on last_blocked_classification -- only on
+        state=='BLOCKED' and deploy.recovery_status=='available'. A DENY
+        classification (recovery_action_for() falls through to DENY when
+        the observation budget has elapsed in wall-clock time even though
+        deploy.recovery_status is still 'available') therefore still
+        permits a direct, acknowledged reopen call to succeed, even though
+        /resume itself refuses and suggests nothing. M6 documents this
+        asymmetry (docs/zentra/RECOVERY_CONTRACT_V1.md); it does not fix
+        it -- that would be a policy change out of this milestone's scope."""
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._mission_at_merged(mid)
+        chugel.begin_deploy_observation(mid)
+        record = chugel.get_mission(mid)
+        stale_start = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1000)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        mutated = dict(record)
+        mutated["deploy"] = dict(mutated["deploy"])
+        mutated["deploy"]["observation_started_at"] = stale_start
+        chugel._write_mission_record(mutated)
+        # ANCESTRY_UNVERIFIABLE with an elapsed (>900s) observation budget,
+        # but deploy.recovery_status still 'available' -- not in
+        # recovery_action_for()'s PLAIN_RESUME (needs budget>0) nor its
+        # EXCEPTIONAL_REOPEN_REQUIRED set -- falls through to DENY.
+        chugel.record_deploy_blocked(mid, classification="ANCESTRY_UNVERIFIABLE", reason="synthetic block")
+        self.assertEqual("available", chugel.get_mission(mid)["deploy"]["recovery_status"])
+
+        status, body = self._request("POST", f"/v1/missions/{mid}/resume", {"confirmation": self._CONFIRM})
+        self.assertEqual(409, status)
+        self.assertNotIn("reopen-deploy-observation", body["error"])
+
+        status2, body2 = self._request("POST", f"/v1/missions/{mid}/reopen-deploy-observation", {
+            "confirmation": self._CONFIRM, "acknowledgement": "manually verified despite DENY",
+        })
+        self.assertEqual(200, status2)
+        self.assertEqual("DEPLOY_PENDING", body2["state"])
+
+    def test_reopen_requires_a_real_non_empty_acknowledgement(self):
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._blocked_from_deploy_pending(mid, classification="HEALTH_DEGRADED")
+        for bad_body in (
+            {"confirmation": self._CONFIRM},
+            {"confirmation": self._CONFIRM, "acknowledgement": ""},
+            {"confirmation": self._CONFIRM, "acknowledgement": "   "},
+            {"confirmation": self._CONFIRM, "acknowledgement": 12345},
+        ):
+            with self.subTest(body=bad_body):
+                status, _ = self._request("POST", f"/v1/missions/{mid}/reopen-deploy-observation", bad_body)
+                self.assertEqual(400, status)
+        self.assertEqual("BLOCKED", chugel.get_mission(mid)["state"])
+
+    def test_resume_of_an_unknown_mission_id_is_404(self):
+        status, _ = self._request("POST", "/v1/missions/does-not-exist/resume", {"confirmation": self._CONFIRM})
+        self.assertEqual(404, status)
+
+    def test_resume_and_reopen_each_call_notify(self):
+        import unittest.mock as mock
+
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._blocked_from(mid, "PUBLISHING")
+        with mock.patch.object(self.server.supervisor, "notify") as notify:
+            status, _ = self._request("POST", f"/v1/missions/{mid}/resume", {"confirmation": self._CONFIRM})
+        self.assertEqual(200, status)
+        notify.assert_called_once()
+
+        mid2 = _create_intake_mission("algo-2")["mission_id"]
+        self._blocked_from_deploy_pending(mid2, classification="HEALTH_DEGRADED")
+        with mock.patch.object(self.server.supervisor, "notify") as notify:
+            status2, _ = self._request("POST", f"/v1/missions/{mid2}/reopen-deploy-observation", {
+                "confirmation": self._CONFIRM, "acknowledgement": "verified",
+            })
+        self.assertEqual(200, status2)
+        notify.assert_called_once()
+
+
+class ProjectionExposesBlockedRecoverySurfaceTests(ControlPlaneServerTestCase):
+    """M6: the exact, pinned projection exposure surface -- exactly one
+    new per-mission field (deploy.lastBlockedClassification, only for a
+    BLOCKED mission whose prior state was a deploy-verification state)
+    plus one new, structurally separate `blockedMissions` list."""
+
+    def _mission_at_merged(self, mid):
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "CI_PENDING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="test setup")
+        chugel.record_publish_commit(mid, "a" * 40)
+        decision = {
+            "status": "approved", "requested_at": "2026-08-19T12:10:00Z",
+            "decided_at": "2026-08-19T12:10:00Z", "decided_by": "jose",
+            "decision_ref": "ref-1", "approved_for": {"head_sha": "a" * 40},
+        }
+        chugel.decide_gate(mid, "merge_authorization", decision)
+        chugel.transition(mid, "MERGING", actor="chugel", reason="test setup")
+        chugel.record_merge_commit(mid, "b" * 40)
+        chugel.transition(mid, "MERGED", actor="chugel", reason="test setup")
+
+    def test_deploy_blocked_mission_exposes_exactly_the_classification_field(self):
+        mid = _create_intake_mission("algo")["mission_id"]
+        self._mission_at_merged(mid)
+        chugel.begin_deploy_observation(mid)
+        chugel.record_deploy_blocked(mid, classification="HEALTH_DEGRADED", reason="synthetic block")
+
+        status, projection = self._request("GET", "/v1/command-center/projection")
+        self.assertEqual(200, status)
+        mission_entry = next(m for m in projection["missions"] if m["id"] == mid)
+        self.assertEqual({"lastBlockedClassification": "HEALTH_DEGRADED"}, mission_entry["deploy"])
+
+        rendered = json.dumps(mission_entry)
+        for forbidden in ("health_check", "version_check", "recovery_history", "last_error", "observed_sha"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_a_non_deploy_blocked_mission_never_gets_a_deploy_key(self):
+        mid = _create_intake_mission("algo")["mission_id"]
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="synthetic block")
+
+        status, projection = self._request("GET", "/v1/command-center/projection")
+        self.assertEqual(200, status)
+        mission_entry = next(m for m in projection["missions"] if m["id"] == mid)
+        self.assertNotIn("deploy", mission_entry)
+
+    def test_blocked_missions_list_is_structurally_separate_from_gates(self):
+        deploy_mid = _create_intake_mission("deploy-blocked")["mission_id"]
+        self._mission_at_merged(deploy_mid)
+        chugel.begin_deploy_observation(deploy_mid)
+        chugel.record_deploy_blocked(deploy_mid, classification="HEALTH_DEGRADED", reason="synthetic block")
+
+        other_mid = _create_intake_mission("other-blocked")["mission_id"]
+        chugel.transition(other_mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(other_mid, "PUBLISHING", actor="chugel", reason="test setup")
+        chugel.transition(other_mid, "BLOCKED", actor="chugel", reason="synthetic block")
+
+        status, projection = self._request("GET", "/v1/command-center/projection")
+        self.assertEqual(200, status)
+        self.assertIn("blockedMissions", projection)
+        by_id = {entry["missionId"]: entry for entry in projection["blockedMissions"]}
+
+        self.assertEqual(
+            {"missionId": deploy_mid, "state": "BLOCKED", "priorState": "DEPLOY_PENDING",
+             "lastBlockedClassification": "HEALTH_DEGRADED"},
+            by_id[deploy_mid],
+        )
+        self.assertEqual(
+            {"missionId": other_mid, "state": "BLOCKED", "priorState": "PUBLISHING",
+             "lastBlockedClassification": None},
+            by_id[other_mid],
+        )
+        # Never folded into `gates` -- BLOCKED missions have no scope/
+        # publish/merge kind, so _pending_real_gate() already excludes
+        # them; this asserts that behavior explicitly rather than trusting
+        # it silently continues to hold.
+        gate_mission_ids = {g["missionId"] for g in projection["gates"]}
+        self.assertNotIn(deploy_mid, gate_mission_ids)
+        self.assertNotIn(other_mid, gate_mission_ids)
+
+
 class ConversationFlowTests(ControlPlaneServerTestCase):
     """/v1/conversation -- Jarvis's own dispatch is always mocked here
     (real subscription-CLI behavior is covered independently in
