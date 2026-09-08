@@ -675,6 +675,19 @@ def _create_mission_locked(
             "per_agent_consumed": {"david": None, "emilio": None, "emma": None},
             "exhausted": False,
         },
+        # M5 (Learning & Knowledge Continuity): initialized fully here,
+        # exactly like deploy above -- never partially built up later.
+        # See record_knowledge_derivation_completed()/
+        # record_knowledge_derivation_attempt_failed() for the only two
+        # mutators of this object; neither ever touches state/state_history.
+        "knowledge_derivation": {
+            "status": "pending",
+            "attempt_count": 0,
+            "last_attempted_at": None,
+            "last_error": None,
+            "completed_at": None,
+            "candidate_ids": [],
+        },
     }
 
     result = validate_mission_record(record)
@@ -2088,6 +2101,88 @@ def record_deploy_verification_skip(mission_id: str) -> dict:
         if not result.valid:
             raise MissionValidationFailed(
                 f"mission {mission_id}: record_deploy_verification_skip() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+# --- M5: learning & knowledge continuity -----------------------------
+# Both mutators below follow this module's exact deepcopy-then-validate-
+# then-write pattern (see record_deploy_blocked() above). Neither ever
+# touches record["state"]/record["state_history"] -- knowledge_derivation
+# is bookkeeping about a side, non-authoritative candidate-submission
+# pipeline (jarvis.knowledge_storage's own draft -> awaiting_emma_review
+# -> awaiting_human_authorization -> accepted chain), never a second state
+# engine. _mission_lock() is acquired, held, and released ONLY inside
+# these two functions for this entire feature -- the orchestrating
+# function in jarvis/mission_coordinator.py (derive_knowledge_for_completed_
+# mission()) never acquires it itself, directly or by wrapping a `with`
+# block around a call to either of these: _mission_lock() is non-reentrant
+# (see its own docstring above), so a caller that already held it and then
+# called one of these would deadlock on every single invocation.
+
+MAX_KNOWLEDGE_DERIVATION_ATTEMPTS = 5
+
+
+def record_knowledge_derivation_completed(mission_id: str, *, candidate_ids) -> dict:
+    """Marks knowledge_derivation as durably finished for this mission,
+    recording exactly which candidate_ids were (idempotently) submitted.
+    Eligible regardless of current status EXCEPT it is a no-op (returns
+    the record unchanged, never raises) if status is already "completed"
+    -- this is the sole idempotency marker
+    jarvis.mission_coordinator.derive_knowledge_for_completed_mission()
+    consults to short-circuit an already-finished derivation, so calling
+    it again after completion must never raise."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record["knowledge_derivation"]["status"] == "completed":
+            return record
+
+        mutated = copy.deepcopy(record)
+        mutated["knowledge_derivation"] = dict(mutated["knowledge_derivation"])
+        mutated["knowledge_derivation"]["status"] = "completed"
+        mutated["knowledge_derivation"]["completed_at"] = _now()
+        mutated["knowledge_derivation"]["candidate_ids"] = list(candidate_ids)
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_knowledge_derivation_completed() failed validation", result.errors
+            )
+        _write_mission_record(mutated)
+        return mutated
+
+
+def record_knowledge_derivation_attempt_failed(mission_id: str, *, error_summary: str) -> dict:
+    """Records one failed knowledge-derivation attempt: increments
+    attempt_count and sets last_attempted_at/last_error. If the resulting
+    attempt_count reaches MAX_KNOWLEDGE_DERIVATION_ATTEMPTS, also sets
+    status="stalled" in this SAME atomic write (proactive, not inferred
+    later -- mirrors reopen_deploy_observation_window()'s own pattern of
+    setting its exhaustion marker in the same call that reaches the cap).
+    A no-op (returns the record unchanged, never raises) if status is
+    already "completed" -- a stray failure recorded after the fact must
+    never un-complete a mission's derivation."""
+    with _mission_lock(mission_id):
+        record = _read_mission_record(mission_id)
+        if record["knowledge_derivation"]["status"] == "completed":
+            return record
+
+        mutated = copy.deepcopy(record)
+        mutated["knowledge_derivation"] = dict(mutated["knowledge_derivation"])
+        new_count = mutated["knowledge_derivation"]["attempt_count"] + 1
+        mutated["knowledge_derivation"]["attempt_count"] = new_count
+        mutated["knowledge_derivation"]["last_attempted_at"] = _now()
+        mutated["knowledge_derivation"]["last_error"] = str(error_summary)
+        if new_count >= MAX_KNOWLEDGE_DERIVATION_ATTEMPTS:
+            mutated["knowledge_derivation"]["status"] = "stalled"
+        mutated["updated_at"] = _now()
+
+        result = validate_mission_record(mutated)
+        if not result.valid:
+            raise MissionValidationFailed(
+                f"mission {mission_id}: record_knowledge_derivation_attempt_failed() failed validation", result.errors
             )
         _write_mission_record(mutated)
         return mutated

@@ -101,6 +101,24 @@ def get_mission_status(mission_id: str) -> MissionStatus:
         raise MissionQueryError("INVALID_MISSION_ID") from exc
 
 
+def get_knowledge_derivation_status(mission_id: str) -> dict:
+    """M5 (Learning & Knowledge Continuity). Read-only, additive:
+    returns the mission's own knowledge_derivation object verbatim, so
+    jarvis/control_plane_server.py's projection endpoint can surface it
+    (status/attempt_count, no more) without introducing any new
+    authority or a second Chugel-import seam. Never mutates anything."""
+    try:
+        return dict(chugel.get_mission(mission_id)["knowledge_derivation"])
+    except chugel.MissionNotFound as exc:
+        raise MissionQueryError("MISSION_NOT_FOUND") from exc
+    except (chugel.MissionRecordCorrupt, chugel.MissionRecordInvalid) as exc:
+        raise MissionQueryError("MISSION_RECORD_INVALID") from exc
+    except chugel.MissionRecordPathUnsafe as exc:
+        raise MissionQueryError("MISSION_PATH_UNSAFE") from exc
+    except ValueError as exc:
+        raise MissionQueryError("INVALID_MISSION_ID") from exc
+
+
 def get_mission_learning(mission_id: str) -> MissionLearningProjection:
     """Extend the existing read boundary with one detached learning projection."""
     try:

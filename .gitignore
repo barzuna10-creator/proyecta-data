@@ -17,6 +17,7 @@ logs/*.json
 # orchestrator/CHUGEL_V1.md, sección "Rollback strategy" (decisión de
 # git-tracking) e Incremento #5 para el razonamiento completo.
 orchestrator/missions/*.json
+orchestrator/missions/.*.lock
 
 # Archivos auxiliares de SQLite en modo WAL (regenerables, se crean al
 # correr el backend localmente contra database/proyecta.db -- ver db.py)

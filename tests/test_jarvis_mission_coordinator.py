@@ -43,12 +43,19 @@ class CoordinatorTestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._original_missions_dir = chugel._MISSIONS_DIR
         chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
+        # M5: redirect the knowledge-candidate store too -- a COMPLETED
+        # report now triggers derive_knowledge_for_completed_mission(),
+        # which must never touch the real default
+        # orchestrator/knowledge/ directory from a test.
+        self._original_knowledge_store_root = mission_coordinator._KNOWLEDGE_STORE_ROOT
+        mission_coordinator._KNOWLEDGE_STORE_ROOT = Path(self._tmpdir.name) / "knowledge"
         self._repository_root = Path(self._tmpdir.name) / "repository"
         self._repository_root.mkdir()
         self.adapters = {}
 
     def tearDown(self):
         chugel._MISSIONS_DIR = self._original_missions_dir
+        mission_coordinator._KNOWLEDGE_STORE_ROOT = self._original_knowledge_store_root
         self._tmpdir.cleanup()
 
     def _mission_scope_awaiting(self):
@@ -1292,8 +1299,23 @@ class DeployObservationWiringTests(CoordinatorTestCase):
     def test_deploy_verifier_completed_reports_completed(self):
         mid = self._mission_at_merged()
         chugel.begin_deploy_observation(mid)
-        with mock.patch("orchestrator.deploy_verifier.run") as verifier_run:
-            verifier_run.return_value = mock.Mock(status="COMPLETED", state="COMPLETED", reason="")
+
+        # M5: derive_knowledge_for_completed_mission() re-reads the real
+        # Chugel record and requires state == COMPLETED -- so a mocked
+        # deploy_verifier.run() reporting COMPLETED here must actually
+        # leave the record at COMPLETED too, exactly like the real
+        # orchestrator/deploy_verifier.py would have (this test isolates
+        # advance()'s own wiring from deploy_verifier's internals, not
+        # from Chugel's own real state).
+        def _fake_run(mission_id, **kwargs):
+            chugel.record_deploy_version_check(mission_id, checked_at="2026-09-01T00:00:00Z", status_code=200, body_summary="d" * 40)
+            chugel.record_deploy_ancestry_result(mission_id, observed_sha="d" * 40, ancestry_verified=True)
+            chugel.transition(mission_id, "VERIFYING_PRODUCTION", actor="chugel", reason="ancestry confirmed")
+            chugel.record_deploy_health_check(mission_id, checked_at="2026-09-01T00:04:00Z", status_code=200, body_summary="ok")
+            chugel.record_deploy_confirmed(mission_id, confirmed_at="2026-09-01T00:05:00Z")
+            return mock.Mock(status="COMPLETED", state="COMPLETED", reason="")
+
+        with mock.patch("orchestrator.deploy_verifier.run", side_effect=_fake_run):
             report = self._advance(mid, deploy_base_url="https://example.invalid")
         self.assertEqual(report.status, "COMPLETED")
         self.assertEqual(report.state, "COMPLETED")

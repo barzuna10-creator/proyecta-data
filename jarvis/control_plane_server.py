@@ -721,6 +721,21 @@ def _build_projection(store: FileJarvisStore) -> dict:
                 status = mission_query.get_mission_status(item.mission_id)
             except mission_query.MissionQueryError:
                 status = None
+        # M5 (Learning & Knowledge Continuity): small, additive, read-only
+        # field on this existing endpoint -- no new architecture, no new
+        # authorization. Lets a human notice a "stalled" mission (whose
+        # automatic knowledge-derivation retries have stopped) and
+        # manually call jarvis.mission_coordinator.
+        # derive_knowledge_for_completed_mission(mission_id) directly; only
+        # ever fetched for a COMPLETED, readable mission, since that is
+        # the only state this feature ever touches.
+        knowledge_derivation_status = None
+        if item.readable and item.state == "COMPLETED":
+            try:
+                derivation = mission_query.get_knowledge_derivation_status(item.mission_id)
+                knowledge_derivation_status = derivation["status"]
+            except mission_query.MissionQueryError:
+                knowledge_derivation_status = None
         missions.append({
             "id": item.mission_id,
             "title": item.mission_id,
@@ -734,6 +749,7 @@ def _build_projection(store: FileJarvisStore) -> dict:
             # `staleness` above -- no new read. An unreadable/unfetchable
             # mission gets an empty timeline, never a fabricated one.
             "timeline": [_timeline_event_dict(e) for e in status.timeline] if status is not None else [],
+            "knowledgeDerivationStatus": knowledge_derivation_status,
         })
         if status is not None:
             gate = _pending_real_gate(item.mission_id, status)

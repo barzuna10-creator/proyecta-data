@@ -39,12 +39,27 @@ trigger, same as any other auto-advance-eligible state."""
 
 from __future__ import annotations
 
+import datetime
 import threading
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from jarvis import mission_coordinator, mission_query
+
+# M5 (Learning & Knowledge Continuity). Mirrors orchestrator/deploy_verifier.py's
+# own _elapsed_seconds() shape/convention (chugel.py's timestamps are
+# always "%Y-%m-%dT%H:%M:%SZ", never anything else). A free function
+# (not a method) so a test can monkeypatch it directly, exactly like
+# tests/test_orchestrator_deploy_verifier.py's own _fake_clock() convention
+# mocks a module-level time function rather than real sleeping.
+RETRY_BACKOFF_SECONDS = 300.0
+
+
+def _elapsed_seconds_since(timestamp: str) -> float:
+    parsed = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (now - parsed).total_seconds()
 
 # States from which mission_coordinator.advance() can make real forward
 # progress -- either STATE progress, or (for the three gate states) a
@@ -186,6 +201,16 @@ class MissionSupervisor:
         # it, so a pass that finds nothing else eligible correctly reports
         # empty and the loop's existing termination condition applies.
         self._stalled: set[str] = set()
+        # M5 (Learning & Knowledge Continuity). Process-local, in-memory,
+        # pure performance optimization -- correctness never depends on
+        # it: deterministic candidate IDs (jarvis.learning_ingestion) plus
+        # idempotent submission (mission_coordinator._submit_candidate_
+        # idempotently) already make redundant re-derivation safe. Once a
+        # mission_id is observed knowledge_derivation.status=="completed"
+        # it is never chugel.get_mission()-read again by this instance's
+        # own housekeeping pass; a fresh process (empty cache) simply
+        # re-verifies and re-populates from scratch.
+        self._knowledge_derivation_done_cache: set[str] = set()
 
     @property
     def workspace_base_root(self):
@@ -367,7 +392,83 @@ class MissionSupervisor:
                 # own.
                     self._stalled.add(mission_id)
                 reports.append((mission_id, report))
+        self._knowledge_derivation_housekeeping_pass(listings)
         return DrainOutcome(tuple(reports), tuple(errors))
+
+    def _dispatch(self, func, mission_id: str) -> None:
+        """Fire-and-forget submission onto this supervisor's own thread
+        pool, reusing self._inflight so the same mission_id can never be
+        dispatched twice concurrently within this process -- shared with
+        the main AUTO_ADVANCE_ELIGIBLE_STATES loop above (that loop only
+        ever holds a COMPLETED mission_id in _inflight if THIS function put
+        it there, since COMPLETED is never itself eligible for that loop).
+        Never blocks the calling thread waiting for the future to resolve;
+        a failure is never re-raised here -- see
+        _knowledge_derivation_housekeeping_pass()'s own docstring for why
+        that is safe (deterministic candidate IDs + idempotent submission
+        make a redundant retry on the very next drain pass always safe)."""
+        with self._worker_lock:
+            if self._closed or mission_id in self._inflight:
+                return
+            self._inflight.add(mission_id)
+            try:
+                future = self._pool.submit(func, mission_id)
+            except Exception:
+                self._inflight.discard(mission_id)
+                return
+
+        def _on_done(_future, mission_id=mission_id) -> None:
+            self._inflight.discard(mission_id)
+
+        future.add_done_callback(_on_done)
+
+    def _knowledge_derivation_housekeeping_pass(self, listings) -> None:
+        """M5 (Learning & Knowledge Continuity). Runs immediately after the
+        AUTO_ADVANCE_ELIGIBLE_STATES-gated dispatch loop above, reusing the
+        SAME already-fetched `listings` tuple -- no second call to
+        mission_query.list_missions(). COMPLETED is deliberately absent
+        from AUTO_ADVANCE_ELIGIBLE_STATES (it remains genuinely terminal --
+        no mutator this feature adds ever touches state/state_history), so
+        this is a second, separate sweep over the same listing, not a
+        branch of the first.
+
+        Honest cost disclosure: mission_query.list_missions() already
+        performs an unconditional full scan every _drain_pass() cycle for
+        unrelated reasons -- this pass reuses that same already-fetched
+        listing (no second scan) but DOES add one real,
+        mission_coordinator.knowledge_derivation_status() (a thin
+        chugel.get_mission() read) per COMPLETED mission not yet in
+        self._knowledge_derivation_done_cache. That is a real, non-zero,
+        but practically small (steady-state, cache-bounded) additional
+        cost -- never claimed here to be free."""
+        for listing in listings:
+            if listing.state != "COMPLETED":
+                continue
+            if listing.mission_id in self._knowledge_derivation_done_cache:
+                continue
+            try:
+                derivation = mission_coordinator.knowledge_derivation_status(listing.mission_id)
+            except Exception:
+                # A record deleted/corrupted between the listing read and
+                # this read -- never fatal to this pass, exactly like the
+                # per-mission advance() failures above; the next drain
+                # pass re-derives fresh from Chugel.
+                continue
+            status = derivation["status"]
+            if status == "completed":
+                self._knowledge_derivation_done_cache.add(listing.mission_id)
+                continue
+            if status == "stalled":
+                # Automatic retries stop here permanently -- a human/
+                # operator may still call
+                # mission_coordinator.derive_knowledge_for_completed_mission()
+                # directly at any time (see that function's own docstring:
+                # it is never refused on this basis).
+                continue
+            last_attempted_at = derivation["last_attempted_at"]
+            if last_attempted_at is not None and _elapsed_seconds_since(last_attempted_at) < RETRY_BACKOFF_SECONDS:
+                continue  # backoff -- do not hammer every drain cycle
+            self._dispatch(mission_coordinator.derive_knowledge_for_completed_mission, listing.mission_id)
 
     def close(self) -> None:
         with self._worker_lock:
