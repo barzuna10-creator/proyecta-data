@@ -77,6 +77,7 @@ def _minimal_intake_record():
             "status": "pending", "attempt_count": 0, "last_attempted_at": None,
             "last_error": None, "completed_at": None, "candidate_ids": [],
         },
+        "origin": {"objective_id": None, "draft_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"},
     }
 
 

@@ -7,7 +7,7 @@
   "required": [
     "schema_version", "draft_id", "revision", "created_at", "updated_at",
     "raw_intent", "mission_definition", "research_evidence", "risks",
-    "open_questions", "repository_context"
+    "open_questions", "repository_context", "objective_id"
   ],
   "properties": {
     "schema_version": {"const": "1.0.0"},
@@ -48,6 +48,15 @@
             "remote_ref": {"type": "string", "minLength": 1, "maxLength": 500},
             "expected_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
           }
+        }
+      ]
+    },
+    "objective_id": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         }
       ]
     }

@@ -86,6 +86,7 @@ from orchestrator.validator import HUMAN_DECIDER
 
 from jarvis import mission_query, mission_write
 from jarvis.drafts import build_draft_envelope, revise_mission_draft
+from jarvis.objective_dependencies import dependency_status, failed_root_cause_for
 from jarvis.knowledge_storage import FileKnowledgeStore
 from jarvis.mission_authorization_bridge import (
     close_draft_authorization,
@@ -387,10 +388,28 @@ def _objective_decomposition_entries(
             acceptance_criteria=item.acceptance_criteria, open_questions=item.open_questions,
         )
         definition, open_questions = _merged_definition_and_open_questions(None, suggestion)
+        # M7 (Program-Level Planning Depth) -- translate each proposed
+        # ordinal reference (depends_on_index, positional WITHIN this same
+        # `items` list -- the LLM cannot know a real draft_id yet, see
+        # DecompositionItemSuggestion's own docstring) into the exact same
+        # deterministic real draft_id this loop derives for every entry,
+        # in the SAME pass, before persisting. An out-of-range index
+        # simply derives a draft_id that matches none of this
+        # decomposition's own entries -- validate_objective() then rejects
+        # it as DECOMPOSITION_DEPENDENCY_DANGLING, the identical treatment
+        # a stray external draft_id would get. dict.fromkeys(...) dedupes
+        # while preserving first-seen order, satisfying the schema's own
+        # uniqueItems constraint on depends_on even if the model repeats
+        # an index.
+        depends_on = tuple(dict.fromkeys(
+            _derived_decomposition_draft_id(objective_id, dep_index)
+            for dep_index in item.depends_on_index
+        ))
         entries.append(ObjectiveDecompositionEntry(
             draft_id=draft_id, title=item.title, rationale=(item.outcome or item.title),
             outcome=definition.outcome, scope=definition.scope, non_goals=definition.non_goals,
             acceptance_criteria=definition.acceptance_criteria, open_questions=open_questions,
+            depends_on=depends_on,
         ))
     return tuple(entries)
 
@@ -425,6 +444,11 @@ def _converge_objective_decomposition(store: FileJarvisStore, objective: Objecti
                 ),
                 research_evidence=(), risks=(), open_questions=entry.open_questions,
                 repository_context=None,
+                # M7: the one and only place a MissionDraft's objective_id
+                # is ever set to a real value -- every other MissionDraft
+                # construction site in this module leaves it at its
+                # dataclass default (None).
+                objective_id=objective.objective_id,
             )
             draft_envelope = build_draft_envelope(draft)
             try:
@@ -828,6 +852,13 @@ def _build_projection(store: FileJarvisStore) -> dict:
     # polled periodically by any real caller) is what completes any
     # decomposition interrupted mid-convergence, deterministically and
     # idempotently, every time this is called.
+    # M7 (Program-Level Planning Depth): built once, from the SAME
+    # `listings` tuple already fetched above -- no new I/O. Keyed by
+    # origin_draft_id (never mission_id itself), since that is the only
+    # identifier a decomposition entry's own `depends_on` ever references.
+    draft_id_to_mission_state: dict[str, str | None] = {
+        item.origin_draft_id: item.state for item in listings if item.origin_draft_id is not None
+    }
     objectives: list[dict] = []
     for objective_id in store.list_objective_ids():
         envelope = store.get_latest_objective(objective_id)
@@ -835,15 +866,29 @@ def _build_projection(store: FileJarvisStore) -> dict:
         entry_gates = (
             _converge_objective_decomposition(store, objective) if objective.status == "decomposed" else ()
         )
+        # M7: every entry of THIS objective's own decomposition is already
+        # fully available in `objective.decomposition` -- no second read,
+        # no jarvis.objective_query needed here (that seam exists for
+        # jarvis.mission_supervisor, which does not otherwise touch
+        # jarvis.storage/jarvis.objectives at all; this module already
+        # holds `store` directly).
+        depends_on_by_draft_id = {entry.draft_id: entry.depends_on for entry in objective.decomposition}
+        decomposition_projection = []
+        for entry, gate in zip(objective.decomposition, entry_gates):
+            status = dependency_status(entry.depends_on, draft_id_to_mission_state, depends_on_by_draft_id)
+            item = {"draftId": gate["id"], "title": entry.title, "dependsOn": list(entry.depends_on), "dependencyStatus": status}
+            if status == "failed":
+                item["failedRootCause"] = failed_root_cause_for(
+                    entry.draft_id, draft_id_to_mission_state, depends_on_by_draft_id,
+                )
+            decomposition_projection.append(item)
         objectives.append({
             "id": objective.objective_id,
             "status": objective.status,
             "priority": objective.priority,
             "summary": objective.raw_intent[:240],
             "updatedAt": objective.updated_at,
-            "decomposition": [
-                {"draftId": gate["id"], "title": entry.title} for entry, gate in zip(objective.decomposition, entry_gates)
-            ],
+            "decomposition": decomposition_projection,
         })
     now = _now()
     return {
@@ -1293,6 +1338,11 @@ def build_server(config: ControlPlaneConfig) -> ThreadingHTTPServer:
         adapter_factory=build_cli_subscription_adapters if real_adapters else (lambda: {}),
         max_concurrency=config.mission_concurrency if real_adapters else 1,
         lease=lease,
+        # M7 (Program-Level Planning Depth): the exact same FileJarvisStore
+        # instance already constructed above for drafts/objectives -- no
+        # second store, no new root, no new I/O beyond what
+        # jarvis.objective_query's own two functions need.
+        objective_store=server.store,
         advance_kwargs=dict(
             repository_root=config.mission_repository_root or str(Path.cwd()),
             branch=config.mission_branch or "overnight/mission",

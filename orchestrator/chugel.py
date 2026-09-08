@@ -524,6 +524,7 @@ def create_mission(
     *,
     mission_id: str | None = None,
     repository: dict | None = None,
+    origin: dict | None = None,
 ) -> dict:
     """Creates and persists a new INTAKE record. This is the sole creation
     path for a mission's *initial* Mission Definition -- there is no
@@ -562,7 +563,18 @@ def create_mission(
     explicitly unconfirmed placeholder (isolation_confirmed always False)
     -- it never implies isolation has already been established. Call
     record_repository_state() once real worktree/branch/base-SHA values
-    and an actual isolation confirmation exist."""
+    and an actual isolation confirmation exist.
+
+    `origin`, if supplied, must be {"objective_id": str|None, "draft_id":
+    str} -- M7 (Program-Level Planning Depth) provenance metadata, written
+    exactly once here, never read or branched on by this module's own
+    transition/validation logic (see the record's own "origin" field
+    below). If omitted, defaults to {"objective_id": None, "draft_id":
+    new_id} -- a mission created with no real MissionDraft at all (e.g. a
+    direct chugel.create_mission() caller outside Jarvis's own draft-
+    authorization path) still gets a schema-valid, non-null draft_id by
+    using its own mission_id, since no other stable identifier exists for
+    it."""
     if not isinstance(intent_text, str) or not intent_text.strip():
         raise ValueError("intent_text must be a non-empty string")
     if mission_definition.get("authorized_by") != HUMAN_DECIDER:
@@ -579,11 +591,12 @@ def create_mission(
             raise MissionRecordAlreadyExists(
                 f"mission {new_id}: something already exists at {path}"
             )
-        return _create_mission_locked(new_id, intent_text, mission_definition, repository)
+        return _create_mission_locked(new_id, intent_text, mission_definition, repository, origin)
 
 
 def _create_mission_locked(
-    new_id: str, intent_text: str, mission_definition: dict, repository: dict | None
+    new_id: str, intent_text: str, mission_definition: dict, repository: dict | None,
+    origin: dict | None = None,
 ) -> dict:
     """The existence-check-then-write critical section of create_mission(),
     factored out only so its body can sit inside the `with _mission_lock`
@@ -688,6 +701,18 @@ def _create_mission_locked(
             "completed_at": None,
             "candidate_ids": [],
         },
+        # M7 (Program-Level Planning Depth): initialized fully here,
+        # exactly once, exactly like deploy/knowledge_derivation above --
+        # never partially built up later, and never read or branched on by
+        # this module's own transition/validation logic. objective_id is
+        # None for a mission not materialized from an Objective's
+        # decomposition; draft_id is always the MissionDraft id this
+        # mission was authorized from (or, absent a real draft, this
+        # mission's own id -- see create_mission()'s own docstring).
+        "origin": {
+            "objective_id": (origin or {}).get("objective_id"),
+            "draft_id": (origin or {}).get("draft_id") or new_id,
+        },
     }
 
     result = validate_mission_record(record)
@@ -735,6 +760,7 @@ def list_missions() -> list[dict]:
             listings.append({
                 "mission_id": mission_id, "readable": False,
                 "state": None, "updated_at": None, "error_code": "MISSION_PATH_UNSAFE",
+                "origin_objective_id": None, "origin_draft_id": None,
             })
             continue
         if not stat.S_ISREG(mode):
@@ -751,15 +777,27 @@ def list_missions() -> list[dict]:
         except (MissionRecordPathUnsafe, MissionNotFound, OSError):
             code = "MISSION_PATH_UNSAFE"
         else:
+            # M7 (Program-Level Planning Depth): reuses the SAME
+            # already-fully-parsed `record` this branch already holds --
+            # no second read. .get(...) rather than record["origin"] only
+            # so a record written before M7's schema migration (none exist
+            # in practice; orchestrator/missions/*.json is local, gitignored
+            # execution state, never checked-in production data -- see
+            # jarvis/models.py's own Objective docstring on the same point)
+            # degrades to None/None instead of raising here.
+            origin = record.get("origin") or {}
             listings.append({
                 "mission_id": mission_id, "readable": True,
                 "state": record["state"], "updated_at": record["updated_at"],
                 "error_code": None,
+                "origin_objective_id": origin.get("objective_id"),
+                "origin_draft_id": origin.get("draft_id"),
             })
             continue
         listings.append({
             "mission_id": mission_id, "readable": False,
             "state": None, "updated_at": None, "error_code": code,
+            "origin_objective_id": None, "origin_draft_id": None,
         })
     return listings
 

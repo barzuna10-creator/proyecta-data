@@ -110,9 +110,15 @@ class JarvisDraftTests(unittest.TestCase):
         self.assertEqual(normalized["mission_definition"]["scope"], ["Classify failures"])
 
     def test_digest_has_fixed_golden_vector(self):
+        # M7 (Program-Level Planning Depth): this vector was recomputed
+        # once, deliberately, when MissionDraft gained its new
+        # objective_id field (default None) -- the schema/canonical-JSON
+        # shape changed, so the digest of the same logical draft changed
+        # with it. Never recompute this again casually; a future change
+        # to MissionDraft's shape should be just as deliberate.
         self.assertEqual(
             digest_mission_draft(valid_draft()),
-            "b2e7cf64f13bf9dd37e0fd9b35cc7db617aa0b9754e19d8ea513ee9613f51ad3",
+            "681c39aa5af473b888c3e0c8f11e8303c7fe99a7255dcd0f7561ebd517541fda",
         )
 
     def test_material_change_changes_digest(self):

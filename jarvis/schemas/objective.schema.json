@@ -29,7 +29,7 @@
         "additionalProperties": false,
         "required": [
           "draft_id", "title", "rationale", "outcome", "scope",
-          "non_goals", "acceptance_criteria", "open_questions"
+          "non_goals", "acceptance_criteria", "open_questions", "depends_on"
         ],
         "properties": {
           "draft_id": {
@@ -42,7 +42,16 @@
           "scope": {"$ref": "#/$defs/string_set"},
           "non_goals": {"$ref": "#/$defs/optional_string_set"},
           "acceptance_criteria": {"$ref": "#/$defs/string_set"},
-          "open_questions": {"$ref": "#/$defs/optional_string_set"}
+          "open_questions": {"$ref": "#/$defs/optional_string_set"},
+          "depends_on": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          }
         }
       }
     }

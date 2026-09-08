@@ -36,7 +36,12 @@ class JarvisAuthorizationTests(unittest.TestCase):
             "yes", "approve", "go ahead", self.command.lower(),
             " " + self.command, self.command + " ", self.command.replace(" ", "  ", 1),
             self.command + "\nextra", self.command.replace("REVISION 1", "REVISION 01"),
-            self.command.replace("b2e7", "B2e7"),
+            # M7 (Program-Level Planning Depth): MissionDraft's new
+            # objective_id field changed valid_draft()'s own digest -- this
+            # prefix must match whatever digest_mission_draft(valid_draft())
+            # currently produces (see tests/test_jarvis_drafts.py's own
+            # golden-vector test), not a stale hardcoded value.
+            self.command.replace("681c", "681C"),
         ]
         for value in invalid:
             with self.assertRaises(AuthorizationSyntaxError, msg=repr(value)):

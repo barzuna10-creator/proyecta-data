@@ -30,6 +30,12 @@ class MissionListing:
     bucket: MissionBucket | None
     updated_at: str | None
     error_code: str | None
+    # M7 (Program-Level Planning Depth): sourced from the SAME
+    # already-fully-parsed record chugel.list_missions() reads for
+    # state/updated_at above -- no new I/O. None/None for an unreadable
+    # listing or a mission created before this field existed.
+    origin_objective_id: str | None = None
+    origin_draft_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,8 @@ def list_missions() -> tuple[MissionListing, ...]:
         bucket=classify_mission_state(item["state"]) if item["state"] is not None else None,
         updated_at=item["updated_at"],
         error_code=item["error_code"],
+        origin_objective_id=item.get("origin_objective_id"),
+        origin_draft_id=item.get("origin_draft_id"),
     ) for item in chugel.list_missions())
 
 
