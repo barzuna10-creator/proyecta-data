@@ -226,6 +226,20 @@ class MissionStatus:
     human_action_required: str | None
     staleness: Staleness
     timeline: tuple[TimelineEvent, ...]
+    # M6 (BLOCKED-State Resume Wiring & Unified Recovery Contract): both
+    # None unless `state` is "BLOCKED". `prior_state` is state_history's
+    # own last from_state -- the same value jarvis/mission_write.py's
+    # resume_from_blocked() derives independently, never re-derived
+    # differently here. `deploy_last_blocked_classification` is populated
+    # ONLY when `prior_state` is one of the two deploy-verification
+    # states (DEPLOY_PENDING/VERIFYING_PRODUCTION) -- the pinned,
+    # deliberately narrow exposure this milestone allow-lists: never
+    # deploy.health_check/version_check/recovery_history/last_error or
+    # any other free-text/HTTP-response-body deploy field, which stay
+    # unexposed by this projection exactly as strictly as every other
+    # allow-listed field above.
+    prior_state: str | None = None
+    deploy_last_blocked_classification: str | None = None
 
 
 _HUMAN_ACTION_BY_STATE = {
@@ -474,6 +488,25 @@ def project_mission_status(record: dict[str, Any], *, now: datetime.datetime | N
         now = datetime.datetime.now(datetime.timezone.utc)
     repository = record["repository"]
     gates = record["human_gates"]
+
+    # M6: derived exactly once here, from already-allow-listed inputs
+    # (state, state_history's own from_state, and -- only for the two
+    # deploy-verification prior states -- deploy.last_blocked_classification,
+    # the one closed-enum field record_deploy_blocked() ever writes).
+    # Both stay None for every non-BLOCKED mission and for a BLOCKED
+    # mission whose prior_state was not a deploy-verification state.
+    prior_state = None
+    deploy_last_blocked_classification = None
+    if record["state"] == "BLOCKED":
+        history = record.get("state_history") or []
+        if history:
+            last_from_state = history[-1].get("from_state")
+            prior_state = None if last_from_state is None else str(last_from_state)
+        if prior_state in ("DEPLOY_PENDING", "VERIFYING_PRODUCTION"):
+            deploy = record.get("deploy") or {}
+            classification = deploy.get("last_blocked_classification")
+            deploy_last_blocked_classification = None if classification is None else str(classification)
+
     return MissionStatus(
         mission_id=str(record["mission_id"]),
         state=str(record["state"]),
@@ -519,4 +552,6 @@ def project_mission_status(record: dict[str, Any], *, now: datetime.datetime | N
         human_action_required=_HUMAN_ACTION_BY_STATE.get(record["state"]),
         staleness=compute_staleness(record, now=now),
         timeline=compute_mission_timeline(record),
+        prior_state=prior_state,
+        deploy_last_blocked_classification=deploy_last_blocked_classification,
     )

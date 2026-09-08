@@ -14,6 +14,7 @@ from unittest import mock
 import orchestrator.chugel as chugel
 from jarvis.mission_write import (
     DeployRecoveryRequired,
+    DeployReopenNotEligible,
     GateNotYetEligible,
     MissionWriteError,
     ResumeNotEligible,
@@ -21,6 +22,7 @@ from jarvis.mission_write import (
     authorize_publish,
     authorize_scope,
     create_mission,
+    reopen_deploy_observation_window,
     resume_from_blocked,
 )
 from orchestrator.deploy_recovery_policy import RecoveryAction
@@ -244,6 +246,63 @@ class ResumeFromBlockedDeployRecoveryTests(MissionWriteTestCase):
         ):
             record = resume_from_blocked(mid, _decision())
         self.assertEqual(record["state"], "PUBLISHING")
+
+
+class ReopenDeployObservationWindowTests(MissionWriteTestCase):
+    """M6: jarvis.mission_write.reopen_deploy_observation_window() -- the
+    thin, attribution-checking wrapper around orchestrator.chugel.
+    reopen_deploy_observation_window(), exercised the same real-Chugel
+    way as every other test in this file."""
+
+    def _mission_at_merged(self, mid):
+        chugel.transition(mid, "BLOCKED", actor="chugel", reason="test setup")
+        chugel.transition(mid, "PUBLISHING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "CI_PENDING", actor="chugel", reason="test setup")
+        chugel.transition(mid, "MERGE_AWAITING_AUTHORIZATION", actor="chugel", reason="test setup")
+        chugel.record_publish_commit(mid, "a" * 40)
+        decision = dict(_decision())
+        decision["approved_for"] = {"head_sha": "a" * 40}
+        chugel.decide_gate(mid, "merge_authorization", decision)
+        chugel.transition(mid, "MERGING", actor="chugel", reason="test setup")
+        chugel.record_merge_commit(mid, "b" * 40)
+        chugel.transition(mid, "MERGED", actor="chugel", reason="test setup")
+
+    def _blocked_from_deploy_pending(self, mid, *, classification="HEALTH_DEGRADED"):
+        self._mission_at_merged(mid)
+        chugel.begin_deploy_observation(mid)
+        chugel.record_deploy_blocked(mid, classification=classification, reason="synthetic block")
+
+    def test_succeeds_and_transitions_blocked_to_deploy_pending(self):
+        mid = self._fresh_mission()
+        self._blocked_from_deploy_pending(mid)
+        record = reopen_deploy_observation_window(mid, decided_by="jose", acknowledgement="verified manually")
+        self.assertEqual("DEPLOY_PENDING", record["state"])
+
+    def test_rejects_non_jose_attribution(self):
+        mid = self._fresh_mission()
+        self._blocked_from_deploy_pending(mid)
+        with self.assertRaises(MissionWriteError):
+            reopen_deploy_observation_window(mid, decided_by="not-jose", acknowledgement="verified manually")
+        # No transition occurred.
+        self.assertEqual("BLOCKED", chugel.get_mission(mid)["state"])
+
+    def test_translates_chugel_exhausted_recovery_into_deploy_reopen_not_eligible(self):
+        mid = self._fresh_mission()
+        self._blocked_from_deploy_pending(mid, classification="ANCESTRY_UNVERIFIABLE")
+        for _ in range(3):
+            reopen_deploy_observation_window(mid, decided_by="jose", acknowledgement="retry")
+            chugel.record_deploy_blocked(mid, classification="ANCESTRY_UNVERIFIABLE", reason="still blocked")
+        with self.assertRaises(DeployReopenNotEligible):
+            reopen_deploy_observation_window(mid, decided_by="jose", acknowledgement="one more try")
+
+    def test_translates_chugel_not_blocked_into_deploy_reopen_not_eligible(self):
+        mid = self._fresh_mission()
+        self._blocked_from_deploy_pending(mid)
+        reopen_deploy_observation_window(mid, decided_by="jose", acknowledgement="verified manually")
+        # Mission is now DEPLOY_PENDING, not BLOCKED -- a second reopen call
+        # must fail, translated to the mission_write-level exception.
+        with self.assertRaises(DeployReopenNotEligible):
+            reopen_deploy_observation_window(mid, decided_by="jose", acknowledgement="again")
 
 
 if __name__ == "__main__":

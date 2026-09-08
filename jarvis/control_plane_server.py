@@ -27,21 +27,42 @@ This module never calls mission_coordinator.advance() itself, and never
 imports jarvis.mission_coordinator: it only relays reads (mission_query),
 explicit human gate authorizations (mission_write /
 mission_authorization_bridge), and -- Mission 006 -- a bare notify() to
-jarvis.mission_supervisor.MissionSupervisor, from exactly the two places
+jarvis.mission_supervisor.MissionSupervisor, from exactly the places
 above where a real human authorization decision has just been durably
-recorded (the draft-authorization branch, and the real scope/publish/merge
-gate branch). notify() carries no payload and makes no decision of its
-own; the supervisor re-derives whatever is actually eligible from Chugel's
-own state on its own background worker thread. In particular,
-_handle_conversation() -- which can create or revise a draft, but never
-authorizes anything -- has no access to the supervisor at all: it is not
-passed one, and POST /v1/conversation's dispatch does not construct one
-for it (see tests/test_jarvis_control_plane_server.py's boundary
-coverage). Dispatching Emilio/Emma, running publish_executor/merge_executor,
+recorded (the draft-authorization branch, the real scope/publish/merge
+gate branch, and -- M6 -- the resume-from-BLOCKED and reopen-deploy-
+observation-window branches, each gated by the same literal, current-
+turn HUMAN_DECIDER attribution as every other branch here). notify()
+carries no payload and makes no decision of its own; the supervisor
+re-derives whatever is actually eligible from Chugel's own state on its
+own background worker thread. In particular, _handle_conversation() --
+which can create or revise a draft, but never authorizes anything -- has
+no access to the supervisor at all: it is not passed one, and POST
+/v1/conversation's dispatch does not construct one for it (see
+tests/test_jarvis_control_plane_server.py's boundary coverage).
+Dispatching Emilio/Emma, running publish_executor/merge_executor,
 therefore only ever happens as the automatic, in-process consequence of a
 real, already-materialized human authorization -- never of conversation
 alone, and never automatically retried around a gate/BLOCKED/terminal
-state (jarvis/mission_supervisor.py's own state classification)."""
+state (jarvis/mission_supervisor.py's own state classification).
+
+M6 (BLOCKED-State Resume Wiring & Unified Recovery Contract): two new,
+fully separate HTTP handlers -- _handle_resume() (POST
+/v1/missions/{id}/resume, wrapping jarvis.mission_write.resume_from_blocked())
+and _handle_reopen_deploy_observation() (POST
+/v1/missions/{id}/reopen-deploy-observation, wrapping jarvis.mission_write.
+reopen_deploy_observation_window()) -- give Mission 004/M4's already-built,
+already-gated resume/reopen functions their first real HTTP callers.
+Neither is addressed by gate_id, neither is added to _AUTHORIZE_BY_KIND
+(an earlier design round explicitly rejected that: wrong addressing
+scheme, no room for reopen's additional `acknowledgement` field, and it
+would let DeployRecoveryRequired fall through to the generic 500 handler
+instead of surfacing actionable guidance) -- _AUTHORIZE_BY_KIND and
+_handle_authorize() are untouched by M6, byte-for-byte. Both new handlers
+catch jarvis.mission_write.ResumeNotEligible/DeployRecoveryRequired/
+DeployReopenNotEligible themselves and translate them to _ApiError
+before this module's own generic `except Exception` in _dispatch() could
+ever see them."""
 
 from __future__ import annotations
 
@@ -60,6 +81,7 @@ from pathlib import Path
 
 from orchestrator import jarvis_conversation
 from orchestrator.cli_provider_adapters import build_cli_subscription_adapters
+from orchestrator.deploy_recovery_policy import RecoveryAction
 from orchestrator.validator import HUMAN_DECIDER
 
 from jarvis import mission_query, mission_write
@@ -702,10 +724,29 @@ def _timeline_event_dict(event) -> dict:
     }
 
 
+def _blocked_mission_entry(mission_id: str, status) -> dict:
+    """M6: one entry of the new, separate `blockedMissions` list --
+    deliberately NOT folded into `gates` (reserved for the three one-time
+    authorization decisions; resume/reopen is a structurally different
+    kind of "needs attention" signal). Exactly the pinned field set:
+    missionId, state (always the literal "BLOCKED"), priorState, and
+    lastBlockedClassification (populated only for the deploy-verification
+    case, None otherwise -- status.deploy_last_blocked_classification is
+    already None for every other case, per jarvis/status.py's own
+    allow-list discipline)."""
+    return {
+        "missionId": mission_id,
+        "state": "BLOCKED",
+        "priorState": status.prior_state,
+        "lastBlockedClassification": status.deploy_last_blocked_classification,
+    }
+
+
 def _build_projection(store: FileJarvisStore) -> dict:
     listings = mission_query.list_missions()
     gates: list[dict] = []
     missions: list[dict] = []
+    blocked_missions: list[dict] = []
     for item in listings:
         # Verification Hardening V1, Pillar 3 (Progress Watchdog):
         # `status` is already fetched here for the gate-projection logic
@@ -736,7 +777,7 @@ def _build_projection(store: FileJarvisStore) -> dict:
                 knowledge_derivation_status = derivation["status"]
             except mission_query.MissionQueryError:
                 knowledge_derivation_status = None
-        missions.append({
+        mission_dict = {
             "id": item.mission_id,
             "title": item.mission_id,
             "phase": item.state or "unknown",
@@ -750,11 +791,29 @@ def _build_projection(store: FileJarvisStore) -> dict:
             # mission gets an empty timeline, never a fabricated one.
             "timeline": [_timeline_event_dict(e) for e in status.timeline] if status is not None else [],
             "knowledgeDerivationStatus": knowledge_derivation_status,
-        })
+        }
+        # M6: exactly one new field, exposed ONLY for a currently-BLOCKED
+        # mission whose prior state was a deploy-verification state --
+        # never health_check/version_check/recovery_history/last_error or
+        # any other free-text/HTTP-response-body deploy content (see
+        # jarvis/status.py's own MissionStatus.deploy_last_blocked_classification
+        # docstring). Omitted entirely (no "deploy" key at all) for every
+        # other mission, rather than present-but-null, so its mere
+        # presence is itself a meaningful, narrow signal.
+        if status is not None and status.deploy_last_blocked_classification is not None:
+            mission_dict["deploy"] = {"lastBlockedClassification": status.deploy_last_blocked_classification}
+        missions.append(mission_dict)
         if status is not None:
             gate = _pending_real_gate(item.mission_id, status)
             if gate is not None:
                 gates.append(gate)
+            # M6: a separate, additive "needs attention" signal -- every
+            # currently-BLOCKED mission, regardless of whether it has a
+            # deploy-verification classification to show. Deliberately
+            # never folded into `gates` (see _blocked_mission_entry()'s
+            # own docstring).
+            if item.state == "BLOCKED":
+                blocked_missions.append(_blocked_mission_entry(item.mission_id, status))
     for draft_id in store.list_pending_draft_ids():
         envelope = store.get_latest_draft(draft_id)
         gates.append(_draft_gate_projection(draft_id, envelope))
@@ -793,6 +852,7 @@ def _build_projection(store: FileJarvisStore) -> dict:
         "missions": missions,
         "agents": [],
         "gates": gates,
+        "blockedMissions": blocked_missions,
         "objectives": objectives,
         "findings": [],
         "checks": [],
@@ -944,6 +1004,103 @@ def _handle_authorize(store: FileJarvisStore, supervisor: MissionSupervisor, gat
     }
 
 
+def _deploy_recovery_api_error(mission_id: str, exc: mission_write.DeployRecoveryRequired) -> _ApiError:
+    """M6: translates mission_write.DeployRecoveryRequired's `action`
+    (an orchestrator.deploy_recovery_policy.RecoveryAction) into one of
+    three distinct, honestly-worded responses -- never a single generic
+    message, and never guidance the real code does not actually support.
+
+    EXCEPTIONAL_REOPEN_REQUIRED -- the one case where a next step exists;
+    tells the caller exactly which endpoint to call next.
+    RECOVERY_EXHAUSTED -- states plainly that no automated path remains.
+    Never suggests reopen: orchestrator.chugel.reopen_deploy_observation_window()
+    itself refuses unconditionally once deploy.recovery_status is
+    'exhausted' (fail-closed at the Chugel layer -- see
+    docs/zentra/RECOVERY_CONTRACT_V1.md), so suggesting it here would be
+    dishonest, not merely unhelpful.
+    DENY -- states plainly that policy defines no automated recovery path
+    for this classification. Deliberately does NOT suggest reopen, even
+    though (real, pre-existing M4 behavior, documented in
+    docs/zentra/RECOVERY_CONTRACT_V1.md, not something M6 fixes) a direct
+    call to /reopen-deploy-observation is not itself gated on
+    last_blocked_classification and would currently succeed for some DENY
+    cases -- this asymmetry is not something to paper over with guidance
+    that would make it look like a supported path."""
+    if exc.action == RecoveryAction.EXCEPTIONAL_REOPEN_REQUIRED:
+        return _ApiError(409, (
+            f"mission {mission_id}: plain resume is not safe for deploy-observation "
+            f"classification {exc.classification!r} -- call "
+            f"POST /v1/missions/{mission_id}/reopen-deploy-observation with a real "
+            "acknowledgement before this mission can move forward again"
+        ))
+    if exc.action == RecoveryAction.RECOVERY_EXHAUSTED:
+        return _ApiError(409, (
+            f"mission {mission_id}: deploy-observation recovery budget is exhausted -- "
+            "no automated recovery path remains for this mission"
+        ))
+    return _ApiError(409, (
+        f"mission {mission_id}: no automated recovery path is defined by policy for "
+        f"deploy-observation classification {exc.classification!r}"
+    ))
+
+
+def _handle_resume(mission_id: str, supervisor: MissionSupervisor, body: dict) -> dict:
+    """POST /v1/missions/{id}/resume -- jarvis.mission_write.resume_from_blocked()'s
+    only HTTP caller (M6). Attribution is never taken from the request
+    body -- exactly like _handle_authorize() above, decided_by is always
+    the literal HUMAN_DECIDER, constructed here, never trusted from the
+    caller; the literal confirmation phrase is the one thing the caller
+    must supply. Never addressed by gate_id, never routed through
+    _AUTHORIZE_BY_KIND -- see this module's own docstring."""
+    if body.get("confirmation") != _CONFIRMATION:
+        raise _ApiError(400, "explicit current authorization required")
+    if mission_id not in {item.mission_id for item in mission_query.list_missions()}:
+        raise _ApiError(404, "mission not found")
+    decision = {
+        "decided_by": HUMAN_DECIDER,
+        "decided_at": _now(),
+        "decision_ref": f"control-plane-resume:{mission_id}",
+    }
+    try:
+        record = mission_write.resume_from_blocked(mission_id, decision)
+    except mission_write.DeployRecoveryRequired as exc:
+        raise _deploy_recovery_api_error(mission_id, exc) from exc
+    except mission_write.ResumeNotEligible as exc:
+        raise _ApiError(409, str(exc)) from exc
+    supervisor.notify()
+    return {"missionId": mission_id, "state": record["state"], "resumedAt": _now()}
+
+
+def _handle_reopen_deploy_observation(mission_id: str, supervisor: MissionSupervisor, body: dict) -> dict:
+    """POST /v1/missions/{id}/reopen-deploy-observation --
+    jarvis.mission_write.reopen_deploy_observation_window()'s only HTTP
+    caller (M6) -- the exceptional recovery path, never reachable through
+    /resume. Same fixed, never-caller-supplied attribution as
+    _handle_resume() above; the one thing this endpoint additionally
+    requires from the caller is a real, non-empty `acknowledgement`
+    string -- validated here (fail fast on an obviously-empty request)
+    before ever reaching the deeper validation the real functions already
+    perform (jarvis.mission_write.reopen_deploy_observation_window() ->
+    orchestrator.chugel.reopen_deploy_observation_window(), which is the
+    one that actually fails closed on a not-BLOCKED mission or an
+    exhausted deploy.recovery_status)."""
+    if body.get("confirmation") != _CONFIRMATION:
+        raise _ApiError(400, "explicit current authorization required")
+    acknowledgement = body.get("acknowledgement")
+    if not isinstance(acknowledgement, str) or not acknowledgement.strip():
+        raise _ApiError(400, "acknowledgement is required to reopen the deploy observation window")
+    if mission_id not in {item.mission_id for item in mission_query.list_missions()}:
+        raise _ApiError(404, "mission not found")
+    try:
+        record = mission_write.reopen_deploy_observation_window(
+            mission_id, decided_by=HUMAN_DECIDER, acknowledgement=acknowledgement,
+        )
+    except mission_write.DeployReopenNotEligible as exc:
+        raise _ApiError(409, str(exc)) from exc
+    supervisor.notify()
+    return {"missionId": mission_id, "state": record["state"], "reopenedAt": _now()}
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "JarvisControlPlane/1"
 
@@ -1041,6 +1198,20 @@ class _Handler(BaseHTTPRequestHandler):
                     raise _ApiError(400, "gate id must be a canonical UUID")
                 body = self._read_json_body()
                 self._write_json(200, _handle_authorize(self._store(), self._supervisor(), gate_id, body))
+                return
+            # M6 -- addressed by mission_id, never gate_id, never routed
+            # through _AUTHORIZE_BY_KIND (see this module's own docstring).
+            match = re.fullmatch(r"/v1/missions/([^/]+)/resume", self.path)
+            if method == "POST" and match is not None:
+                mission_id = match.group(1)
+                body = self._read_json_body()
+                self._write_json(200, _handle_resume(mission_id, self._supervisor(), body))
+                return
+            match = re.fullmatch(r"/v1/missions/([^/]+)/reopen-deploy-observation", self.path)
+            if method == "POST" and match is not None:
+                mission_id = match.group(1)
+                body = self._read_json_body()
+                self._write_json(200, _handle_reopen_deploy_observation(mission_id, self._supervisor(), body))
                 return
         except _ApiError as exc:
             self._write_json(exc.status, {"error": exc.message})
