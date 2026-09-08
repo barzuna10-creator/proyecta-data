@@ -7,18 +7,31 @@ RepositoryFreshnessResolver, nothing about the Git layer mocked), a REAL
 FileKnowledgeStore on disk, and a REAL Chugel Mission Record driven all
 the way to COMPLETED via orchestrator/chugel.py's own mutators.
 
-Scenario:
+IMPORTANT, corrected per independent code review: everything in this file
+is a fast, deterministic, HERMETIC test -- nothing here is, or is labeled
+as, a real Emma review. The two judgment functions below
+(`_hermetic_promotion_gate_proxy`, `_hermetic_relevance_proxy`) are
+explicit, honestly-named stand-ins so this scenario's real plumbing
+(derive -> real review -> real promote -> real retrieval) can run on
+every CI pass without a live model call. M5's own Acceptance Test 5
+requirement for "a fresh, independent Emma review invocation" rendering
+a real PASS/FAIL judgment on accuracy/relevance/correct-applicability is
+fulfilled SEPARATELY and GENUINELY by
+scripts/m5_live_acceptance/run_live_relevance_judgment.py, which sets up
+the identical scenario and then has a real, independently-dispatched
+Emma-role reviewer examine the real, promoted knowledge entry -- run
+manually/on demand, exactly like this project's other live-acceptance
+harnesses (M2D/M3/M4), never as part of the automatic hermetic suite.
+
+Scenario (hermetic version):
   1. Mission A completes; its learning is derived
      (jarvis.mission_coordinator.derive_knowledge_for_completed_mission())
      into real, draft knowledge candidates.
-  2. Each candidate is genuinely reviewed: `_review_candidate()` below
-     performs REAL, automated checks against the candidate's own content
-     and the mission record it was derived from (mirroring
-     jarvis.learning_ingestion's own documented Emma-review checklist),
-     and only then constructs a real EmmaKnowledgeReview with a PASS
-     verdict -- this is not a rubber-stamp, it is a genuine (if simple)
-     judgment function whose PASS/CHANGES_REQUIRED outcome depends on
-     what it actually finds.
+  2. Each candidate goes through the real promotion pipeline, gated by
+     `_hermetic_promotion_gate_proxy()` -- a deterministic stand-in for
+     the ordinary (non-M5-specific) Emma-review-before-promotion step
+     every candidate already requires, not a rubber stamp (it performs
+     real, content-dependent checks and can return CHANGES_REQUIRED).
   3. A genuine KnowledgeAuthorizationIntent(decided_by="jose") promotes
      the reviewed candidate through jarvis.knowledge_storage.promote() --
      the real, unmodified pipeline.
@@ -27,13 +40,11 @@ Scenario:
      jarvis.trusted_zentra_context.py's own bundle for mission B's
      context, AND independently confirmed by
      jarvis.knowledge_retrieval.search() directly.
-  5. A second, independent "fresh Emma review-style judgment" function
-     (`_independent_relevance_judgment()`) -- deliberately a different
-     function than the one that produced the original PASS verdict in
-     step 2, exercising a fresh, real check rather than reusing cached
-     state -- confirms the retrieved entry is accurate/relevant/
-     correctly-applicable for mission B's own stated task, via real
-     automated assertions against the entry's own content (not prose)."""
+  5. `_hermetic_relevance_proxy()` -- explicitly NOT the "fresh,
+     independent Emma review" this step's real design requirement calls
+     for (see above) -- performs a fast, deterministic, content-dependent
+     sanity check that the retrieved entry is structurally well-formed
+     and keyword-relevant, purely to keep the plumbing exercised."""
 
 from __future__ import annotations
 
@@ -117,14 +128,24 @@ def _completed_mission(*, outcome, scope, acceptance_criteria, branch, base_sha)
     return mid
 
 
-def _review_candidate(content, projection) -> EmmaKnowledgeReview:
-    """A genuine, automated review judgment -- not a rubber stamp. Checks,
-    against the REAL projection this candidate was derived from:
+def _hermetic_promotion_gate_proxy(content, projection) -> EmmaKnowledgeReview:
+    """NOT an Emma review, and never labeled as one. This is a fast,
+    deterministic, hermetic STAND-IN for the ordinary (non-M5-specific)
+    Emma-review-before-promotion step that every knowledge candidate --
+    human-authored or mission-derived alike -- already requires. It exists
+    so this test can exercise the real promote()/save_review()/
+    save_authorization() pipeline without a live model call on every CI
+    run. It performs real, content-dependent checks (not a rubber stamp --
+    it can and does return CHANGES_REQUIRED) against the REAL projection
+    this candidate was derived from:
       - the claim's substantive words trace to a real projection field
         (outcome/scope/acceptance_criteria for the outcome candidate),
       - the tier is the hard-fixed "complementary" (never canonical),
       - the claim never asserts causation ("fixed"/"caused by").
-    Returns CHANGES_REQUIRED (never PASS) if any check fails."""
+    This function does NOT satisfy M5's Acceptance Test 5 "fresh,
+    independent Emma review invocation" requirement -- that is a
+    separate, distinct concern, fulfilled by a genuine live dispatch in
+    scripts/m5_live_acceptance/run_live_relevance_judgment.py, not here."""
     findings = []
     if content.tier != "complementary":
         findings.append("tier is not complementary")
@@ -141,12 +162,26 @@ def _review_candidate(content, projection) -> EmmaKnowledgeReview:
     return EmmaKnowledgeReview(content.candidate_id, 1, "", verdict, "2026-09-01T00:10:00Z", tuple(findings))
 
 
-def _independent_relevance_judgment(entry, *, mission_b_task_keywords: tuple[str, ...]) -> bool:
-    """A SECOND, independent automated judgment (deliberately not sharing
-    code/state with _review_candidate() above): confirms the retrieved,
-    promoted entry is accurate/relevant/correctly-applicable for mission
-    B's own stated task. Real assertions against the entry's own content,
-    never prose."""
+def _hermetic_relevance_proxy(entry, *, mission_b_task_keywords: tuple[str, ...]) -> bool:
+    """NOT an Emma review, and never labeled as one -- deliberately renamed
+    from an earlier draft's misleading "_independent_relevance_judgment"
+    name. This is a fast, deterministic, hermetic STAND-IN for M5's own
+    Acceptance Test 5 requirement of "a fresh, independent Emma review
+    invocation... rendering an explicit PASS/FAIL against three concrete,
+    checkable questions [accuracy, relevance, correct-applicability]".
+    A real, live Emma-role dispatch cannot run inside the automatic
+    hermetic suite (no live model call belongs in `unittest discover`),
+    so this hermetic proxy exists ONLY to keep that scenario's plumbing
+    (derive -> real review -> real promote -> real retrieval ->
+    judgment) exercised on every CI run. The ACTUAL fresh, independent,
+    live Emma-role judgment this design calls for is a SEPARATE,
+    genuinely-dispatched scenario in
+    scripts/m5_live_acceptance/run_live_relevance_judgment.py -- run
+    manually/on demand, not automatically, exactly like this project's
+    other live-acceptance harnesses (M2D/M3/M4). This hermetic proxy
+    performs real, content-dependent checks (it can and does return
+    False) but must never be described, here or anywhere else, as
+    fulfilling the "independent Emma review" requirement itself."""
     if entry.status != "active":
         return False
     if entry.tier != "complementary":
@@ -194,7 +229,7 @@ class LearningKnowledgeContinuityAcceptanceTests(ChugelTestCase):
         promoted_entries = []
         for candidate_id in candidate_ids:
             content = candidates[candidate_id]
-            review = _review_candidate(content, projection)
+            review = _hermetic_promotion_gate_proxy(content, projection)
             self.assertEqual(review.verdict, "PASS", review.findings)  # a genuine, not rubber-stamped, PASS
 
             envelope = self.store.get_latest_candidate(candidate_id)
@@ -234,7 +269,7 @@ class LearningKnowledgeContinuityAcceptanceTests(ChugelTestCase):
         # --- Fresh, independent relevance judgment for mission B's task -
         for entry in promoted_entries:
             self.assertTrue(
-                _independent_relevance_judgment(entry, mission_b_task_keywords=mission_b_task_keywords),
+                _hermetic_relevance_proxy(entry, mission_b_task_keywords=mission_b_task_keywords),
                 f"entry {entry.knowledge_id} judged NOT relevant/applicable to mission B's task: {entry.claim!r}",
             )
 

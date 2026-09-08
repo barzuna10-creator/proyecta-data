@@ -270,11 +270,22 @@ def _outcome_candidate(
     if not fires:
         return None
 
+    # Every substantive word here is a verbatim copy of a real, flat
+    # projection field. The "Objective:"/"Scope:"/"Acceptance criteria:"
+    # labels are pure structural framing (no factual content of their
+    # own) -- unlike an earlier draft of this function, this claim does
+    # NOT append any trailer sentence asserting the mission "reached
+    # COMPLETED" or any other fact not drawn directly from the three
+    # fields below: that would be new, non-verbatim factual content, and
+    # this derivation function's whole safety property depends on never
+    # introducing any (a mission-derived candidate that asserted more
+    # than the schema's own fields could support was exactly the kind of
+    # overclaim this design was corrected, across several rounds of
+    # independent review, to never make).
     claim = (
         f"Objective: {projection.outcome}. "
         f"Scope: {'; '.join(projection.scope)}. "
-        f"Acceptance criteria: {'; '.join(projection.acceptance_criteria)}. "
-        "This mission reached COMPLETED."
+        f"Acceptance criteria: {'; '.join(projection.acceptance_criteria)}."
     )
     candidate_id = str(uuid.uuid5(_KNOWLEDGE_CANDIDATE_NAMESPACE, f"{projection.mission_id}:outcome"))
     return _build_candidate(candidate_id=candidate_id, claim=claim, label="INTENT", projection=projection)
