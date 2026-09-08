@@ -436,6 +436,23 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
             forbidden = {"jarvis.mission_coordinator", "mission_coordinator"}
             self.assertTrue(forbidden.isdisjoint(names), (path, forbidden & names))
 
+    # --- M7 additions (Program-Level Planning Depth) -------------------
+
+    def test_only_mission_supervisor_is_restricted_from_objective_storage(self):
+        """No enumerated-import restriction on jarvis.storage/jarvis.objectives
+        existed before M7 (jarvis.control_plane_server already legitimately
+        imports both, directly, for the Objective-decomposition handler).
+        M7 adds exactly one new, narrow one: jarvis.mission_supervisor.py
+        must reach an Objective's decomposition only through the new
+        jarvis.objective_query seam (mirroring jarvis.mission_query's own
+        role for orchestrator.chugel), never jarvis.storage/jarvis.objectives
+        directly -- checked here so a future edit cannot silently widen
+        mission_supervisor.py's own reach without this test failing."""
+        path = ROOT / "jarvis" / "mission_supervisor.py"
+        names = set(self._imports(path))
+        forbidden = {"jarvis.storage", "storage", "jarvis.objectives", "objectives"}
+        self.assertTrue(forbidden.isdisjoint(names), (path, forbidden & names))
+
     def test_handle_conversation_never_references_the_supervisor_or_notify(self):
         """The critical Mission 006 boundary, checked statically against
         _handle_conversation()'s own function body (not the whole module):

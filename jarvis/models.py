@@ -65,6 +65,14 @@ class MissionDraft:
     risks: tuple[str, ...]
     open_questions: tuple[str, ...]
     repository_context: RepositoryContext | None
+    # Jarvis God Mode M7 (Program-Level Planning Depth) -- set exactly
+    # once, only when this draft is materialized via an Objective's
+    # decomposition convergence (jarvis/control_plane_server.py's
+    # _converge_objective_decomposition()); None for every hand-created
+    # draft, exactly like every other draft before M7 existed. Never
+    # mutated by revise_mission_draft() -- dataclasses.replace() there
+    # simply carries whatever value this draft already had forward.
+    objective_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +163,7 @@ def mission_draft_from_dict(value: dict[str, Any]) -> MissionDraft:
         risks=tuple(value["risks"]),
         open_questions=tuple(value["open_questions"]),
         repository_context=RepositoryContext(**repository) if repository is not None else None,
+        objective_id=value.get("objective_id"),
     )
 
 
@@ -198,6 +207,13 @@ class ObjectiveDecompositionEntry:
     non_goals: tuple[str, ...]
     acceptance_criteria: tuple[str, ...]
     open_questions: tuple[str, ...]
+    # Jarvis God Mode M7 (Program-Level Planning Depth) -- draft_id
+    # references to OTHER entries of this SAME decomposition, never to a
+    # different Objective's decomposition or to a hand-created mission.
+    # jarvis/objectives.py's validate_objective() is the single place
+    # that enforces no self-reference, no dangling reference, and no
+    # cycle -- this field itself carries no validation of its own.
+    depends_on: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -253,6 +269,7 @@ def objective_from_dict(value: dict[str, Any]) -> Objective:
                 outcome=item["outcome"], scope=tuple(item["scope"]),
                 non_goals=tuple(item["non_goals"]), acceptance_criteria=tuple(item["acceptance_criteria"]),
                 open_questions=tuple(item["open_questions"]),
+                depends_on=tuple(item.get("depends_on", ())),
             )
             for item in value["decomposition"]
         ),

@@ -25,7 +25,8 @@
     "merge",
     "deploy",
     "budget",
-    "knowledge_derivation"
+    "knowledge_derivation",
+    "origin"
   ],
   "properties": {
     "schema_version": {
@@ -386,6 +387,28 @@
         "last_error": { "anyOf": [{ "type": "null" }, { "type": "string" }] },
         "completed_at": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/timestamp" }] },
         "candidate_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "origin": {
+      "description": "M7 (Program-Level Planning Depth) -- immutable provenance metadata, written exactly once at creation (_create_mission_locked()), never read or branched on by this schema's own state/transition semantics or by orchestrator/chugel.py's own transition logic. objective_id is null for a mission not materialized from an Objective's decomposition (jarvis/control_plane_server.py's _converge_objective_decomposition()); draft_id is always the MissionDraft id this mission was authorized from (or, absent a real draft, the mission's own mission_id).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objective_id", "draft_id"],
+      "properties": {
+        "objective_id": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          ]
+        },
+        "draft_id": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        }
       }
     }
   },

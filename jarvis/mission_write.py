@@ -123,20 +123,23 @@ def _authorize(mission_id: str, gate_name: str, decision: dict) -> dict:
 
 
 def create_mission(intent_text: str, mission_definition: dict, decision: dict, *, mission_id: str | None = None,
-                   repository: dict | None = None) -> dict:
+                   repository: dict | None = None, origin: dict | None = None) -> dict:
     """The only path Jarvis has to create a Mission Record. `decision`
     must carry the current-turn José attribution used for
     mission_definition["authorized_by"]; orchestrator.chugel.create_mission()
     itself already hard-refuses unless that field is literally
     HUMAN_DECIDER -- this function's re-check is defensive, not the only
-    enforcement, exactly like _authorize() above."""
+    enforcement, exactly like _authorize() above. `origin` (M7) is relayed
+    verbatim -- see orchestrator.chugel.create_mission()'s own docstring."""
     _require_current_turn_attribution(decision)
-    return chugel.create_mission(intent_text, mission_definition, mission_id=mission_id, repository=repository)
+    return chugel.create_mission(
+        intent_text, mission_definition, mission_id=mission_id, repository=repository, origin=origin,
+    )
 
 
 def create_mission_if_absent(
     intent_text: str, mission_definition: dict, decision: dict, *, mission_id: str,
-    repository: dict | None = None,
+    repository: dict | None = None, origin: dict | None = None,
 ) -> dict:
     """Control Plane V1: identical to create_mission() (same attribution
     requirement, same underlying write), except a MissionRecordAlreadyExists
@@ -145,11 +148,18 @@ def create_mission_if_absent(
     error. Exists specifically so jarvis.mission_authorization_bridge,
     which is not one of Chugel's three disclosed import seams, never needs
     to import orchestrator.chugel itself just to catch this one exception;
-    this stays inside mission_write.py's own already-allowed write seam."""
+    this stays inside mission_write.py's own already-allowed write seam.
+
+    `origin` (M7, Program-Level Planning Depth): relayed to
+    chugel.create_mission() verbatim on first creation; on a retry that
+    finds an existing record, it is compared for divergence exactly like
+    `repository` already is below -- a retry that supplies a different
+    origin than what was actually persisted is refused, never silently
+    ignored."""
     _require_current_turn_attribution(decision)
     try:
         return chugel.create_mission(
-            intent_text, mission_definition, mission_id=mission_id, repository=repository,
+            intent_text, mission_definition, mission_id=mission_id, repository=repository, origin=origin,
         )
     except chugel.MissionRecordAlreadyExists:
         existing = chugel.get_mission(mission_id)
@@ -167,6 +177,13 @@ def create_mission_if_absent(
             raise MissionWriteError(f"mission {mission_id}: existing definition diverges from retry")
         if repository is not None and existing.get("repository") != repository:
             raise MissionWriteError(f"mission {mission_id}: existing repository binding diverges from retry")
+        if origin is not None:
+            expected_origin = {
+                "objective_id": origin.get("objective_id"),
+                "draft_id": origin.get("draft_id") or mission_id,
+            }
+            if existing.get("origin") != expected_origin:
+                raise MissionWriteError(f"mission {mission_id}: existing origin diverges from retry")
         return existing
 
 

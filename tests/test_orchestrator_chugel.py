@@ -224,7 +224,8 @@ class PruebaListadoSoloLectura(ChugelTestCase):
             first["mission_id"], second["mission_id"]
         })
         self.assertTrue(all(set(row) == {
-            "mission_id", "readable", "state", "updated_at", "error_code"
+            "mission_id", "readable", "state", "updated_at", "error_code",
+            "origin_objective_id", "origin_draft_id",
         } for row in listed))
         after = {p.name: p.read_bytes() for p in chugel._MISSIONS_DIR.iterdir() if p.name in before}
         self.assertEqual(before, after)
@@ -238,6 +239,7 @@ class PruebaListadoSoloLectura(ChugelTestCase):
         self.assertEqual(rows[corrupt_id], {
             "mission_id": corrupt_id, "readable": False, "state": None,
             "updated_at": None, "error_code": "MISSION_RECORD_CORRUPT",
+            "origin_objective_id": None, "origin_draft_id": None,
         })
 
     def test_candidato_json_invalido_usa_codigo_estable_sin_payload(self):
@@ -250,6 +252,7 @@ class PruebaListadoSoloLectura(ChugelTestCase):
         self.assertEqual(chugel.list_missions(), [{
             "mission_id": invalid_id, "readable": False, "state": None,
             "updated_at": None, "error_code": "MISSION_RECORD_INVALID",
+            "origin_objective_id": None, "origin_draft_id": None,
         }])
 
     def test_symlink_canonico_es_error_acotado_y_directorio_no_aparece(self):
@@ -263,6 +266,7 @@ class PruebaListadoSoloLectura(ChugelTestCase):
         self.assertEqual(chugel.list_missions(), [{
             "mission_id": linked_id, "readable": False, "state": None,
             "updated_at": None, "error_code": "MISSION_PATH_UNSAFE",
+            "origin_objective_id": None, "origin_draft_id": None,
         }])
 
     def test_directorio_ausente_no_se_crea(self):

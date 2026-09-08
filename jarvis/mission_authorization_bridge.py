@@ -242,6 +242,12 @@ def close_draft_authorization(
         mission_write.create_mission_if_absent(
             draft.raw_intent, mission_definition, decision, mission_id=mission_id,
             repository=repository,
+            # M7 (Program-Level Planning Depth): draft.objective_id is
+            # None for a hand-created draft, exactly like every draft
+            # before M7 existed -- non-null only for a draft materialized
+            # via an Objective's decomposition convergence (see
+            # jarvis.models.MissionDraft's own docstring on this field).
+            origin={"objective_id": draft.objective_id, "draft_id": draft.draft_id},
         )
 
         store.record_authorization_effect(intent_id, mission_id)

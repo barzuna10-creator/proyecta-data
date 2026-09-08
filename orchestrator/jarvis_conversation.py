@@ -101,6 +101,14 @@ class DecompositionItemSuggestion:
     non_goals: tuple[str, ...] | None = None
     acceptance_criteria: tuple[str, ...] | None = None
     open_questions: tuple[str, ...] | None = None
+    # Jarvis God Mode M7 (Program-Level Planning Depth) -- 0-based
+    # positional references WITHIN this same proposed list, never a
+    # draft_id (which does not exist yet at proposal time -- see
+    # jarvis/control_plane_server.py's _objective_decomposition_entries(),
+    # the one place these are translated to real draft_ids before
+    # persisting). Defaults to empty, never None, since "no dependency" is
+    # the ordinary case for most items, not an unaddressed field.
+    depends_on_index: tuple[int, ...] = ()
 
 
 # Defensive wire-format cap only -- never the real business rule (2-4,
@@ -173,7 +181,14 @@ _SYSTEM_TASK = (
     "works today. Never invent scope/acceptance_criteria for any item Jose "
     "did not actually make possible to derive from what he said -- the "
     "same rule that already governs the single suggestion above applies "
-    "per item here.\n\n"
+    "per item here. Each item may ALSO carry depends_on_index: a list of "
+    "0-based positions, WITHIN THIS SAME objective_decomposition list, "
+    "naming other items that must genuinely finish first -- e.g. an item "
+    "at position 2 with depends_on_index [0] depends on the item at "
+    "position 0. Omit it (null or empty) for the ordinary case of "
+    "independent, parallel-workable items. Never reference an item's own "
+    "position, and never invent a dependency Jose's own words do not "
+    "support.\n\n"
     "The UNTRUSTED DATA bundle may include knowledge_citations -- already-"
     "authorized knowledge about Zentra (José's product), each with "
     "knowledgeId, claim, label, and tier (\"canonical\" or \"complementary\", "
@@ -233,7 +248,8 @@ _SYSTEM_TASK = (
     '      "scope": ["<string>", ...] or null,\n'
     '      "non_goals": ["<string>", ...] or null,\n'
     '      "acceptance_criteria": ["<string>", ...] or null,\n'
-    '      "open_questions": ["<string>", ...] or null\n'
+    '      "open_questions": ["<string>", ...] or null,\n'
+    '      "depends_on_index": [<int>, ...] or null\n'
     "    },\n"
     "    ... (exactly 2, 3, or 4 items total when present, never fewer or more)\n"
     "  ]\n"
@@ -390,6 +406,22 @@ def _normalized_turn_kind(structured: dict) -> str:
     return "AMBIGUOUS"
 
 
+def _int_tuple(value: object) -> tuple[int, ...]:
+    """Same optional-field contract as _string_tuple_or_none(), but empty
+    tuple (never None) for absent -- "no depends_on_index" is the ordinary
+    case for most items, not an unaddressed field. bool is deliberately
+    excluded even though it is a subtype of int in Python: the model must
+    never be able to smuggle True/False through where an ordinal index is
+    expected."""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    ):
+        raise JarvisConversationError("objective_decomposition item.depends_on_index must be a list of integers or null")
+    return tuple(value)
+
+
 def _parse_decomposition_item(raw_item: object) -> DecompositionItemSuggestion:
     if not isinstance(raw_item, dict):
         raise JarvisConversationError("each objective_decomposition item must be an object")
@@ -406,6 +438,7 @@ def _parse_decomposition_item(raw_item: object) -> DecompositionItemSuggestion:
         non_goals=_string_tuple_or_none(raw_item.get("non_goals")),
         acceptance_criteria=_string_tuple_or_none(raw_item.get("acceptance_criteria")),
         open_questions=_string_tuple_or_none(raw_item.get("open_questions")),
+        depends_on_index=_int_tuple(raw_item.get("depends_on_index")),
     )
 
 

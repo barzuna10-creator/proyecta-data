@@ -121,6 +121,71 @@ def validate_objective(value: object) -> "ObjectiveValidationResult":
                 "decomposition entries must not repeat the same draft_id",
                 "$.decomposition",
             ))
+        # M7 (Program-Level Planning Depth) -- depends_on shape/acyclicity,
+        # enforced here (not in jarvis/control_plane_server.py's own
+        # 2-4-item count check) precisely because this is the ONE place
+        # every path that ever persists an Objective's decomposition
+        # already goes through -- both _handle_objective_decomposition()
+        # (via build_objective_envelope() -> canonicalize_objective() ->
+        # this function) and revise_objective() (which calls this function
+        # directly). A cycle, a self-reference, or a dangling reference is
+        # rejected here with the exact same severity as the schema's own
+        # 2-4 count -- never a warning, never silently dropped.
+        known_draft_ids = set(draft_ids)
+        edges: dict[str, list[str]] = {}
+        for item in decomposition:
+            if not isinstance(item, dict):
+                continue
+            draft_id = item.get("draft_id")
+            depends_on = item.get("depends_on")
+            if not isinstance(depends_on, list):
+                continue
+            edges[draft_id] = [dep for dep in depends_on if isinstance(dep, str)]
+            for dep in depends_on:
+                if not isinstance(dep, str):
+                    continue
+                if dep == draft_id:
+                    errors.append(ValidationIssue(
+                        "DECOMPOSITION_DEPENDENCY_SELF_REFERENCE",
+                        "a decomposition entry must not depend on itself",
+                        "$.decomposition",
+                    ))
+                elif dep not in known_draft_ids:
+                    errors.append(ValidationIssue(
+                        "DECOMPOSITION_DEPENDENCY_DANGLING",
+                        "a decomposition entry must only depend on another entry of the same decomposition",
+                        "$.decomposition",
+                    ))
+        # Real cycle detection (Kahn's algorithm / topological sort), not a
+        # heuristic -- run only over edges whose endpoints are all known,
+        # real draft_ids (self-references/dangling references above are
+        # already reported separately and never participate here, so one
+        # malformed edge cannot mask a genuine cycle among the rest).
+        if not any(e.code in ("DECOMPOSITION_DEPENDENCY_SELF_REFERENCE", "DECOMPOSITION_DEPENDENCY_DANGLING") for e in errors):
+            in_degree = {draft_id: 0 for draft_id in known_draft_ids}
+            for draft_id, deps in edges.items():
+                for _dep in deps:
+                    in_degree[draft_id] = in_degree.get(draft_id, 0) + 1
+            queue = [draft_id for draft_id, degree in in_degree.items() if degree == 0]
+            visited_count = 0
+            # Reverse adjacency: dep -> [draft_ids that depend on dep]
+            dependents: dict[str, list[str]] = {draft_id: [] for draft_id in known_draft_ids}
+            for draft_id, deps in edges.items():
+                for dep in deps:
+                    dependents.setdefault(dep, []).append(draft_id)
+            while queue:
+                node = queue.pop()
+                visited_count += 1
+                for dependent in dependents.get(node, []):
+                    in_degree[dependent] -= 1
+                    if in_degree[dependent] == 0:
+                        queue.append(dependent)
+            if visited_count != len(known_draft_ids):
+                errors.append(ValidationIssue(
+                    "DECOMPOSITION_DEPENDENCY_CYCLE",
+                    "decomposition dependencies must not form a cycle",
+                    "$.decomposition",
+                ))
 
     if not any(error.code == "OBJECTIVE_SCHEMA_INVALID" for error in errors):
         try:

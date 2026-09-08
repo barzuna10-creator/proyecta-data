@@ -40,12 +40,16 @@ trigger, same as any other auto-advance-eligible state."""
 from __future__ import annotations
 
 import datetime
+import logging
 import threading
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
-from jarvis import mission_coordinator, mission_query
+from jarvis import mission_coordinator, mission_query, objective_query
+from jarvis.objective_dependencies import failed_dependencies, unmet_dependencies
+
+_LOGGER = logging.getLogger(__name__)
 
 # M5 (Learning & Knowledge Continuity). Mirrors orchestrator/deploy_verifier.py's
 # own _elapsed_seconds() shape/convention (chugel.py's timestamps are
@@ -144,7 +148,7 @@ class MissionSupervisor:
     worker thread, of which at most one is ever alive at a time."""
 
     def __init__(self, *, adapters: dict | None = None, adapter_factory=None, advance_kwargs: dict,
-                 max_concurrency: int = 1, lease=None):
+                 max_concurrency: int = 1, lease=None, objective_store=None):
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or not 1 <= max_concurrency <= 8:
             raise ValueError("max_concurrency must be an integer from 1 through 8")
         if adapter_factory is not None and adapters is not None:
@@ -153,6 +157,15 @@ class MissionSupervisor:
         self._advance_kwargs = dict(advance_kwargs)
         self._max_concurrency = max_concurrency
         self._lease = lease
+        # M7 (Program-Level Planning Depth): the exact same
+        # jarvis.storage.FileJarvisStore instance jarvis.control_plane_server's
+        # own build_server() already constructs for drafts/objectives
+        # (server.store) -- never a second store, never a new root. None
+        # (every existing caller/test predating M7) simply means no
+        # mission in this process can ever have origin.objective_id set to
+        # a real value worth resolving -- the dependency filter below is
+        # then a complete no-op, not an error.
+        self._objective_store = objective_store
         self._pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="mission-worker")
         self._inflight: set[str] = set()
         self._closed = False
@@ -343,6 +356,13 @@ class MissionSupervisor:
                 continue
             candidates.append(listing.mission_id)
 
+        # M7 (Program-Level Planning Depth): an ADDITIONAL filter over the
+        # candidates already built above -- never a new source of
+        # candidates, never a durable write, never a state transition.
+        # See _dependency_ready_candidates()'s own docstring for the
+        # per-candidate isolation this applies.
+        candidates = self._dependency_ready_candidates(candidates, listings)
+
         pending = {}
         while candidates or pending:
             while candidates and len(pending) < self._max_concurrency:
@@ -394,6 +414,102 @@ class MissionSupervisor:
                 reports.append((mission_id, report))
         self._knowledge_derivation_housekeeping_pass(listings)
         return DrainOutcome(tuple(reports), tuple(errors))
+
+    def _objective_depends_on_map(self, objective_id: str, start_draft_id: str) -> dict[str, tuple[str, ...]]:
+        """Builds just enough of {draft_id: depends_on} to transitively
+        resolve `start_draft_id`'s own dependency chain -- a bounded
+        breadth-first walk over jarvis.objective_query.get_decomposition_entry()
+        (the one seam this module is allowed to reach an Objective
+        through, see that module's own docstring), never the whole
+        decomposition upfront. `seen` doubles as this walk's own cycle
+        guard -- independent of, never assuming, the acyclicity
+        jarvis.objectives.py's validate_objective() already enforces at
+        persistence time (same "defend in two independent layers"
+        discipline jarvis.objective_dependencies.failed_dependencies()
+        itself carries)."""
+        depends_on_by_draft_id: dict[str, tuple[str, ...]] = {}
+        seen: set[str] = set()
+        to_visit = [start_draft_id]
+        while to_visit:
+            draft_id = to_visit.pop()
+            if draft_id in seen:
+                continue
+            seen.add(draft_id)
+            entry = objective_query.get_decomposition_entry(self._objective_store, objective_id, draft_id)
+            depends_on_by_draft_id[draft_id] = entry.depends_on
+            to_visit.extend(entry.depends_on)
+        return depends_on_by_draft_id
+
+    def _dependency_ready_candidates(self, candidate_ids: list[str], listings) -> list[str]:
+        """M7 (Program-Level Planning Depth) -- an ADDITIONAL filter over
+        candidates the AUTO_ADVANCE_ELIGIBLE_STATES loop above already
+        selected. Never adds a candidate the caller did not already
+        select, never marks anything durable, never changes a mission's
+        state: a candidate excluded here is simply not submitted THIS
+        pass -- the very next notify() or drain pass re-derives the
+        answer fresh from Chugel/jarvis.storage's own already-durable
+        state (same "recompute, never persist a pending marker"
+        discipline as everything else in this module).
+
+        Per-candidate isolation, matching the exact same principle the
+        try/except around mission_coordinator.advance() below already
+        gives every OTHER candidate in this pass: if resolving one
+        candidate's dependencies raises ANY exception (an unreadable or
+        corrupt Objective, a decomposition entry that no longer matches,
+        or any other unexpected error), that ONE candidate is treated
+        conservatively as not (yet) eligible this cycle -- never as
+        "satisfied" -- the error is logged with mission_id/objective_id,
+        and every other candidate in `candidate_ids` is still evaluated
+        completely normally."""
+        if self._objective_store is None or not candidate_ids:
+            return candidate_ids
+        listing_by_mission_id = {listing.mission_id: listing for listing in listings}
+        draft_id_to_mission_state: dict[str, str | None] = {
+            listing.origin_draft_id: listing.state
+            for listing in listings
+            if listing.origin_draft_id is not None
+        }
+        ready: list[str] = []
+        for mission_id in candidate_ids:
+            listing = listing_by_mission_id.get(mission_id)
+            objective_id = listing.origin_objective_id if listing is not None else None
+            if listing is None or objective_id is None:
+                ready.append(mission_id)  # not part of any Objective -- unaffected by M7
+                continue
+            try:
+                depends_on_by_draft_id = self._objective_depends_on_map(objective_id, listing.origin_draft_id)
+                depends_on = depends_on_by_draft_id.get(listing.origin_draft_id, ())
+                if not depends_on:
+                    ready.append(mission_id)
+                    continue
+                if failed_dependencies(depends_on, draft_id_to_mission_state, depends_on_by_draft_id):
+                    # A prerequisite (however deep) is terminally failed --
+                    # never auto-dispatched past that, regardless of how
+                    # long ago or how many cycles this has been true. A
+                    # human can still authorize this mission's scope by
+                    # hand (jarvis.mission_write.authorize_scope) -- this
+                    # filter only ever suppresses the SUPERVISOR's own
+                    # automatic dispatch, never a human decision.
+                    continue
+                if unmet_dependencies(depends_on, draft_id_to_mission_state):
+                    # Not yet -- no durable marker, no penalty: the very
+                    # next drain pass (triggered by the prerequisite's own
+                    # eventual authorization/transition, or the periodic
+                    # notify() any real caller already performs) simply
+                    # re-evaluates this exact same candidate fresh.
+                    continue
+                ready.append(mission_id)
+            except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
+                _LOGGER.error(
+                    "M7 dependency resolution failed for mission_id=%s objective_id=%s: %s",
+                    mission_id, objective_id, exc,
+                )
+                # Conservative: never treat a resolution failure as
+                # "satisfied" -- this candidate simply does not dispatch
+                # this cycle, exactly like an unmet dependency, and every
+                # other candidate in this pass is completely unaffected.
+                continue
+        return ready
 
     def _dispatch(self, func, mission_id: str) -> None:
         """Fire-and-forget submission onto this supervisor's own thread
