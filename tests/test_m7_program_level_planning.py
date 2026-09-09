@@ -19,7 +19,7 @@ from pathlib import Path
 
 import orchestrator.chugel as chugel
 from jarvis import mission_coordinator
-from jarvis.control_plane_server import _build_projection, _objective_decomposition_entries
+from jarvis.control_plane_server import ControlPlaneConfig, _build_projection, _objective_decomposition_entries
 from jarvis.mission_supervisor import MissionSupervisor
 from jarvis.models import Objective, ObjectiveDecompositionEntry
 from jarvis.objectives import ObjectiveInvalid, build_objective_envelope, revise_objective
@@ -79,6 +79,10 @@ class M7TestCase(unittest.TestCase):
         self._original_missions_dir = chugel._MISSIONS_DIR
         chugel._MISSIONS_DIR = Path(self._tmpdir.name) / "missions"
         self.store = FileJarvisStore(Path(self._tmpdir.name) / "jarvis")
+        self.projection_config = ControlPlaneConfig(
+            host="127.0.0.1", port=0, token="t" * 40,
+            store_root=str(Path(self._tmpdir.name) / "jarvis"),
+        )
 
     def tearDown(self):
         chugel._MISSIONS_DIR = self._original_missions_dir
@@ -204,7 +208,7 @@ class FailedDependencyTests(M7TestCase):
         submitted = self._drain(supervisor)
         self.assertNotIn(mission_b, submitted)
 
-        projection = _build_projection(self.store)
+        projection = _build_projection(self.store, self.projection_config)
         [objective_projection] = [o for o in projection["objectives"] if o["id"] == objective_id]
         [entry_b] = [e for e in objective_projection["decomposition"] if e["draftId"] == draft_b]
         self.assertEqual("failed", entry_b["dependencyStatus"])
@@ -378,7 +382,7 @@ class TransitiveFailureTests(M7TestCase):
         # serve time, never requires every entry to already be a mission).
         self._advance_to_failed(mission_a)
 
-        projection = _build_projection(self.store)
+        projection = _build_projection(self.store, self.projection_config)
         [objective_projection] = [o for o in projection["objectives"] if o["id"] == objective_id]
         by_draft = {e["draftId"]: e for e in objective_projection["decomposition"]}
         self.assertEqual("failed", by_draft[draft_b]["dependencyStatus"])

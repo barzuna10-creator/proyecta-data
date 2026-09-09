@@ -73,6 +73,8 @@ import math
 import os
 import re
 import shutil
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -178,6 +180,8 @@ class ControlPlaneConfig:
         mission_pr_title: str | None = None, git_executable: str = "git", gh_executable: str = "gh",
         mission_concurrency: int = 2, build_review_deadline: float = 3600.0,
         ci_poll_timeout_seconds: float = 1800.0, ci_poll_interval_seconds: float = 30.0,
+        projection_cache_ttl_seconds: float = 2.0, projection_activity_limit: int = 100,
+        projection_finding_summary_max_chars: int = 500,
     ):
         if host not in _LOOPBACK_HOSTS:
             raise ValueError("Control Plane must bind to a loopback host")
@@ -222,6 +226,23 @@ class ControlPlaneConfig:
         self.build_review_deadline = build_review_deadline
         self.ci_poll_timeout_seconds = ci_poll_timeout_seconds
         self.ci_poll_interval_seconds = ci_poll_interval_seconds
+        # M8 (Command Center Live Operational Visibility): the projection
+        # cache's TTL, and the payload-size limits (A4/A2 in the M8
+        # design) applied purely in the projection layer -- never a
+        # relaxation of any Mission Record schema limit.
+        if not math.isfinite(projection_cache_ttl_seconds) or projection_cache_ttl_seconds < 0:
+            raise ValueError("projection_cache_ttl_seconds must be a finite, non-negative number")
+        if isinstance(projection_activity_limit, bool) or not isinstance(projection_activity_limit, int) or projection_activity_limit < 0:
+            raise ValueError("projection_activity_limit must be a non-negative integer")
+        if (
+            isinstance(projection_finding_summary_max_chars, bool)
+            or not isinstance(projection_finding_summary_max_chars, int)
+            or projection_finding_summary_max_chars < 1
+        ):
+            raise ValueError("projection_finding_summary_max_chars must be a positive integer")
+        self.projection_cache_ttl_seconds = projection_cache_ttl_seconds
+        self.projection_activity_limit = projection_activity_limit
+        self.projection_finding_summary_max_chars = projection_finding_summary_max_chars
 
 
 def load_config(env: dict | None = None) -> ControlPlaneConfig:
@@ -243,6 +264,11 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
         build_deadline = float(env.get("CONTROL_PLANE_BUILD_REVIEW_DEADLINE_SECONDS", "3600"))
         ci_timeout = float(env.get("CONTROL_PLANE_CI_TIMEOUT_SECONDS", "1800"))
         ci_interval = float(env.get("CONTROL_PLANE_CI_POLL_INTERVAL_SECONDS", "30"))
+        projection_cache_ttl = float(env.get("CONTROL_PLANE_PROJECTION_CACHE_TTL_SECONDS", "2"))
+        projection_activity_limit = int(env.get("CONTROL_PLANE_PROJECTION_ACTIVITY_LIMIT", "100"))
+        projection_finding_summary_max_chars = int(
+            env.get("CONTROL_PLANE_PROJECTION_FINDING_SUMMARY_MAX_CHARS", "500")
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("mission concurrency/timeouts are invalid") from exc
     return ControlPlaneConfig(
@@ -258,6 +284,9 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
         gh_executable=env.get("CONTROL_PLANE_GH_EXECUTABLE") or "gh",
         mission_concurrency=concurrency, build_review_deadline=build_deadline,
         ci_poll_timeout_seconds=ci_timeout, ci_poll_interval_seconds=ci_interval,
+        projection_cache_ttl_seconds=projection_cache_ttl,
+        projection_activity_limit=projection_activity_limit,
+        projection_finding_summary_max_chars=projection_finding_summary_max_chars,
     )
 
 
@@ -274,6 +303,153 @@ class _ControlPlaneHTTPServer(ThreadingHTTPServer):
         if supervisor is not None:
             supervisor.close()
         super().server_close()
+
+
+# M8 (Command Center Live Operational Visibility) -- Correction 1 (V2)/
+# Correction 7 (V3): a pure, categorical (never ordered, never numeric)
+# `state -> stage` presentation mapping. This is deliberately NOT a
+# second state machine: Chugel's own orchestrator/validator.py::STATES
+# and TRANSITIONS remain the one and only authority over what a mission
+# IS and what it may become next; this dict only decides which
+# kanban-style column a given real state is drawn in. Every one of the
+# 22 real states has an entry -- tests/test_jarvis_control_plane_server.py's
+# StageMappingExhaustivenessTests compares this dict's keys against
+# `set(orchestrator.validator.STATES)` directly (never a hand-maintained
+# count) so an unmapped future state fails a test instead of silently
+# falling through. "BLOCKED" itself IS a key here (so the exhaustiveness
+# check covers it too) but a BLOCKED mission's *exposed* `stage` is never
+# this literal value -- see `_stage_for_mission()` below, which always
+# resolves a BLOCKED mission's stage via its own `priorState` instead.
+_STATE_TO_STAGE: dict[str, str] = {
+    "INTAKE": "INTAKE",
+    "SCOPE_AWAITING_AUTHORIZATION": "SCOPING",
+    "AUTHORIZED": "IN_PROGRESS",
+    "BUILDING": "IN_PROGRESS",
+    "VERIFYING": "IN_PROGRESS",
+    "AWAITING_REVIEW": "IN_PROGRESS",
+    "REVIEWING": "IN_PROGRESS",
+    "CHANGES_REQUIRED": "IN_PROGRESS",
+    "CORRECTING": "IN_PROGRESS",
+    "PUBLISH_AWAITING_AUTHORIZATION": "PUBLISHING",
+    "PUBLISHING": "PUBLISHING",
+    "CI_PENDING": "PUBLISHING",
+    "MERGE_AWAITING_AUTHORIZATION": "PUBLISHING",
+    "MERGING": "PUBLISHING",
+    "MERGED": "PUBLISHING",
+    "DEPLOY_PENDING": "DEPLOYING",
+    "VERIFYING_PRODUCTION": "DEPLOYING",
+    "COMPLETED": "DONE",
+    "BLOCKED": "BLOCKED",
+    "FAILED": "FAILED",
+    "CANCELLED": "FAILED",
+    "ROLLED_BACK": "FAILED",
+}
+
+
+def _stage_for_mission(state: str, prior_state: str | None) -> str:
+    """The single function that ever decides `mission.stage` -- a pure
+    presentation lookup, never a decision. A BLOCKED mission always
+    resolves via its own `priorState` (Correction 1/7): the mapping is
+    looked up a second time, on `prior_state`, so the user sees which
+    part of the real lifecycle the mission froze in, never the
+    uninformative literal "BLOCKED". Falls back to the `BLOCKED` stage
+    itself only if `prior_state` is missing/unrecognized (defensive --
+    every real BLOCKED mission has a real prior_state derived from its
+    own state_history by jarvis/status.py, but this function never
+    raises regardless)."""
+    if state == "BLOCKED":
+        return _STATE_TO_STAGE.get(prior_state, _STATE_TO_STAGE["BLOCKED"])
+    return _STATE_TO_STAGE.get(state, "FAILED")
+
+
+def _correction_rounds(timeline: tuple) -> int:
+    """A count, never a position: how many times this mission's own
+    state_history recorded a transition INTO CORRECTING. Derived purely
+    from `status.timeline` (already-allow-listed state_transition events,
+    jarvis/status.py's own compute_mission_timeline()) -- no new read, no
+    second traversal of state_history itself."""
+    return sum(
+        1 for event in timeline if event.kind == "state_transition" and event.to_state == "CORRECTING"
+    )
+
+
+class _ProjectionCache:
+    """Short-TTL, generation-guarded (compare-and-swap) cache for the
+    Command Center projection payload (M8 design V1/V2/V3/V4/V5/V6,
+    A8 + Corrections 3/8/10/12).
+
+    `_ControlPlaneHTTPServer` is a real `ThreadingHTTPServer` -- every
+    request is served on its own thread -- so this must be correct under
+    genuinely concurrent readers and writers, not merely under a
+    single-threaded test. `_lock` here protects ONLY the tiny
+    (generation, cached_*) bookkeeping below; it is never held across a
+    real Chugel scan (`_build_projection()`), which keeps running fully
+    in parallel across threads exactly as it always has.
+
+    Protocol:
+      - A "hit" requires BOTH: TTL not expired, AND
+        `cached_generation == current generation` (Correction 12 -- the
+        read side must compare generation too, or incrementing it on
+        write would be a no-op).
+      - Recomputing (cache miss): read the generation `g` BEFORE
+        scanning Chugel (no lock held during the scan itself); after
+        scanning, publish the result into the cache ONLY if the
+        generation is STILL `g` (Correction 10, compare-and-swap). If a
+        write invalidated the cache while this thread was scanning, the
+        just-computed (now-stale) result is still returned to THIS
+        request -- it was correct at the moment it was computed -- but
+        is never published for a future request to see.
+      - Invalidating (any successful POST, via `_dispatch()`'s own
+        `finally`): increment the generation under the lock -- O(1),
+        never blocks a concurrent scan in progress.
+    """
+
+    def __init__(self, ttl_seconds: float, *, clock=time.monotonic):
+        self._ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._cached_generation: int | None = None
+        self._cached_at: float | None = None
+        self._cached_payload: dict | None = None
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._generation += 1
+
+    def current_generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def get(self) -> dict | None:
+        now = self._clock()
+        with self._lock:
+            if (
+                self._cached_payload is not None
+                and self._cached_at is not None
+                and (now - self._cached_at) < self._ttl_seconds
+                and self._cached_generation == self._generation
+            ):
+                return self._cached_payload
+        return None
+
+    def publish_if_current(self, payload: dict, generation_at_start: int) -> None:
+        now = self._clock()
+        with self._lock:
+            if generation_at_start == self._generation:
+                self._cached_payload = payload
+                self._cached_generation = generation_at_start
+                self._cached_at = now
+
+
+def _get_projection(store: FileJarvisStore, config: ControlPlaneConfig, cache: "_ProjectionCache") -> dict:
+    hit = cache.get()
+    if hit is not None:
+        return hit
+    generation_at_start = cache.current_generation()
+    payload = _build_projection(store, config)
+    cache.publish_if_current(payload, generation_at_start)
+    return payload
 
 
 def _stub_mission_draft(draft_id: str, objective: str) -> MissionDraft:
@@ -766,11 +942,112 @@ def _blocked_mission_entry(mission_id: str, status) -> dict:
     }
 
 
-def _build_projection(store: FileJarvisStore) -> dict:
+def _truncate_summary(summary: str, max_chars: int) -> str:
+    """M8, Correction 2 (V2): a NEW limit introduced by this projection
+    layer -- never a reuse of a Mission Record schema limit, since
+    `finding.summary` has no `maxLength` in
+    orchestrator/schemas/mission_record.schema.json (only `minLength: 1`).
+    The Mission Record itself is never touched or re-validated here; this
+    only shapes what leaves the process over HTTP. A visible truncation
+    suffix so a caller never mistakes a cut-off summary for the complete
+    one."""
+    if len(summary) <= max_chars:
+        return summary
+    suffix = "…"
+    keep = max(0, max_chars - len(suffix))
+    return summary[:keep] + suffix
+
+
+def _publish_projection(publish) -> dict:
+    """M8, A1: per-mission `publish` sub-object, replacing the old
+    top-level, always-fake `git` field entirely. Sourced from
+    jarvis.status.PublishStatus (itself an allow-listed projection of
+    record["publish"]) -- never commit_sha/pushed_at, which have no
+    operational-visibility purpose here."""
+    last_ci_run = None
+    if publish.ci_runs:
+        latest = publish.ci_runs[-1]
+        last_ci_run = {"runId": latest.run_id, "conclusion": latest.conclusion, "recordedAt": latest.checked_at}
+    return {"prUrl": publish.pr_url, "prNumber": publish.pr_number, "lastCiRun": last_ci_run}
+
+
+def _findings_for_mission(mission_id: str, status, max_summary_chars: int) -> list[dict]:
+    """M8, A2: exposes jarvis.status.MissionStatus.reviewer[].findings --
+    already computed by mission_query.get_mission_status() on every
+    request, previously discarded entirely. Exactly the allow-listed
+    FindingStatus fields (id/severity/summary/file/lineRange/category) --
+    never `blocked_reason` or any other reviewer_evidence free-text
+    field. `lineRange` is exposed as the schema's own real shape
+    (string | null), never a fabricated [int, int] tuple."""
+    findings: list[dict] = []
+    for reviewer_attempt in status.reviewer:
+        for finding in reviewer_attempt.findings:
+            findings.append({
+                "missionId": mission_id,
+                "id": finding.finding_id,
+                "severity": finding.severity,
+                "summary": _truncate_summary(finding.summary, max_summary_chars),
+                "file": finding.file,
+                "lineRange": finding.line_range,
+                "category": finding.category,
+            })
+    return findings
+
+
+def _checks_for_mission(mission_id: str, status) -> list[dict]:
+    """M8, A3: the full `publish.ci_runs[]` history per mission (not just
+    the latest, which `publish.lastCiRun` already covers) -- lets a
+    caller see retries/flakes, not only the final conclusion."""
+    return [
+        {"missionId": mission_id, "runId": run.run_id, "conclusion": run.conclusion, "recordedAt": run.checked_at}
+        for run in status.publish.ci_runs
+    ]
+
+
+# M8, A5: the closed set of dispatch_ledger statuses this projection
+# treats as "still live" for the `agents` summary -- deliberately
+# reusing the exact concept orchestrator/chugel.py's own reservation
+# logic already treats as "a live (non-FINALIZED) ledger entry exists"
+# (see e.g. chugel.py's reserve_dispatch()/mark_dispatch_in_flight()
+# docstrings) rather than inventing a new "in progress" classification.
+# RESERVED/IN_FLIGHT/RESULT_RECORDED are all still live in that sense;
+# FINALIZED is the one terminal status for a ledger entry.
+_LIVE_DISPATCH_STATUSES = frozenset({"RESERVED", "IN_FLIGHT", "RESULT_RECORDED"})
+
+
+def _active_agent_for_mission(mission_id: str, status) -> dict | None:
+    """M8, A5: the most recent dispatch_ledger event for this mission
+    (already present in `status.timeline`, jarvis/status.py's own
+    allow-listed merge of state_history + dispatch_ledger) whose role is
+    emilio/emma and whose status is still live. Pure computation over an
+    already-fetched projection -- no new read. None (never a fabricated
+    entry) when no such event exists."""
+    candidates = [
+        event for event in status.timeline
+        if event.kind == "dispatch" and event.role in ("emilio", "emma") and event.status in _LIVE_DISPATCH_STATUSES
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda event: event.at)
+    return {
+        "missionId": mission_id, "role": latest.role, "provider": latest.provider,
+        "model": latest.model, "since": latest.at,
+    }
+
+
+def _build_projection(store: FileJarvisStore, config: ControlPlaneConfig) -> dict:
     listings = mission_query.list_missions()
     gates: list[dict] = []
     missions: list[dict] = []
     blocked_missions: list[dict] = []
+    # M8: cross-mission aggregations, built incrementally in the SAME
+    # loop as `missions`/`gates`/`blocked_missions` above -- no second
+    # pass over `listings`, no new I/O beyond what this loop already does.
+    findings: list[dict] = []
+    checks: list[dict] = []
+    activity: list[dict] = []
+    agents: list[dict] = []
+    knowledge: list[dict] = []
     for item in listings:
         # Verification Hardening V1, Pillar 3 (Progress Watchdog):
         # `status` is already fetched here for the gate-projection logic
@@ -805,7 +1082,21 @@ def _build_projection(store: FileJarvisStore) -> dict:
             "id": item.mission_id,
             "title": item.mission_id,
             "phase": item.state or "unknown",
-            "progress": 0,
+            # M8, Correction 1 (V2)/Correction 7 (V3): `progress` (always
+            # hardcoded 0) is removed entirely, replaced by `stage` (a
+            # categorical, non-numeric, non-ordered presentation label --
+            # see _stage_for_mission()'s own docstring) and
+            # `correctionRounds` (an honest count, 0 by default, never a
+            # placeholder). An unreadable/unfetchable mission (status is
+            # None) has no fetched state to categorize honestly -- `stage`
+            # falls back to the same mapping keyed on item.state directly
+            # (still exhaustive over all 22 real states) and
+            # `correctionRounds` is 0 (no timeline was fetched).
+            "stage": (
+                _stage_for_mission(status.state, status.prior_state) if status is not None
+                else _STATE_TO_STAGE.get(item.state, "FAILED")
+            ),
+            "correctionRounds": _correction_rounds(status.timeline) if status is not None else 0,
             "status": "active" if item.bucket == "running" else ("blocked" if item.bucket in ("blocked", "terminal") else "active"),
             "updatedAt": item.updated_at or "",
             "staleness": status.staleness if status is not None else "NORMAL",
@@ -815,6 +1106,15 @@ def _build_projection(store: FileJarvisStore) -> dict:
             # mission gets an empty timeline, never a fabricated one.
             "timeline": [_timeline_event_dict(e) for e in status.timeline] if status is not None else [],
             "knowledgeDerivationStatus": knowledge_derivation_status,
+            # M8, A1: replaces the old top-level, always-fake `git` field.
+            # An unreadable/unfetchable mission has no publish info to
+            # report honestly -- the same all-null shape a mission whose
+            # own record["publish"] is still at its INTAKE defaults would
+            # produce, never a distinct "unknown" shape.
+            "publish": (
+                _publish_projection(status.publish) if status is not None
+                else {"prUrl": None, "prNumber": None, "lastCiRun": None}
+            ),
         }
         # M6: exactly one new field, exposed ONLY for a currently-BLOCKED
         # mission whose prior state was a deploy-verification state --
@@ -838,6 +1138,21 @@ def _build_projection(store: FileJarvisStore) -> dict:
             # own docstring).
             if item.state == "BLOCKED":
                 blocked_missions.append(_blocked_mission_entry(item.mission_id, status))
+            # M8: cross-mission aggregations -- all pure computation over
+            # the SAME already-fetched `status`, no new read per mission.
+            findings.extend(_findings_for_mission(
+                item.mission_id, status, config.projection_finding_summary_max_chars,
+            ))
+            checks.extend(_checks_for_mission(item.mission_id, status))
+            activity.extend(
+                {**_timeline_event_dict(event), "missionId": item.mission_id, "occurredAt": event.at}
+                for event in status.timeline
+            )
+            active_agent = _active_agent_for_mission(item.mission_id, status)
+            if active_agent is not None:
+                agents.append(active_agent)
+        if knowledge_derivation_status is not None:
+            knowledge.append({"missionId": item.mission_id, "status": knowledge_derivation_status})
     for draft_id in store.list_pending_draft_ids():
         envelope = store.get_latest_draft(draft_id)
         gates.append(_draft_gate_projection(draft_id, envelope))
@@ -891,20 +1206,34 @@ def _build_projection(store: FileJarvisStore) -> dict:
             "decomposition": decomposition_projection,
         })
     now = _now()
+    # M8, A4: a single cross-mission activity feed, fused from the
+    # `timeline[]` already computed above for every readable mission --
+    # pure computation on every request, no new storage. Sorted by
+    # `occurredAt` descending (most recent first), capped to
+    # `config.projection_activity_limit` (default 100) entries.
+    activity.sort(key=lambda entry: entry["occurredAt"], reverse=True)
+    activity = activity[: config.projection_activity_limit]
     return {
         "sequence": int(datetime.now(timezone.utc).timestamp() * 1000),
         "generatedAt": now,
         "missions": missions,
-        "agents": [],
+        # M8, A5: honestly empty ([]) when no mission has a live
+        # Emilio/Emma dispatch right now -- never backfilled with
+        # fabricated data to avoid an empty list.
+        "agents": agents,
         "gates": gates,
         "blockedMissions": blocked_missions,
         "objectives": objectives,
-        "findings": [],
-        "checks": [],
-        "activity": [],
-        "knowledge": [],
+        # M8, A2: exposes jarvis.status.MissionStatus.reviewer[].findings,
+        # previously computed on every request and silently discarded.
+        "findings": findings,
+        # M8, A3: the full publish.ci_runs[] history per mission.
+        "checks": checks,
+        "activity": activity,
+        # M8, A6: existing per-mission knowledgeDerivationStatus,
+        # surfaced as a flat top-level list -- no new pipeline.
+        "knowledge": knowledge,
         "health": {"chugel": "connected", "stream": "polling", "latencyMs": 0, "lastSync": now},
-        "git": {"branch": "", "commit": "", "pullRequest": None, "ci": "passing"},
     }
 
 
@@ -1167,6 +1496,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _supervisor(self) -> MissionSupervisor:
         return self.server.supervisor  # type: ignore[attr-defined]
 
+    def _projection_cache(self) -> "_ProjectionCache":
+        return self.server.projection_cache  # type: ignore[attr-defined]
+
     def _authenticated(self) -> bool:
         header = self.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
@@ -1220,17 +1552,29 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authenticated():
             self._write_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
+        # M8, Corrections 10/11/13/14: `response_status` is declared and
+        # initialized to None BEFORE the `try` -- deliberately, so that
+        # ANY branch reached inside the `try` (including the 404
+        # fallback, now itself moved inside the try so the `finally`
+        # below covers it too) can assign it, and so the `finally` itself
+        # can never raise an UnboundLocalError even if some future branch
+        # forgot to assign it (the `is not None` guard below is fail-safe
+        # toward "never invalidate", never toward "crash").
+        response_status: int | None = None
         try:
             if method == "GET" and self.path == "/v1/command-center/projection":
-                self._write_json(200, _build_projection(self._store()))
+                response_status = 200
+                self._write_json(response_status, _get_projection(self._store(), self._config(), self._projection_cache()))
                 return
             if method == "POST" and self.path == "/v1/proposals":
                 body = self._read_json_body()
-                self._write_json(201, _handle_proposals(self._store(), body))
+                response_status = 201
+                self._write_json(response_status, _handle_proposals(self._store(), body))
                 return
             if method == "POST" and self.path == "/v1/conversation":
                 body = self._read_json_body()
-                self._write_json(200, _handle_conversation(
+                response_status = 200
+                self._write_json(response_status, _handle_conversation(
                     self._store(), body,
                     knowledge_store=self._knowledge_store(), zentra_resolver=self._zentra_resolver(),
                     trusted_context_builder=self._trusted_context_builder(),
@@ -1242,7 +1586,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if _UUID.fullmatch(gate_id) is None:
                     raise _ApiError(400, "gate id must be a canonical UUID")
                 body = self._read_json_body()
-                self._write_json(200, _handle_authorize(self._store(), self._supervisor(), gate_id, body))
+                response_status = 200
+                self._write_json(response_status, _handle_authorize(self._store(), self._supervisor(), gate_id, body))
                 return
             # M6 -- addressed by mission_id, never gate_id, never routed
             # through _AUTHORIZE_BY_KIND (see this module's own docstring).
@@ -1250,24 +1595,41 @@ class _Handler(BaseHTTPRequestHandler):
             if method == "POST" and match is not None:
                 mission_id = match.group(1)
                 body = self._read_json_body()
-                self._write_json(200, _handle_resume(mission_id, self._supervisor(), body))
+                response_status = 200
+                self._write_json(response_status, _handle_resume(mission_id, self._supervisor(), body))
                 return
             match = re.fullmatch(r"/v1/missions/([^/]+)/reopen-deploy-observation", self.path)
             if method == "POST" and match is not None:
                 mission_id = match.group(1)
                 body = self._read_json_body()
-                self._write_json(200, _handle_reopen_deploy_observation(mission_id, self._supervisor(), body))
+                response_status = 200
+                self._write_json(response_status, _handle_reopen_deploy_observation(mission_id, self._supervisor(), body))
                 return
+            response_status = int(HTTPStatus.NOT_FOUND)
+            self._write_json(response_status, {"error": "not found"})
         except _ApiError as exc:
-            self._write_json(exc.status, {"error": exc.message})
-            return
+            response_status = exc.status
+            self._write_json(response_status, {"error": exc.message})
         except Exception:  # noqa: BLE001 -- final fail-closed net: never leak internals or
             # crash the request thread on an exception this module did not
             # anticipate (including any chugel-side validation failure this
             # module has no direct import of and therefore cannot name).
-            self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Control Plane request failed"})
-            return
-        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            response_status = int(HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._write_json(response_status, {"error": "Control Plane request failed"})
+        finally:
+            # M8, Correction 8 (V3)/10/11/13/14: the SINGLE, structural
+            # cache-invalidation point -- any successful (2xx) POST
+            # invalidates the projection cache, covering every write
+            # route that exists today (_handle_proposals,
+            # _handle_conversation/_handle_objective_decomposition,
+            # _handle_authorize, _handle_resume,
+            # _handle_reopen_deploy_observation) AND any future write
+            # route, with no per-handler bookkeeping to remember. A GET
+            # (including the projection GET itself) never invalidates; a
+            # failed write (4xx/5xx, including the 404 fallback above)
+            # never invalidates, since nothing was actually mutated.
+            if response_status is not None and method == "POST" and 200 <= response_status < 300:
+                self._projection_cache().invalidate()
 
     def do_GET(self) -> None:  # noqa: N802 -- stdlib method name
         self._dispatch("GET")
@@ -1283,6 +1645,10 @@ def build_server(config: ControlPlaneConfig) -> ThreadingHTTPServer:
     server = _ControlPlaneHTTPServer((config.host, config.port), _Handler)
     server.config = config  # type: ignore[attr-defined]
     server.store = FileJarvisStore(config.store_root)  # type: ignore[attr-defined]
+    # M8: one cache instance per server process, never per-request --
+    # its generation counter/TTL bookkeeping must persist across requests
+    # to mean anything.
+    server.projection_cache = _ProjectionCache(config.projection_cache_ttl_seconds)  # type: ignore[attr-defined]
     # Constructed once at startup, not per-request: a misconfigured path
     # here must fail server startup loudly, not be swallowed inside a
     # live conversation turn.
