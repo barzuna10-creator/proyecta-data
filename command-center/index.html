@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis Command Center</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12151c;
+    --panel-2: #171b24;
+    --border: #262b36;
+    --text: #e6e9f0;
+    --muted: #8b93a3;
+    --accent: #5b8cff;
+    --ok: #3fbf7f;
+    --warn: #e0a83e;
+    --bad: #e05f5f;
+    --p0: #e05f5f;
+    --p1: #e0a83e;
+    --p2: #5b8cff;
+    --p3: #8b93a3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+  body { padding: 24px; max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 28px 0 10px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .top-bar { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .status-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  .dot.stale { background: var(--warn); }
+  .dot.down { background: var(--bad); }
+  .banner { display: none; background: #3a1f1f; border: 1px solid var(--bad); color: #ffd7d7; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
+  .banner.show { display: block; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+  .card.attn { border-color: var(--warn); }
+  .empty { color: var(--muted); font-size: 13px; font-style: italic; padding: 8px 0; }
+  .row { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+  .badge.stage-INTAKE, .badge.stage-SCOPING { color: var(--muted); }
+  .badge.stage-IN_PROGRESS { color: var(--accent); border-color: var(--accent); }
+  .badge.stage-PUBLISHING, .badge.stage-DEPLOYING { color: var(--warn); border-color: var(--warn); }
+  .badge.stage-DONE { color: var(--ok); border-color: var(--ok); }
+  .badge.stage-FAILED, .badge.stage-BLOCKED { color: var(--bad); border-color: var(--bad); }
+  .badge.sev-P0 { color: var(--p0); border-color: var(--p0); }
+  .badge.sev-P1 { color: var(--p1); border-color: var(--p1); }
+  .badge.sev-P2 { color: var(--p2); border-color: var(--p2); }
+  .badge.sev-P3 { color: var(--p3); border-color: var(--p3); }
+  .badge.dep-satisfied { color: var(--ok); border-color: var(--ok); }
+  .badge.dep-unmet { color: var(--muted); }
+  .badge.dep-failed { color: var(--bad); border-color: var(--bad); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); }
+  .title { font-weight: 600; font-size: 14px; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  a { color: var(--accent); }
+  ul.deps { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+  .config-screen { max-width: 460px; margin: 80px auto; text-align: center; }
+  .config-screen input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); font-size: 13px; margin: 12px 0; }
+  .config-screen button { padding: 10px 18px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 13px; cursor: pointer; }
+  .warn-text { color: var(--warn); font-size: 12px; margin-top: 10px; }
+  .hidden { display: none !important; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table th, table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  table th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: 0.03em; }
+</style>
+</head>
+<body>
+
+  <!-- Token configuration screen: shown on 401 or when no token is stored yet.
+       Never a blank dashboard for an auth failure. -->
+  <div id="config-screen" class="config-screen hidden">
+    <h1>Jarvis Command Center</h1>
+    <p class="sub">Conectate a tu control plane local.</p>
+    <input id="cfg-url" type="text" placeholder="http://127.0.0.1:8765" autocomplete="off">
+    <input id="cfg-token" type="password" placeholder="Bearer token" autocomplete="off">
+    <div><button id="cfg-save">Conectar</button></div>
+    <p id="cfg-error" class="warn-text hidden"></p>
+    <p class="warn-text">El token se guarda solo en este navegador (localStorage). Nunca lo compartas ni lo pegues en otro sitio.</p>
+  </div>
+
+  <!-- Main dashboard -->
+  <div id="dashboard" class="hidden">
+    <div class="top-bar">
+      <div>
+        <h1>Jarvis Command Center</h1>
+        <div class="sub">Vista de solo lectura — ninguna acción de esta página autoriza, aprueba, mergea, publica ni ejecuta nada.</div>
+      </div>
+      <div>
+        <span id="conn-pill" class="status-pill"><span id="conn-dot" class="dot"></span><span id="conn-text">conectando…</span></span>
+        <button id="reconfigure" class="status-pill" style="cursor:pointer;background:transparent;color:inherit;">cambiar conexión</button>
+      </div>
+    </div>
+
+    <div id="disconnect-banner" class="banner"></div>
+
+    <h2>Necesita tu atención</h2>
+    <div id="attention-list"></div>
+
+    <h2>Misiones</h2>
+    <div id="missions-list" class="grid"></div>
+
+    <h2>Objetivos y dependencias</h2>
+    <div id="objectives-list"></div>
+
+    <h2>Hallazgos</h2>
+    <div id="findings-list"></div>
+
+    <h2>CI / Checks</h2>
+    <div id="checks-list"></div>
+
+    <h2>Agentes activos</h2>
+    <div id="agents-list"></div>
+
+    <h2>Conocimiento</h2>
+    <div id="knowledge-list"></div>
+
+    <h2>Actividad reciente</h2>
+    <div id="activity-list"></div>
+
+    <h2>Salud del sistema</h2>
+    <div id="health-panel" class="card"></div>
+  </div>
+
+<script>
+"use strict";
+
+/*
+ * Jarvis Command Center — private, read-only operational dashboard.
+ *
+ * Design invariants (M8, binding):
+ *  - This page NEVER calls any write endpoint of the control plane. It
+ *    has no button, form, or code path that authorizes/resumes/reopens/
+ *    proposes/converges anything. It only ever issues GET requests to
+ *    /v1/command-center/projection.
+ *  - Universal no-HTML-rendering rule (M8 Correction 9): every string
+ *    value that came from the projection is rendered via `textContent`
+ *    (or an equivalent text-node API), NEVER via innerHTML/insertAdjacentHTML
+ *    with server-provided content. See `text()` and `el()` below — they
+ *    are the ONLY way this file puts server-provided strings on the page.
+ *  - No invented metrics: `stage` is shown as the categorical label the
+ *    backend computed (never re-derived here), never as a percentage or
+ *    step count the frontend makes up on its own.
+ */
+
+const LS_URL = "jarvis_cc_base_url";
+const LS_TOKEN = "jarvis_cc_token";
+const POLL_MS = 4000;
+
+let lastSequence = null;
+let lastGoodSyncAt = null;
+let pollTimer = null;
+
+// ---- tiny, safe DOM helpers -- the ONLY way this file ever puts a
+// server-provided string on the page. No innerHTML with dynamic content
+// anywhere in this file.
+function el(tag, opts) {
+  const node = document.createElement(tag);
+  opts = opts || {};
+  if (opts.className) node.className = opts.className;
+  if (opts.text !== undefined && opts.text !== null) node.textContent = String(opts.text);
+  if (opts.attrs) for (const k in opts.attrs) node.setAttribute(k, opts.attrs[k]);
+  if (opts.children) for (const c of opts.children) node.appendChild(c);
+  return node;
+}
+function text(s) { return document.createTextNode(s === undefined || s === null ? "" : String(s)); }
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+function empty(node, message) { clear(node); node.appendChild(el("div", { className: "empty", text: message })); }
+
+// ---- config / connection -------------------------------------------
+
+function getConfig() {
+  return { url: localStorage.getItem(LS_URL) || "", token: localStorage.getItem(LS_TOKEN) || "" };
+}
+function saveConfig(url, token) {
+  localStorage.setItem(LS_URL, url);
+  localStorage.setItem(LS_TOKEN, token);
+}
+function clearConfig() {
+  localStorage.removeItem(LS_URL);
+  localStorage.removeItem(LS_TOKEN);
+}
+
+function showConfigScreen(errorMessage) {
+  document.getElementById("dashboard").classList.add("hidden");
+  document.getElementById("config-screen").classList.remove("hidden");
+  const cfg = getConfig();
+  document.getElementById("cfg-url").value = cfg.url;
+  document.getElementById("cfg-token").value = "";
+  const errEl = document.getElementById("cfg-error");
+  if (errorMessage) {
+    errEl.textContent = errorMessage;
+    errEl.classList.remove("hidden");
+  } else {
+    errEl.classList.add("hidden");
+  }
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+}
+
+function showDashboard() {
+  document.getElementById("config-screen").classList.add("hidden");
+  document.getElementById("dashboard").classList.remove("hidden");
+}
+
+document.getElementById("cfg-save").addEventListener("click", () => {
+  const url = document.getElementById("cfg-url").value.trim().replace(/\/$/, "");
+  const token = document.getElementById("cfg-token").value.trim();
+  if (!url || !token) {
+    document.getElementById("cfg-error").textContent = "Completá URL y token.";
+    document.getElementById("cfg-error").classList.remove("hidden");
+    return;
+  }
+  saveConfig(url, token);
+  lastSequence = null;
+  showDashboard();
+  poll();
+});
+
+document.getElementById("reconfigure").addEventListener("click", () => {
+  showConfigScreen(null);
+});
+
+// ---- fetch loop -------------------------------------------------------
+
+function setConnPill(state, label) {
+  const dot = document.getElementById("conn-dot");
+  dot.className = "dot" + (state === "down" ? " down" : state === "stale" ? " stale" : "");
+  document.getElementById("conn-text").textContent = label;
+}
+
+function showDisconnectBanner(message) {
+  const b = document.getElementById("disconnect-banner");
+  b.textContent = message;
+  b.classList.add("show");
+}
+function hideDisconnectBanner() {
+  document.getElementById("disconnect-banner").classList.remove("show");
+}
+
+async function poll() {
+  const cfg = getConfig();
+  if (!cfg.url || !cfg.token) { showConfigScreen(null); return; }
+
+  let resp;
+  try {
+    resp = await fetch(cfg.url + "/v1/command-center/projection", {
+      headers: { "Authorization": "Bearer " + cfg.token },
+    });
+  } catch (networkErr) {
+    setConnPill("down", "desconectado");
+    const since = lastGoodSyncAt ? "última sincronización: " + lastGoodSyncAt : "sin sincronización previa";
+    showDisconnectBanner("No se pudo contactar al control plane en " + cfg.url + " (" + since + "). El último estado conocido sigue visible abajo.");
+    schedulePoll();
+    return;
+  }
+
+  if (resp.status === 401) {
+    showConfigScreen("Token inválido o expirado. Volvé a ingresarlo.");
+    return;
+  }
+  if (!resp.ok) {
+    setConnPill("down", "error " + resp.status);
+    showDisconnectBanner("El control plane respondió con un error (" + resp.status + "). El último estado conocido sigue visible abajo.");
+    schedulePoll();
+    return;
+  }
+
+  let projection;
+  try {
+    projection = await resp.json();
+  } catch (parseErr) {
+    setConnPill("down", "respuesta inválida");
+    showDisconnectBanner("La proyección recibida no es JSON válido.");
+    schedulePoll();
+    return;
+  }
+
+  hideDisconnectBanner();
+  lastGoodSyncAt = projection.generatedAt || new Date().toISOString();
+  setConnPill("ok", "conectado — " + (projection.health && projection.health.stream === "polling" ? "polling" : "en vivo"));
+
+  // Avoid unnecessary re-render when nothing changed (M8 B4).
+  if (projection.sequence !== lastSequence) {
+    lastSequence = projection.sequence;
+    try {
+      render(projection);
+    } catch (renderErr) {
+      // A payload shape the frontend doesn't recognize must never crash
+      // the page -- log visibly (console), keep the last good render on
+      // screen, and keep polling.
+      console.error("[command-center] unexpected projection shape", renderErr);
+    }
+  }
+
+  schedulePoll();
+}
+
+function schedulePoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(poll, POLL_MS);
+}
+
+// ---- rendering ----------------------------------------------------------
+
+function stageBadge(stage) {
+  return el("span", { className: "badge stage-" + (stage || "FAILED"), text: stage || "?" });
+}
+function severityBadge(sev) {
+  return el("span", { className: "badge sev-" + (sev || "P3"), text: sev || "?" });
+}
+function depBadge(statusValue) {
+  return el("span", { className: "badge dep-" + (statusValue || "unmet"), text: statusValue || "unmet" });
+}
+
+function renderAttention(projection) {
+  const container = document.getElementById("attention-list");
+  clear(container);
+  const items = [];
+
+  for (const gate of (projection.gates || [])) {
+    items.push(el("div", { className: "card attn", children: [
+      el("div", { className: "row", children: [
+        el("div", { children: [
+          el("span", { className: "badge", text: "gate: " + gate.kind }),
+          el("div", { className: "title", text: gate.summary }),
+          el("div", { className: "meta mono", text: "misión " + gate.missionId }),
+        ] }),
+        el("span", { className: "badge", text: "pendiente de autorización" }),
+      ] }),
+    ] }));
+  }
+  for (const bm of (projection.blockedMissions || [])) {
+    items.push(el("div", { className: "card attn", children: [
+      el("div", { className: "row", children: [
+        el("div", { children: [
+          el("span", { className: "badge", text: "bloqueada" }),
+          el("div", { className: "title mono", text: bm.missionId }),
+          el("div", { className: "meta", text: "estado previo: " + bm.priorState + (bm.lastBlockedClassification ? " · " + bm.lastBlockedClassification : "") }),
+        ] }),
+      ] }),
+    ] }));
+  }
+  for (const f of (projection.findings || [])) {
+    if (f.severity !== "P0") continue;
+    items.push(el("div", { className: "card attn", children: [
+      el("div", { className: "row", children: [
+        el("div", { children: [
+          severityBadge(f.severity),
+          el("div", { className: "title", text: f.summary }),
+          el("div", { className: "meta mono", text: "misión " + f.missionId + (f.file ? " · " + f.file : "") }),
+        ] }),
+      ] }),
+    ] }));
+  }
+
+  if (items.length === 0) {
+    empty(container, "Nada requiere tu atención en este momento.");
+  } else {
+    for (const item of items) container.appendChild(item);
+  }
+}
+
+function renderMissions(projection) {
+  const container = document.getElementById("missions-list");
+  clear(container);
+  const missions = projection.missions || [];
+  if (missions.length === 0) { empty(container, "No hay misiones."); return; }
+  for (const m of missions) {
+    const children = [
+      el("div", { className: "row", children: [
+        el("div", { className: "title mono", text: m.id }),
+        stageBadge(m.stage),
+      ] }),
+      el("div", { className: "meta", text: "fase: " + m.phase + (m.correctionRounds > 0 ? " · corrección #" + m.correctionRounds : "") }),
+      el("div", { className: "meta", text: "actualizado: " + m.updatedAt + " · " + (m.staleness || "NORMAL") }),
+    ];
+    if (m.publish && (m.publish.prUrl || m.publish.lastCiRun)) {
+      const parts = [];
+      if (m.publish.prUrl) parts.push("PR #" + m.publish.prNumber);
+      if (m.publish.lastCiRun) parts.push("CI: " + m.publish.lastCiRun.conclusion);
+      children.push(el("div", { className: "meta", text: parts.join(" · ") }));
+    }
+    if (m.knowledgeDerivationStatus) {
+      children.push(el("div", { className: "meta", text: "conocimiento: " + m.knowledgeDerivationStatus }));
+    }
+    container.appendChild(el("div", { className: "card", children }));
+  }
+}
+
+function renderObjectives(projection) {
+  const container = document.getElementById("objectives-list");
+  clear(container);
+  const objectives = projection.objectives || [];
+  if (objectives.length === 0) { empty(container, "No hay objetivos."); return; }
+  for (const o of objectives) {
+    const depItems = (o.decomposition || []).map((entry) => {
+      const line = el("li", { children: [
+        el("span", { text: entry.title + " " }),
+        depBadge(entry.dependencyStatus),
+      ] });
+      if (entry.dependsOn && entry.dependsOn.length > 0) {
+        line.appendChild(text(" (depende de " + entry.dependsOn.length + ")"));
+      }
+      if (entry.failedRootCause) {
+        line.appendChild(el("div", { className: "meta", text: "causa raíz del fallo: " + entry.failedRootCause }));
+      }
+      return line;
+    });
+    container.appendChild(el("div", { className: "card", children: [
+      el("div", { className: "row", children: [
+        el("div", { className: "title", text: o.summary }),
+        el("span", { className: "badge", text: o.status }),
+      ] }),
+      el("div", { className: "meta mono", text: o.id }),
+      el("ul", { className: "deps", children: depItems }),
+    ] }));
+  }
+}
+
+function renderFindings(projection) {
+  const container = document.getElementById("findings-list");
+  clear(container);
+  const findings = projection.findings || [];
+  if (findings.length === 0) { empty(container, "Sin hallazgos."); return; }
+  for (const f of findings) {
+    container.appendChild(el("div", { className: "card", children: [
+      el("div", { className: "row", children: [
+        el("div", { children: [
+          severityBadge(f.severity),
+          el("span", { className: "badge", text: f.category }),
+          el("div", { className: "title", text: f.summary }),
+          el("div", { className: "meta mono", text: "misión " + f.missionId + (f.file ? " · " + f.file + (f.lineRange ? ":" + f.lineRange : "") : "") }),
+        ] }),
+      ] }),
+    ] }));
+  }
+}
+
+function renderChecks(projection) {
+  const container = document.getElementById("checks-list");
+  clear(container);
+  const checks = projection.checks || [];
+  if (checks.length === 0) { empty(container, "Sin corridas de CI registradas."); return; }
+  const table = el("table", { children: [
+    el("tr", { children: [
+      el("th", { text: "Misión" }), el("th", { text: "Run" }), el("th", { text: "Resultado" }), el("th", { text: "Registrado" }),
+    ] }),
+  ] });
+  for (const c of checks) {
+    table.appendChild(el("tr", { children: [
+      el("td", { className: "mono", text: c.missionId }),
+      el("td", { className: "mono", text: c.runId }),
+      el("td", { text: c.conclusion }),
+      el("td", { className: "meta", text: c.recordedAt }),
+    ] }));
+  }
+  container.appendChild(table);
+}
+
+function renderAgents(projection) {
+  const container = document.getElementById("agents-list");
+  clear(container);
+  const agents = projection.agents || [];
+  if (agents.length === 0) { empty(container, "Ningún agente en curso ahora mismo."); return; }
+  for (const a of agents) {
+    container.appendChild(el("div", { className: "card", children: [
+      el("div", { className: "row", children: [
+        el("div", { children: [
+          el("span", { className: "badge", text: a.role }),
+          el("div", { className: "title mono", text: a.missionId }),
+          el("div", { className: "meta", text: (a.provider || "") + " " + (a.model || "") }),
+        ] }),
+        el("div", { className: "meta", text: "desde " + a.since }),
+      ] }),
+    ] }));
+  }
+}
+
+function renderKnowledge(projection) {
+  const container = document.getElementById("knowledge-list");
+  clear(container);
+  const knowledge = projection.knowledge || [];
+  if (knowledge.length === 0) { empty(container, "Sin derivaciones de conocimiento registradas."); return; }
+  for (const k of knowledge) {
+    container.appendChild(el("div", { className: "card", children: [
+      el("div", { className: "row", children: [
+        el("div", { className: "title mono", text: k.missionId }),
+        el("span", { className: "badge", text: k.status }),
+      ] }),
+    ] }));
+  }
+}
+
+function renderActivity(projection) {
+  const container = document.getElementById("activity-list");
+  clear(container);
+  const activity = projection.activity || [];
+  if (activity.length === 0) { empty(container, "Sin actividad reciente."); return; }
+  const table = el("table", { children: [
+    el("tr", { children: [
+      el("th", { text: "Cuándo" }), el("th", { text: "Misión" }), el("th", { text: "Rol" }), el("th", { text: "Evento" }), el("th", { text: "Estado" }),
+    ] }),
+  ] });
+  for (const ev of activity) {
+    table.appendChild(el("tr", { children: [
+      el("td", { className: "meta", text: ev.occurredAt }),
+      el("td", { className: "mono", text: ev.missionId }),
+      el("td", { text: ev.role || "—" }),
+      el("td", { text: ev.kind + (ev.toState ? " → " + ev.toState : "") }),
+      el("td", { text: ev.status || "—" }),
+    ] }));
+  }
+  container.appendChild(table);
+}
+
+function renderHealth(projection) {
+  const panel = document.getElementById("health-panel");
+  clear(panel);
+  const h = projection.health || {};
+  panel.appendChild(el("div", { className: "meta", text: "Chugel: " + (h.chugel || "desconocido") }));
+  panel.appendChild(el("div", { className: "meta", text: "Actualización: " + (h.stream || "polling") + " (esta página consulta cada " + (POLL_MS / 1000) + "s — no hay tiempo real)" }));
+  panel.appendChild(el("div", { className: "meta", text: "Última sincronización real: " + (h.lastSync || "—") }));
+}
+
+function render(projection) {
+  renderAttention(projection);
+  renderMissions(projection);
+  renderObjectives(projection);
+  renderFindings(projection);
+  renderChecks(projection);
+  renderAgents(projection);
+  renderKnowledge(projection);
+  renderActivity(projection);
+  renderHealth(projection);
+}
+
+// ---- boot ---------------------------------------------------------------
+
+(function boot() {
+  const cfg = getConfig();
+  if (!cfg.url || !cfg.token) {
+    showConfigScreen(null);
+  } else {
+    showDashboard();
+    poll();
+  }
+})();
+</script>
+</body>
+</html>

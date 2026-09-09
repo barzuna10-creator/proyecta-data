@@ -80,6 +80,27 @@ class RepositoryStatus:
     isolation_confirmed: bool
 
 
+# M8 (Command Center Live Operational Visibility): allow-listed
+# projection of record["publish"] -- exactly the three fields
+# jarvis/control_plane_server.py's projection needs (pr_url, pr_number,
+# ci_runs), never commit_sha/pushed_at (already-internal git-plumbing
+# detail with no operational-visibility purpose here). ci_runs is a
+# tuple, not a raw dict list, matching this module's own frozen-
+# dataclass discipline elsewhere.
+@dataclass(frozen=True)
+class CiRunStatus:
+    run_id: str
+    conclusion: str
+    checked_at: str
+
+
+@dataclass(frozen=True)
+class PublishStatus:
+    pr_url: str | None
+    pr_number: int | None
+    ci_runs: tuple[CiRunStatus, ...]
+
+
 # Verification Hardening V1, Pillar 4 (Structured Progress / Timeline
 # Projection): a read-only, purely-derived, deterministic merge of
 # state_history and dispatch_ledger -- both already durable Mission
@@ -226,6 +247,9 @@ class MissionStatus:
     human_action_required: str | None
     staleness: Staleness
     timeline: tuple[TimelineEvent, ...]
+    # M8: allow-listed projection of record["publish"] -- see
+    # PublishStatus's own docstring/field comment above.
+    publish: PublishStatus
     # M6 (BLOCKED-State Resume Wiring & Unified Recovery Contract): both
     # None unless `state` is "BLOCKED". `prior_state` is state_history's
     # own last from_state -- the same value jarvis/mission_write.py's
@@ -552,6 +576,25 @@ def project_mission_status(record: dict[str, Any], *, now: datetime.datetime | N
         human_action_required=_HUMAN_ACTION_BY_STATE.get(record["state"]),
         staleness=compute_staleness(record, now=now),
         timeline=compute_mission_timeline(record),
+        publish=_project_publish_status(record.get("publish") or {}),
         prior_state=prior_state,
         deploy_last_blocked_classification=deploy_last_blocked_classification,
+    )
+
+
+def _project_publish_status(publish: dict[str, Any]) -> PublishStatus:
+    pr_url = publish.get("pr_url")
+    pr_number = publish.get("pr_number")
+    ci_runs = tuple(
+        CiRunStatus(
+            run_id=str(entry["run_id"]),
+            conclusion=str(entry["conclusion"]),
+            checked_at=str(entry["checked_at"]),
+        )
+        for entry in (publish.get("ci_runs") or [])
+    )
+    return PublishStatus(
+        pr_url=None if pr_url is None else str(pr_url),
+        pr_number=None if pr_number is None else int(pr_number),
+        ci_runs=ci_runs,
     )
