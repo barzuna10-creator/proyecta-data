@@ -11,6 +11,7 @@ import time
 
 import db
 from db import conectar
+from api.business_context import router as business_context_router
 from api.repositorio_proyectos import apagar_executor_planos, recuperar_analisis_interrumpidos
 from api.routers import auth as auth_router, feedback as feedback_router, metricas as metricas_router, proyectos, sistemas_constructivos
 from api.identidad import obtener_propietario_id
@@ -154,6 +155,10 @@ app.include_router(feedback_router.router)
 app.include_router(proyectos.router)
 app.include_router(sistemas_constructivos.router)
 app.include_router(metricas_router.router)
+# M9 -- Read-Only Business Context Expansion: namespace nuevo, separado
+# de /admin/metricas/*, autenticado por BUSINESS_CONTEXT_TOKEN (ver
+# api/business_context.py). Nunca usa requerir_admin/ADMIN_USUARIO_IDS.
+app.include_router(business_context_router)
 
 # Etapa 2 del motor de búsqueda (ver busqueda.py): alterna entre el buscador
 # actual (LIKE + precio) y FTS5. Cambiar a False vuelve al buscador anterior
