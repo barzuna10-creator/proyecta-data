@@ -182,6 +182,8 @@ class ControlPlaneConfig:
         ci_poll_timeout_seconds: float = 1800.0, ci_poll_interval_seconds: float = 30.0,
         projection_cache_ttl_seconds: float = 2.0, projection_activity_limit: int = 100,
         projection_finding_summary_max_chars: int = 500,
+        business_context_base_url: str | None = None, business_context_token: str | None = None,
+        business_context_cache_ttl_seconds: float = 300.0,
     ):
         if host not in _LOOPBACK_HOSTS:
             raise ValueError("Control Plane must bind to a loopback host")
@@ -243,6 +245,18 @@ class ControlPlaneConfig:
         self.projection_cache_ttl_seconds = projection_cache_ttl_seconds
         self.projection_activity_limit = projection_activity_limit
         self.projection_finding_summary_max_chars = projection_finding_summary_max_chars
+        # M9 (Read-Only Business Context Expansion), Section 8: optional,
+        # independently defaulted like the zentra_* roots above -- unset
+        # means the `businessContext` projection key still appears (see
+        # _business_context_projection()) with `available: False` and an
+        # honest reason, never a crash, never a silently omitted key.
+        # Always routed through jarvis.business_context (Layer 2/3) --
+        # never a separate ad-hoc connection to the product backend.
+        if business_context_cache_ttl_seconds < 300.0:
+            raise ValueError("business_context_cache_ttl_seconds must be >= 300 (M9 Correction 9 of V3)")
+        self.business_context_base_url = business_context_base_url or None
+        self.business_context_token = business_context_token or None
+        self.business_context_cache_ttl_seconds = business_context_cache_ttl_seconds
 
 
 def load_config(env: dict | None = None) -> ControlPlaneConfig:
@@ -287,6 +301,9 @@ def load_config(env: dict | None = None) -> ControlPlaneConfig:
         projection_cache_ttl_seconds=projection_cache_ttl,
         projection_activity_limit=projection_activity_limit,
         projection_finding_summary_max_chars=projection_finding_summary_max_chars,
+        business_context_base_url=env.get("BUSINESS_CONTEXT_BASE_URL") or None,
+        business_context_token=env.get("BUSINESS_CONTEXT_TOKEN") or None,
+        business_context_cache_ttl_seconds=float(env.get("BUSINESS_CONTEXT_CACHE_TTL_SECONDS", "300")),
     )
 
 
@@ -1035,6 +1052,75 @@ def _active_agent_for_mission(mission_id: str, status) -> dict | None:
     }
 
 
+# M9 (Read-Only Business Context Expansion), Section 8: the small, fixed
+# set of "headline" queries exposed in the Command Center projection --
+# never the full allow-list, and never any query not already declared in
+# jarvis.business_context.QUERIES (fail-closed the same way Jarvis's own
+# conversational use of that module is).
+_BUSINESS_CONTEXT_HEADLINE_QUERIES = ("matching_failure_summary", "selection_accuracy")
+
+# Keyed by (base_url, token) so a config change (e.g. a rotated token)
+# gets a fresh client/cache rather than silently reusing a stale one --
+# never keyed on anything that could collide across genuinely different
+# deployments.
+_business_context_clients: dict[tuple[str, str], "Any"] = {}
+
+
+def _get_business_context_client(config: ControlPlaneConfig):
+    if not config.business_context_base_url or not config.business_context_token:
+        return None
+    key = (config.business_context_base_url, config.business_context_token)
+    client = _business_context_clients.get(key)
+    if client is None:
+        from jarvis.business_context import BusinessContextClient, UrllibBusinessContextTransport
+        transport = UrllibBusinessContextTransport(config.business_context_base_url)
+        client = BusinessContextClient(
+            transport, config.business_context_token,
+            cache_ttl_seconds=config.business_context_cache_ttl_seconds,
+        )
+        _business_context_clients[key] = client
+    return client
+
+
+def _business_context_projection(config: ControlPlaneConfig) -> dict:
+    """Additive M8 projection extension (M9 Section 8): the SAME Layer 2/3
+    (jarvis.business_context) the rest of Jarvis uses -- never a separate
+    ad-hoc connection to the product backend. `data_as_of`/`computed_at`
+    are ALWAYS present on every query entry, even when unavailable (both
+    null, with an explicit error_code, never silently omitted). No gate,
+    no new authority -- purely additional read-only projection content."""
+    from jarvis.business_context import BusinessContextError, observe
+
+    client = _get_business_context_client(config)
+    if client is None:
+        return {
+            "available": False,
+            "reason": "BUSINESS_CONTEXT_BASE_URL/BUSINESS_CONTEXT_TOKEN not configured",
+            "queries": {},
+        }
+    queries: dict[str, dict] = {}
+    for name in _BUSINESS_CONTEXT_HEADLINE_QUERIES:
+        try:
+            observado = observe(client, name)
+        except BusinessContextError:
+            queries[name] = {
+                "value": None, "data_as_of": None, "computed_at": _now(),
+                "freshness": "unavailable", "evidence_status": "sin_evidencia_suficiente",
+                "provenance": "OBSERVADO", "error_code": "BUSINESS_CONTEXT_UNAVAILABLE",
+            }
+            continue
+        queries[name] = {
+            "value": observado.value,
+            "data_as_of": observado.data_as_of,
+            "computed_at": observado.computed_at,
+            "freshness": observado.freshness,
+            "evidence_status": observado.evidence_status,
+            "provenance": observado.provenance,
+            "error_code": None,
+        }
+    return {"available": True, "reason": None, "queries": queries}
+
+
 def _build_projection(store: FileJarvisStore, config: ControlPlaneConfig) -> dict:
     listings = mission_query.list_missions()
     gates: list[dict] = []
@@ -1233,6 +1319,9 @@ def _build_projection(store: FileJarvisStore, config: ControlPlaneConfig) -> dic
         # M8, A6: existing per-mission knowledgeDerivationStatus,
         # surfaced as a flat top-level list -- no new pipeline.
         "knowledge": knowledge,
+        # M9 (Read-Only Business Context Expansion), Section 8: purely
+        # additive -- see _business_context_projection()'s own docstring.
+        "businessContext": _business_context_projection(config),
         "health": {"chugel": "connected", "stream": "polling", "latencyMs": 0, "lastSync": now},
     }
 

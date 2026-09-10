@@ -70,6 +70,14 @@ KNOWLEDGE_MODULES = {
     "jarvis.zentra_evidence",
 }
 SUBPROCESS_MODULES = {"repository_freshness.py", "zentra_github_query.py"}
+# M9 (Read-Only Business Context Expansion): a second, narrow, disclosed
+# exemption from test_no_subprocess_network_or_git_automation_symbols
+# below -- distinct from SUBPROCESS_MODULES (which the OTHER two
+# subprocess-specific tests below also require to actually use
+# subprocess; business_context.py never does). jarvis/business_context.py's
+# entire job is a read-only HTTP GET to a declared Layer 1 endpoint (see
+# that module's own docstring) -- it needs urllib, and only urllib.
+HTTP_TRANSPORT_MODULES = {"business_context.py"}
 SOLE_KNOWLEDGE_SEARCH_MODULES = {"mission_context.py", "knowledge_retrieval.py", "cli.py"}
 # Mission 005: the module that reads jarvis/zentra_sources_policy.json
 # (the SHA/ref/repo/allow-list/tier manifest) and calls
@@ -202,7 +210,7 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
     def test_no_subprocess_network_or_git_automation_symbols(self):
         forbidden_imports = {"subprocess", "socket", "urllib", "requests", "httpx"}
         for path in (ROOT / "jarvis").glob("*.py"):
-            if path.name in SUBPROCESS_MODULES:
+            if path.name in SUBPROCESS_MODULES or path.name in HTTP_TRANSPORT_MODULES:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             imports = set()
@@ -502,6 +510,155 @@ class JarvisFoundationBoundaryTests(unittest.TestCase):
                            "self._knowledge_store", "self._zentra_resolver",
                            "self._trusted_context_builder", "mission_coordinator", "chugel"):
             self.assertNotIn(forbidden, pre_auth_source)
+
+    # --- M9 (Read-Only Business Context Expansion) -----------------------
+    # Corrections 4/8/11/12/13: Emilio/Emma symmetry, verified structurally
+    # against the full AST of orchestrator/agent_invocation.py -- the
+    # module that builds BOTH build_emilio_invocation_request() and
+    # build_emma_invocation_request() (AGENT_INVOCATION_V1.md). Four
+    # independent checks, all against the complete file, not just the
+    # bodies of those two functions (Correction 8's own finding: the real
+    # precedent for asymmetric content already lives in a module shared by
+    # both, so a "module exclusive to Emilio" check would miss a violation
+    # placed inside build_emilio_invocation_request()'s own body).
+
+    def _agent_invocation_tree(self):
+        source = (ROOT / "orchestrator" / "agent_invocation.py").read_text(encoding="utf-8")
+        return source, ast.parse(source, filename="agent_invocation.py")
+
+    def test_agent_invocation_never_imports_business_context_statically(self):
+        """(a) no `import jarvis.business_context` / `from jarvis import
+        business_context` / `from jarvis.business_context import ...`,
+        anywhere in the file."""
+        _, tree = self._agent_invocation_tree()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                self.assertFalse(
+                    any(alias.name == "jarvis.business_context" or alias.name.startswith("jarvis.business_context.")
+                        for alias in node.names),
+                    ast.dump(node),
+                )
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == "jarvis" :
+                    self.assertFalse(
+                        any(alias.name == "business_context" for alias in node.names),
+                        ast.dump(node),
+                    )
+                else:
+                    self.assertNotEqual(module, "jarvis.business_context", ast.dump(node))
+
+    def test_agent_invocation_never_imports_business_context_dynamically(self):
+        """(b) no `importlib.import_module(...)`/`__import__(...)` call
+        whose literal argument contains "jarvis.business_context" or, as
+        a wider safety net against a future rename, "business_context"."""
+        _, tree = self._agent_invocation_tree()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            is_dynamic_import = (
+                (isinstance(func, ast.Name) and func.id == "__import__")
+                or (isinstance(func, ast.Attribute) and func.attr == "import_module")
+            )
+            if not is_dynamic_import:
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    self.assertNotIn("business_context", arg.value, ast.dump(node))
+
+    def test_agent_invocation_has_no_network_symbols(self):
+        """(c) absence of the EXACT symbol set
+        test_no_subprocess_network_or_git_automation_symbols already uses
+        (M9 Correction 12 of V5 -- not an approximation): a network call
+        embedded directly in this file could reproduce a business-context
+        lookup's effect without ever importing that module."""
+        forbidden_imports = {"subprocess", "socket", "urllib", "requests", "httpx"}
+        _, tree = self._agent_invocation_tree()
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module.split(".")[0])
+        self.assertTrue(forbidden_imports.isdisjoint(imports), imports)
+
+    def test_agent_invocation_never_accesses_business_context_attribute(self):
+        """(d) M9 Correction 13 of V5: no `ast.Attribute` node anywhere in
+        the file with `.attr == "business_context"`, regardless of what
+        object it is bound to -- closes the `import jarvis` (bare) +
+        `jarvis.business_context.foo()` attribute-access pattern without
+        needing to track import aliases."""
+        _, tree = self._agent_invocation_tree()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                self.assertNotEqual(node.attr, "business_context", ast.dump(node))
+
+    def test_agent_invocation_adversarial_forms_are_detected(self):
+        """Sanity check for the four helpers above: each adversarial form
+        they are meant to catch actually trips the corresponding check,
+        confirmed against synthetic sources (never against the real file,
+        which must stay clean)."""
+        static_cases = (
+            "import jarvis.business_context",
+            "from jarvis import business_context",
+            "from jarvis.business_context import observe",
+        )
+        for source in static_cases:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                found = False
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        found = found or any(
+                            alias.name == "jarvis.business_context" or alias.name.startswith("jarvis.business_context.")
+                            for alias in node.names
+                        )
+                    elif isinstance(node, ast.ImportFrom):
+                        module = node.module or ""
+                        if module == "jarvis":
+                            found = found or any(alias.name == "business_context" for alias in node.names)
+                        else:
+                            found = found or module == "jarvis.business_context"
+                self.assertTrue(found, source)
+
+        dynamic_cases = (
+            "importlib.import_module('jarvis.business_context')",
+            "__import__('jarvis.business_context')",
+            "importlib.import_module('business_context')",
+        )
+        for source in dynamic_cases:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                found = False
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    is_dynamic_import = (
+                        (isinstance(func, ast.Name) and func.id == "__import__")
+                        or (isinstance(func, ast.Attribute) and func.attr == "import_module")
+                    )
+                    if not is_dynamic_import:
+                        continue
+                    for arg in node.args:
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            found = found or "business_context" in arg.value
+                self.assertTrue(found, source)
+
+        network_case = "import requests\nimport socket\nimport httpx\nimport urllib.request\n"
+        tree = ast.parse(network_case)
+        forbidden_imports = {"subprocess", "socket", "urllib", "requests", "httpx"}
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name.split(".")[0] for alias in node.names)
+        self.assertFalse(forbidden_imports.isdisjoint(imports))
+
+        attribute_case = "import jarvis\njarvis.business_context.observe(client, 'x')"
+        tree = ast.parse(attribute_case)
+        found = any(isinstance(node, ast.Attribute) and node.attr == "business_context" for node in ast.walk(tree))
+        self.assertTrue(found)
 
 
 if __name__ == "__main__":
